@@ -6,7 +6,7 @@ A lightweight Vulkan-based computing engine for matrix operations.
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/hazeldiv/vk_compute
 
 # Clean previous builds
 make clean
