@@ -1,5 +1,6 @@
 #include <vulkan/vulkan.h>
 #include "command.h"
+#include "pipeline.h"
 #include <stdio.h>
 #include <stdlib.h>
 

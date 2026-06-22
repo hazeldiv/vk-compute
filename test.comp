@@ -6,7 +6,13 @@ layout(std430, set = 0, binding = 0) buffer DataBuffer {
     float values[];
 };
 
+layout(push_constant) uniform Block {
+    int a;
+    int b;
+    int c;
+} params;
+
 void main() {
     uint id = gl_LocalInvocationID.x;
-    values[id] = values[id] * values[id];
+    values[id] = values[id] * values[id] + float(params.b);
 }

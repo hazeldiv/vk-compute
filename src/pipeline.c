@@ -27,7 +27,7 @@ uint32_t* readShaderFile(const char filename[], size_t* outSize) {
     return buffer;
 }
 
-pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout, const char shaderPath[]) {
+pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout, const char shaderPath[], uint32_t pushConstantSize) {
     pipeline pipeline = {0};
     size_t shaderSize = 0;
     uint32_t* shaderCode = readShaderFile(shaderPath, &shaderSize);
@@ -45,12 +45,17 @@ pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout,
     }
     free(shaderCode);
 
+    VkPushConstantRange pushConstantRange = {0};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = pushConstantSize;
+
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {0};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.pPushConstantRanges = NULL;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL, &pipeline.layout) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to create pipeline layout.\n");
