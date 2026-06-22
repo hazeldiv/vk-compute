@@ -15,7 +15,7 @@ all: $(BIN_DIR)/$(TARGET)
 $(BIN_DIR)/$(TARGET): $(OBJS)
 	@if not exist $(BIN_DIR) mkdir $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
-	"$(VULKAN_SDK)\Bin\glslangValidator" -V test.comp -o $(BIN_DIR)/shader.spv
+	"$(VULKAN_SDK)\Bin\glslangValidator" -V MatMul.comp -o $(BIN_DIR)/MatMul.spv
 	@echo "Built successfully: $@.exe"
 	
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c

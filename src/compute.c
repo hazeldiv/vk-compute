@@ -18,6 +18,7 @@ VkFence createFence(device dev, command command);
 void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[varCount]);
 void startDispatch(command command);
 void endDispatch(command command);
+float* getData(int seed, int M, int N);
 
 void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
@@ -25,7 +26,7 @@ container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCou
     container VkContainer = {0};
     VkContainer.device = dev;
     VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffer);
-    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, "shader.spv", sizeof(int) * varCount);
+    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, "MatMul.spv", sizeof(int) * varCount);
     VkContainer.command = createCommand(VkContainer.device.device); 
 
     return VkContainer;
@@ -38,15 +39,22 @@ void compute() {
     for (int i=0;i<256;i++) {
         hostData[i] = (i%5 + 1) * 0.1f;
     }
-    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, hostData, sizeof(hostData));
-    container VkContainer = createVKContainer(dev, 1, &bufferA, 3);
+    float* A = getData(4321, 16, 128);
+    float* B = getData(58923, 128, 128);
+    printf("Sample data from A: %f %f %f %f\n", A[0], A[1], A[128], A[255]);
+    float* c = (float*)malloc(sizeof(float) * 16 * 128);
+    memset(c, 0, sizeof(float) * 16 * 128);
+    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * 16 * 128);
+    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * 128 * 128);
+    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * 16 * 128);
+    container VkContainer = createVKContainer(dev, 3, (buffer[]){bufferA, bufferB, bufferC}, 3);
 
     startDispatch(VkContainer.command);
-    dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, 1,1,1, 3, (int[]){1,2,3});
+    dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, 8,1,1, 3, (int[]){16,128,128});
     endDispatch(VkContainer.command);
 
     VkFence fence = createFence(dev, VkContainer.command);
-    float* outputResults = (float*)bufferA.mappedMemory;
+    float* outputResults = (float*)bufferC.mappedMemory;
     printf("Results from C Vulkan Dispatch: ");
     for (int i=0;i<256;i++) {
         printf("%f ", outputResults[i]);

@@ -1,0 +1,57 @@
+#version 450
+#define TS 16
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixB { float B[]; };
+layout(set = 0, binding = 2) writeonly buffer MatrixC { float C[]; };
+
+shared float Asub[TS][TS];
+shared float Bsub[TS][TS];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    
+    uint globalRow = gl_WorkGroupID.y * TS + row;
+    uint globalCol = gl_WorkGroupID.x * TS + col;
+    
+    float acc = 0.0;
+
+    uint numTiles = (dims.K + TS - 1) / TS;
+    for (uint t = 0; t < numTiles; t++) {
+        uint tiledColA = t * TS + col;
+        if (globalRow < dims.M && tiledColA < dims.K) {
+            Asub[row][col] = A[globalRow * dims.K + tiledColA];
+        } else {
+            Asub[row][col] = 0.0;
+        }
+
+        uint tiledRowB = t * TS + row;
+        if (tiledRowB < dims.K && globalCol < dims.N) {
+            Bsub[row][col] = B[tiledRowB * dims.N + globalCol];
+        } else {
+            Bsub[row][col] = 0.0;
+        }
+
+        Asub[row][col] = A[globalRow * dims.K + tiledColA];
+        Bsub[row][col] = B[tiledRowB * dims.N + globalCol];
+        barrier();
+
+        for (uint k = 0; k < TS; ++k) {
+            acc += Asub[row][k] * Bsub[k][col];
+        }
+        barrier();
+    }
+
+    if (globalRow < dims.M && globalCol < dims.N) {
+        C[globalRow * dims.N + globalCol] = acc;
+    }
+}
