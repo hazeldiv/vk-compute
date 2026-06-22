@@ -11,20 +11,20 @@
 
 VkFence createFence(device dev, command command);
 float* getData(int seed, int M, int N);
-void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence);
+void cleanup(device dev, buffer bufA, buffer bufB, buffer bufC, descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
-container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCount], int varCount, char shader[]) {
+container createVKContainer(device dev, int bufferCount, buffer buffers[], int varCount, char shader[]) {
     container VkContainer = {0};
     VkContainer.device = dev;
-    VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffer);
+    VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffers);
     VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, shader, sizeof(int) * varCount);
-    VkContainer.command = createCommand(VkContainer.device.device);
+    VkContainer.command = createCommand(dev.device);
 
     return VkContainer;
 }
 
 double compute() {
-    int M = 16;
+    int M = 1;
     int N = 4096*3;
     int K = 4096*3;
     int ts = M == 1 ? 256 : 16;
@@ -34,10 +34,14 @@ double compute() {
     memset(c, 0, sizeof(float) * M * N);
 
     device dev = createDevice();
-    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * M * K);
-    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * K * N);
-    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * M * N);
+
+    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * M * K, MEMORY_VRAM);
+    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * K * N, MEMORY_VRAM);
+    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * M * N, MEMORY_VRAM);
+
     buffer buffers[] = {bufferA, bufferB, bufferC};
+    createTransferAndCopy(dev.device, dev.queue, buffers, 3);
+
     container VkContainer = createVKContainer(dev, 3, buffers, 3, M == 1 ? "gemv.spv" : "gemm.spv");
 
     int pushConstants[] = {M, N, K};
@@ -62,17 +66,17 @@ double compute() {
     double elapsedMs = (double)((unsigned long)timestamps[1] - (unsigned long)timestamps[0]) * timestampPeriod / 1000000.0;
     printf("Shader execution time: %.3f ms\n", elapsedMs);
 
-    float* outputResults = (float*)bufferC.mappedMemory;
-
-    cleanup(dev, bufferA, VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, fence);
+    cleanup(dev, bufferA, bufferB, bufferC, VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, fence);
     return elapsedMs;
 }
 
-void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence) {
+void cleanup(device dev, buffer bufA, buffer bufB, buffer bufC, descriptor desc, pipeline pipe, command cmd, VkFence fence) {
     vkDestroyFence(dev.device, fence, NULL);
     destroyCommand(dev.device, cmd);
     destroyPipeline(dev.device, pipe);
     destroyDescriptor(dev.device, desc);
-    destroyBuffer(dev.device, buf);
+    destroyBuffer(dev.device, bufA);
+    destroyBuffer(dev.device, bufB);
+    destroyBuffer(dev.device, bufC);
     destroyDevice(dev);
 }
