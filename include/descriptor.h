@@ -9,7 +9,7 @@ typedef struct descriptor {
     VkDescriptorSet set;
 } descriptor;
 
-descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[bufferCount]);
+descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffers[]);
 void destroyDescriptor(VkDevice device, descriptor desc);
 
 #endif

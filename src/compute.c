@@ -25,8 +25,8 @@ container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCou
 
 double compute() {
     int M = 16;
-    int N = 4096;
-    int K = 4096;
+    int N = 4096*3;
+    int K = 4096*3;
     int ts = M == 1 ? 256 : 16;
     float* A = getData(4321, M, K);
     float* B = getData(58923, K, N);
@@ -37,15 +37,17 @@ double compute() {
     buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * M * K);
     buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * K * N);
     buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * M * N);
-    container VkContainer = createVKContainer(dev, 3, (buffer[]){bufferA, bufferB, bufferC}, 3, M == 1 ? "gemv.spv" : "gemm.spv");
+    buffer buffers[] = {bufferA, bufferB, bufferC};
+    container VkContainer = createVKContainer(dev, 3, buffers, 3, M == 1 ? "gemv.spv" : "gemm.spv");
 
+    int pushConstants[] = {M, N, K};
     startDispatch(VkContainer.command);
     if (M == 1) {
         printf("Dispatching GEMV with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (K + ts - 1)/ts,1,1, 3, (int[]){M,N,K});
+        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (K + ts - 1)/ts,1,1, 3, pushConstants);
     } else {
         printf("Dispatching GEMM with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, (int[]){M,N,K});
+        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, pushConstants);
     }
     endDispatch(VkContainer.command);
 
@@ -57,10 +59,7 @@ double compute() {
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(dev.physicalDevice, &properties);
     float timestampPeriod = properties.limits.timestampPeriod;
-
-    uint64_t elapsedNanoseconds = (timestamps[1] - timestamps[0]) * (uint64_t)timestampPeriod;
-    double elapsedMs = elapsedNanoseconds / 1000000.0;
-
+    double elapsedMs = (double)((unsigned long)timestamps[1] - (unsigned long)timestamps[0]) * timestampPeriod / 1000000.0;
     printf("Shader execution time: %.3f ms\n", elapsedMs);
 
     float* outputResults = (float*)bufferC.mappedMemory;

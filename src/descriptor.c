@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[bufferCount]) {
+descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[]) {
     descriptor descriptor = {0};
     VkDescriptorSetLayoutBinding bindings[bufferCount];
     
