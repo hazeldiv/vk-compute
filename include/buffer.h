@@ -11,6 +11,7 @@ typedef struct buffer {
     int64_t size;
 } buffer;
 
+buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* hostMemory, int64_t size);
 void destroyBuffer(VkDevice device, buffer buf);
 
 #endif

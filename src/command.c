@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-command createCommand(VkDevice device, VkPhysicalDevice physicalDevice) {
+command createCommand(VkDevice device) {
     command command = {0};
 
     VkCommandPoolCreateInfo poolInfo;

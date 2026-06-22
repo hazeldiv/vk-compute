@@ -9,17 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-device createDevice();
-buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* hostMemory, int64_t size);
-descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[bufferCount]);
-pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout, const char shaderPath[], uint32_t pushConstantSize);
-command createCommand(VkDevice device, VkPhysicalDevice physicalDevice);
 VkFence createFence(device dev, command command);
-void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[varCount]);
-void startDispatch(command command);
-void endDispatch(command command);
 float* getData(int seed, int M, int N);
-
 void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
 container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCount], int varCount, char shader[]) {
@@ -27,7 +18,7 @@ container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCou
     VkContainer.device = dev;
     VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffer);
     VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, shader, sizeof(int) * varCount);
-    VkContainer.command = createCommand(VkContainer.device.device, VkContainer.device.physicalDevice);
+    VkContainer.command = createCommand(VkContainer.device.device);
 
     return VkContainer;
 }

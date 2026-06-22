@@ -9,6 +9,7 @@ typedef struct device {
     VkPhysicalDevice physicalDevice;
 } device;
 
+device createDevice();
 void destroyDevice(device dev);
 
 #endif
