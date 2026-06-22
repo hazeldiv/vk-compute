@@ -25,7 +25,13 @@ void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, 
         );
     }
 
+    vkCmdResetQueryPool(command.buffer, command.queryPool, 0, TIMESTAMP_QUERY_COUNT);
+
+    vkCmdWriteTimestamp(command.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, command.queryPool, 0);
+
     vkCmdDispatch(command.buffer, (uint32_t)x, (uint32_t)y, (uint32_t)z);
+
+    vkCmdWriteTimestamp(command.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, command.queryPool, 1);
 }
 
 void startDispatch(command command) {

@@ -1,10 +1,9 @@
 #include <vulkan/vulkan.h>
 #include "command.h"
-#include "pipeline.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-command createCommand(VkDevice device) {
+command createCommand(VkDevice device, VkPhysicalDevice physicalDevice) {
     command command = {0};
 
     VkCommandPoolCreateInfo poolInfo;
@@ -28,9 +27,21 @@ command createCommand(VkDevice device) {
         exit(EXIT_FAILURE);
     }
 
+    VkQueryPoolCreateInfo queryPoolInfo;
+    queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    queryPoolInfo.queryCount = TIMESTAMP_QUERY_COUNT;
+    queryPoolInfo.flags = 0;
+
+    if (vkCreateQueryPool(device, &queryPoolInfo, NULL, &command.queryPool) != VK_SUCCESS) {
+        fprintf(stderr, "Error: Failed to create query pool.\n");
+        exit(EXIT_FAILURE);
+    }
+
     return command;
 }
 
 void destroyCommand(VkDevice device, command cmd) {
+    vkDestroyQueryPool(device, cmd.queryPool, NULL);
     vkDestroyCommandPool(device, cmd.pool, NULL);
 }

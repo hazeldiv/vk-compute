@@ -1,8 +1,10 @@
 #include <stdio.h>
 
-void compute();
+double compute();
 
 int main() {
-    compute();
+    for (int i = 0; i < 10; i++) {
+        compute();
+    }
     return 0;
 }

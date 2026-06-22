@@ -13,7 +13,7 @@ device createDevice();
 buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* hostMemory, int64_t size);
 descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[bufferCount]);
 pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout, const char shaderPath[], uint32_t pushConstantSize);
-command createCommand(VkDevice device);
+command createCommand(VkDevice device, VkPhysicalDevice physicalDevice);
 VkFence createFence(device dev, command command);
 void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[varCount]);
 void startDispatch(command command);
@@ -22,46 +22,60 @@ float* getData(int seed, int M, int N);
 
 void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
-container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCount], int varCount) {
+container createVKContainer(device dev, int bufferCount, buffer buffer[bufferCount], int varCount, char shader[]) {
     container VkContainer = {0};
     VkContainer.device = dev;
     VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffer);
-    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, "MatMul.spv", sizeof(int) * varCount);
-    VkContainer.command = createCommand(VkContainer.device.device); 
+    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, shader, sizeof(int) * varCount);
+    VkContainer.command = createCommand(VkContainer.device.device, VkContainer.device.physicalDevice);
 
     return VkContainer;
 }
 
-void compute() {
-    device dev = createDevice();
+double compute() {
+    int M = 16;
+    int N = 4096;
+    int K = 4096;
+    int ts = M == 1 ? 256 : 16;
+    float* A = getData(4321, M, K);
+    float* B = getData(58923, K, N);
+    float* c = (float*)malloc(sizeof(float) * M * N);
+    memset(c, 0, sizeof(float) * M * N);
 
-    float hostData[256];
-    for (int i=0;i<256;i++) {
-        hostData[i] = (i%5 + 1) * 0.1f;
-    }
-    float* A = getData(4321, 16, 128);
-    float* B = getData(58923, 128, 128);
-    printf("Sample data from A: %f %f %f %f\n", A[0], A[1], A[128], A[255]);
-    float* c = (float*)malloc(sizeof(float) * 16 * 128);
-    memset(c, 0, sizeof(float) * 16 * 128);
-    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * 16 * 128);
-    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * 128 * 128);
-    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * 16 * 128);
-    container VkContainer = createVKContainer(dev, 3, (buffer[]){bufferA, bufferB, bufferC}, 3);
+    device dev = createDevice();
+    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * M * K);
+    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * K * N);
+    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, c, sizeof(float) * M * N);
+    container VkContainer = createVKContainer(dev, 3, (buffer[]){bufferA, bufferB, bufferC}, 3, M == 1 ? "gemv.spv" : "gemm.spv");
 
     startDispatch(VkContainer.command);
-    dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, 8,1,1, 3, (int[]){16,128,128});
+    if (M == 1) {
+        printf("Dispatching GEMV with dimensions M=%d, N=%d, K=%d\n", M, N, K);
+        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (K + ts - 1)/ts,1,1, 3, (int[]){M,N,K});
+    } else {
+        printf("Dispatching GEMM with dimensions M=%d, N=%d, K=%d\n", M, N, K);
+        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, (int[]){M,N,K});
+    }
     endDispatch(VkContainer.command);
 
     VkFence fence = createFence(dev, VkContainer.command);
+
+    uint64_t timestamps[2];
+    vkGetQueryPoolResults(dev.device, VkContainer.command.queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_WAIT_BIT);
+
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(dev.physicalDevice, &properties);
+    float timestampPeriod = properties.limits.timestampPeriod;
+
+    uint64_t elapsedNanoseconds = (timestamps[1] - timestamps[0]) * (uint64_t)timestampPeriod;
+    double elapsedMs = elapsedNanoseconds / 1000000.0;
+
+    printf("Shader execution time: %.3f ms\n", elapsedMs);
+
     float* outputResults = (float*)bufferC.mappedMemory;
-    printf("Results from C Vulkan Dispatch: ");
-    for (int i=0;i<256;i++) {
-        printf("%f ", outputResults[i]);
-    }
-    printf("\n");
 
     cleanup(dev, bufferA, VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, fence);
+    return elapsedMs;
 }
 
 void cleanup(device dev, buffer buf, descriptor desc, pipeline pipe, command cmd, VkFence fence) {
