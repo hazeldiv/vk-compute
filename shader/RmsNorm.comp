@@ -1,0 +1,56 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_atomic_float : enable
+#define TS 256
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) buffer DataBuffer {
+    float x[];
+};
+
+layout(set = 0, binding = 1) readonly buffer GammaBuffer {
+    float gamma[];
+};
+
+shared float shared_sum; 
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    
+    float sum_sq = 0.0;
+
+    for (uint i = tid; i < TS; i += gl_WorkGroupSize.x) {
+        uint idx = row * TS + i;
+        float val = x[idx];
+        sum_sq += val * val;
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+
+    if (subgroupElect()) {
+        if (gl_SubgroupID == 0) {
+            shared_sum = 0.0;
+        }
+    }
+    barrier();
+    memoryBarrierBuffer();
+
+    if (subgroupElect()) {
+        atomicAdd(shared_sum, sum_sq);
+    }
+    barrier();
+    memoryBarrierBuffer();
+
+    float rms = sqrt((shared_sum / float(TS)) + EPSILON);
+    float inv_rms = 1.0 / rms;
+
+    for (uint i = tid; i < TS; i += gl_WorkGroupSize.x) {
+        uint idx = row * TS + i;
+        x[idx] = (x[idx] * inv_rms) * gamma[i];
+    }
+}

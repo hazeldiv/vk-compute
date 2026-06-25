@@ -25,12 +25,17 @@ void main() {
     for (uint t = 0; t < numTiles; t++) {
         uint tiledColA = t * TS + col;
         Asub[col] = A[tiledColA];
+
         barrier();
+        memoryBarrierBuffer();
+
         for (uint k=0;k < TS; k++) {
-            acc += B[(t * TS + k)*dims.K + globalCol];
+            acc += B[(t * TS + k)*dims.K + globalCol] * Asub[k];
         }
+        barrier();
+        memoryBarrierBuffer();
     }
-    barrier();
+    
     if (globalCol < dims.K) {
         C[globalCol] = acc;
     }

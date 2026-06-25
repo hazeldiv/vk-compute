@@ -124,3 +124,63 @@ void destroyBuffer(VkDevice device, buffer buf) {
     vkDestroyBuffer(device, buf.buffer, NULL);
     vkFreeMemory(device, buf.memory, NULL);
 }
+
+void readBuffer(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, buffer buf, void* output) {
+    if (buf.mappedMemory != NULL) {
+        memcpy(output, buf.mappedMemory, buf.size);
+    } else {
+        VkBufferCreateInfo stagingInfo = {0};
+        stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        stagingInfo.size = buf.size;
+        stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        VkBuffer staging;
+        vkCreateBuffer(device, &stagingInfo, NULL, &staging);
+        VkMemoryRequirements memReqs;
+        vkGetBufferMemoryRequirements(device, staging, &memReqs);
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+        uint32_t memType;
+        for (memType = 0; memType < memProperties.memoryTypeCount; memType++) {
+            if ((memReqs.memoryTypeBits & (1 << memType)) && (memProperties.memoryTypes[memType].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))) break;
+        }
+        VkMemoryAllocateInfo allocInfo = {0};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReqs.size;
+        allocInfo.memoryTypeIndex = memType;
+        VkDeviceMemory stagingMem;
+        vkAllocateMemory(device, &allocInfo, NULL, &stagingMem);
+        vkBindBufferMemory(device, staging, stagingMem, 0);
+        VkCommandBufferBeginInfo beginInfo = {0};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCommandPool pool;
+        VkCommandPoolCreateInfo poolInfo = {0};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = 0;
+        vkCreateCommandPool(device, &poolInfo, NULL, &pool);
+        VkCommandBuffer cmd;
+        VkCommandBufferAllocateInfo allocInfoCmd = {0};
+        allocInfoCmd.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfoCmd.commandPool = pool;
+        allocInfoCmd.commandBufferCount = 1;
+        vkAllocateCommandBuffers(device, &allocInfoCmd, &cmd);
+        vkBeginCommandBuffer(cmd, &beginInfo);
+        VkBufferCopy copyRegion = {0};
+        copyRegion.size = buf.size;
+        vkCmdCopyBuffer(cmd, buf.buffer, staging, 1, &copyRegion);
+        vkEndCommandBuffer(cmd);
+        VkSubmitInfo submitInfo = {0};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cmd;
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue);
+        vkDestroyCommandPool(device, pool, NULL);
+        void* mapped;
+        vkMapMemory(device, stagingMem, 0, buf.size, 0, &mapped);
+        memcpy(output, mapped, buf.size);
+        vkUnmapMemory(device, stagingMem);
+        vkDestroyBuffer(device, staging, NULL);
+        vkFreeMemory(device, stagingMem, NULL);
+    }
+}
