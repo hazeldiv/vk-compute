@@ -2,8 +2,9 @@
 #include "descriptor.h"
 #include "pipeline.h"
 #include "command.h"
+#include "dispatch.h"
 
-void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[varCount]) {
+void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[]) {
     vkCmdBindPipeline(command.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
 
     vkCmdBindDescriptorSets(
@@ -43,4 +44,14 @@ void startDispatch(command command) {
 
 void endDispatch(command command) {
     vkEndCommandBuffer(command.buffer);
+}
+
+dispatchContainer createDispatchContainer(device dev, int bufferCount, buffer buffers[], int varCount, char shader[]) {
+    dispatchContainer VkContainer = {0};
+    VkContainer.device = dev;
+    VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffers);
+    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, shader, sizeof(int) * varCount);
+    VkContainer.command = createCommand(dev.device);
+
+    return VkContainer;
 }

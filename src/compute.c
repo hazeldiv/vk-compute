@@ -4,7 +4,7 @@
 #include "descriptor.h"
 #include "pipeline.h"
 #include "command.h"
-#include "container.h"
+#include "dispatch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,16 +12,6 @@
 VkFence createFence(device dev, command command);
 float* getData(int seed, int M, int N);
 void cleanup(device dev, int bufferCount, buffer buffer[], descriptor desc, pipeline pipe, command cmd, VkFence fence);
-
-container createVKContainer(device dev, int bufferCount, buffer buffers[], int varCount, char shader[]) {
-    container VkContainer = {0};
-    VkContainer.device = dev;
-    VkContainer.descriptor = createDescriptor(dev.device, bufferCount, buffers);
-    VkContainer.pipeline = createPipeline(dev.device, VkContainer.descriptor.layout, shader, sizeof(int) * varCount);
-    VkContainer.command = createCommand(dev.device);
-
-    return VkContainer;
-}
 
 void transpose(const float* src, float* dest, int m, int n) {
     for (int i = 0; i < m; i++) {
@@ -53,7 +43,7 @@ double compute() {
     buffer buffers[] = {bufferA, bufferB, bufferC};
     createTransferAndCopy(dev.device, dev.queue, buffers, bufferCount);
 
-    container VkContainer = createVKContainer(dev, bufferCount, buffers, 3, M == 1 ? "gemv2.spv" : "gemm.spv");
+    dispatchContainer VkContainer = createDispatchContainer(dev, bufferCount, buffers, 3, M == 1 ? "gemv2.spv" : "gemm.spv");
 
     int pushConstants[] = {M, N, K};
     startDispatch(VkContainer.command);
