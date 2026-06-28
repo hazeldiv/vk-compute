@@ -11,7 +11,6 @@
 
 VkFence createFence(device dev, command command);
 float* getData(int seed, int M, int N);
-void cleanup(device dev, int bufferCount, buffer buffer[], descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
 void transpose(const float* src, float* dest, int m, int n) {
     for (int i = 0; i < m; i++) {
@@ -43,23 +42,23 @@ double compute() {
     buffer buffers[] = {bufferA, bufferB, bufferC};
     createTransferAndCopy(dev.device, dev.queue, buffers, bufferCount);
 
-    dispatchContainer VkContainer = createDispatchContainer(dev, bufferCount, buffers, 3, M == 1 ? "gemv2.spv" : "gemm.spv");
+    dispatchContainer container = createDispatchContainer(dev, bufferCount, buffers, 3, M == 1 ? "gemv2.spv" : "gemm.spv");
 
     int pushConstants[] = {M, N, K};
-    startDispatch(VkContainer.command);
+    startDispatch(container.command);
     if (M == 1) {
         printf("Dispatching GEMV with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (K + ts - 1)/ts,1,1, 3, pushConstants);
+        dispatch(container.descriptor, container.pipeline, container.command, (K + ts - 1)/ts,1,1, 3, pushConstants);
     } else {
         printf("Dispatching GEMM with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, pushConstants);
+        dispatch(container.descriptor, container.pipeline, container.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, pushConstants);
     }
-    endDispatch(VkContainer.command);
+    endDispatch(container.command);
 
-    VkFence fence = createFence(dev, VkContainer.command);
+    VkFence fence = createFence(dev, container.command);
 
     uint64_t timestamps[2];
-    vkGetQueryPoolResults(dev.device, VkContainer.command.queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_WAIT_BIT);
+    vkGetQueryPoolResults(dev.device, container.command.queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_WAIT_BIT);
 
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(dev.physicalDevice, &properties);
@@ -70,22 +69,14 @@ double compute() {
     float* output = (float*)malloc(sizeof(float) * M * N);
     readBuffer(dev.device, dev.physicalDevice, dev.queue, bufferC, output);
 
-    cleanup(dev, bufferCount, buffers, VkContainer.descriptor, VkContainer.pipeline, VkContainer.command, fence);
+    for (int i=0;i<bufferCount;i++) {
+        destroyBuffer(dev.device, buffers[i]);
+    }
+    destroyContainer(dev, container.descriptor, container.pipeline, container.command, fence);
     free(output);
     free(A);
     free(B);
     free(C);
     
     return elapsedMs;
-}
-
-void cleanup(device dev, int bufferCount, buffer buffer[], descriptor desc, pipeline pipe, command cmd, VkFence fence) {
-    vkDestroyFence(dev.device, fence, NULL);
-    destroyCommand(dev.device, cmd);
-    destroyPipeline(dev.device, pipe);
-    destroyDescriptor(dev.device, desc);
-    for (int i=0;i<bufferCount;i++) {
-        destroyBuffer(dev.device, buffer[i]);
-    }
-    destroyDevice(dev);
 }

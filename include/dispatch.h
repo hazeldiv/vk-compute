@@ -19,5 +19,6 @@ void startDispatch(command command);
 void endDispatch(command command);
 void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[]);
 dispatchContainer createDispatchContainer(device dev, int bufferCount, buffer buffers[], int varCount, char shader[]);
+void destroyContainer(device dev, descriptor desc, pipeline pipe, command cmd, VkFence fence);
 
 #endif

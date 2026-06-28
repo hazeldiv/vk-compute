@@ -55,3 +55,11 @@ dispatchContainer createDispatchContainer(device dev, int bufferCount, buffer bu
 
     return VkContainer;
 }
+
+void destroyContainer(device dev, descriptor desc, pipeline pipe, command cmd, VkFence fence) {
+    vkDestroyFence(dev.device, fence, NULL);
+    destroyCommand(dev.device, cmd);
+    destroyPipeline(dev.device, pipe);
+    destroyDescriptor(dev.device, desc);
+    destroyDevice(dev);
+}
