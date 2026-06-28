@@ -5,23 +5,11 @@
 #include "pipeline.h"
 #include "command.h"
 #include "dispatch.h"
+#include "data.h"
+#include "fence.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-VkFence createFence(device dev, command command);
-float* getData(int seed, int M, int N);
-
-void transpose(const float* src, float* dest, int m, int n) {
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            int src_idx = i * n + j;
-            int dest_idx = j * m + i;
-            
-            dest[dest_idx] = src[src_idx];
-        }
-    }
-}
 
 double compute() {
     int M = 1;

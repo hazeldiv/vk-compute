@@ -21,3 +21,14 @@ float* getData(int seed, int M, int N) {
 
     return A;
 }
+
+void transpose(const float* src, float* dest, int m, int n) {
+    for (int i = 0; i < m; i++) {
+        for (int j = 0; j < n; j++) {
+            int src_idx = i * n + j;
+            int dest_idx = j * m + i;
+            
+            dest[dest_idx] = src[src_idx];
+        }
+    }
+}
