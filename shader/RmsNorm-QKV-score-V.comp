@@ -6,6 +6,7 @@
 #define TS 256
 #define vec 4
 #define d_model 4096
+#define h_dim = 128
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -53,8 +54,7 @@ void main() {
     barrier();
     memoryBarrierBuffer();
 
-    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
-    float inv_rms = 1.0 / rms;
+    float inv_rms = 1.0/(sqrt((shared_sum / float(d_model)) + EPSILON));
 
     for (uint t = 0; t < numTiles; t++) {
         uint idx = t * TS + tid;
@@ -62,14 +62,15 @@ void main() {
     }
     barrier();
     memoryBarrierBuffer();
-    uint col = gl_LocalInvocationID.x;
-    uint globalCol = gl_WorkGroupID.x*TS + col;
-    
+
+    uint globalCol = gl_WorkGroupID.x*TS + tid;
+    if (tid >= h_dim) globalCol -= h_dim;
     float acc = 0.0;
-    for (uint i = 0; i < dims.K/vec; i++) {
-        uint wRow = i*4;
-        vec4 Wsub = {w[(wRow)*dims.K + globalCol], w[(wRow+1)*dims.K + globalCol], w[(wRow+2)*dims.K + globalCol], w[(wRow+3)*dims.K + globalCol]};
-            
+    for (uint i = 0; i < dims.K/vec; i+=2) {
+        uint QKVRow = i*vec;
+        uint XRow = i;
+        if (tid >= h_dim) QKVRow += vec;
+        vec4 Wsub = {w[(QKVRow)*dims.K + globalCol], w[(QKVRow+1)*dims.K + globalCol], w[(QKVRow+2)*dims.K + globalCol], w[(QKVRow+3)*dims.K + globalCol]};
         acc += dot(cache[i], Wsub);
     }
 

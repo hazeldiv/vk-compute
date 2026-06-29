@@ -10,37 +10,34 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 double compute() {
     int M = 1;
-    int N = 4096 * 3;
-    int K = 4096 * 3;
-    int ts = M == 1 ? 256 : 16;
-    float* A = getData(4321, M, K);
-    float* B = getData(58923, K, N);
-    float* C = (float*)malloc(sizeof(float) * M * N);
-    memset(C, 0, sizeof(float) * M * N);
+    int N = 4096;
+    int K = 4096;
+    int ts = 256;
+    float* input = getData(4321, M, K);
+    float* gamma = getData(58923, M, K);
+    float* weight = getData(936, K, N);
+    float* output = (float*)malloc(sizeof(float) * M * K);
+    memset(output, 0, sizeof(float) * M * N);
 
     device dev = createDevice();
-    buffer bufferA = createBuffer(dev.device, dev.physicalDevice, A, sizeof(float) * M * K, MEMORY_VRAM);
-    buffer bufferB = createBuffer(dev.device, dev.physicalDevice, B, sizeof(float) * K * N, MEMORY_VRAM);
-    buffer bufferC = createBuffer(dev.device, dev.physicalDevice, C, sizeof(float) * M * N, MEMORY_VRAM);
-    int bufferCount = 3;
+    buffer inputBuffer = createBuffer(dev.device, dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_VRAM);
+    buffer gammaBuffer = createBuffer(dev.device, dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_VRAM);
+    buffer weightBuffer = createBuffer(dev.device, dev.physicalDevice, weight, sizeof(float) * K * N, MEMORY_VRAM);
+    buffer outputBuffer = createBuffer(dev.device, dev.physicalDevice, output, sizeof(float) * M * K, MEMORY_VRAM);
+    int bufferCount = 4;
+    buffer buffers[] = {inputBuffer, gammaBuffer, weightBuffer, outputBuffer};
 
-    buffer buffers[] = {bufferA, bufferB, bufferC};
     createTransferAndCopy(dev.device, dev.queue, buffers, bufferCount);
 
-    dispatchContainer container = createDispatchContainer(dev, bufferCount, buffers, 3, M == 1 ? "gemv2.spv" : "gemm.spv");
-
+    dispatchContainer container = createDispatchContainer(dev, bufferCount, buffers, 3, "RmsNorm-GEMV.spv");
+    
     int pushConstants[] = {M, N, K};
     startDispatch(container.command);
-    if (M == 1) {
-        printf("Dispatching GEMV with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(container.descriptor, container.pipeline, container.command, (K + ts - 1)/ts,1,1, 3, pushConstants);
-    } else {
-        printf("Dispatching GEMM with dimensions M=%d, N=%d, K=%d\n", M, N, K);
-        dispatch(container.descriptor, container.pipeline, container.command, (N + ts - 1)/ts,(M + ts - 1)/ts,1, 3, pushConstants);
-    }
+    dispatch(container.descriptor, container.pipeline, container.command, (K + ts - 1)/ts,1,1, 3, pushConstants);
     endDispatch(container.command);
 
     VkFence fence = createFence(dev, container.command);
@@ -54,17 +51,33 @@ double compute() {
     double elapsedMs = (double)((unsigned long)timestamps[1] - (unsigned long)timestamps[0]) * timestampPeriod / 1000000.0;
     printf("Shader execution time: %.3f ms\n", elapsedMs);
 
-    float* output = (float*)malloc(sizeof(float) * M * N);
-    readBuffer(dev.device, dev.physicalDevice, dev.queue, bufferC, output);
+    float* outputVal = (float*)malloc(sizeof(float) * M * N);
+    readBuffer(dev.device, dev.physicalDevice, dev.queue, outputBuffer, outputVal);
+
+
+    int idx = 4090;
+    float rms = 0.0f;
+    for (int i=0;i<K;i++) {
+        rms += input[i] * input[i];
+    }
+    rms = sqrt(rms/(float)K) + 1e-5;
+
+    float acc = 0.0f;
+    for (int i=0;i<K;i++) {
+        acc += (input[i] / rms * gamma[i]) * weight[i*K + idx];
+    }
+
+    printf("Output from index %d: %f %f\n",idx, outputVal[idx], acc);
 
     for (int i=0;i<bufferCount;i++) {
         destroyBuffer(dev.device, buffers[i]);
     }
     destroyContainer(dev, container.descriptor, container.pipeline, container.command, fence);
+    free(outputVal);
+    free(input);
+    free(gamma);
+    free(weight);
     free(output);
-    free(A);
-    free(B);
-    free(C);
     
     return elapsedMs;
 }
