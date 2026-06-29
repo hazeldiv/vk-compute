@@ -1,6 +1,6 @@
 CC           := gcc
-CFLAGS	     := -O2 -Wall -Wextra -Iinclude -I"$(VULKAN_SDK)\Include"
-LDFLAGS      := -L"$(VULKAN_SDK)\Lib" -lvulkan-1 -luser32 -lgdi32
+CFLAGS	     := -O2 -Wall -Wextra -Iinclude -I"$(VULKAN_SDK)/Include"
+LDFLAGS      := -L"$(VULKAN_SDK)/Lib" -lvulkan-1 -luser32 -lgdi32
 TARGET       := main
 SRC_DIR      := src
 BUILD_DIR    := build
@@ -26,7 +26,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 
 $(BIN_DIR)/%.spv: $(SHADER_DIR)/%.comp
 	@if not exist $(BIN_DIR) mkdir $(BIN_DIR)
-	"$(VULKAN_SDK)\Bin\glslangValidator" -V --target-env vulkan1.1 $< -o $@
+	"$(VULKAN_SDK)/Bin/glslangValidator" -V --target-env vulkan1.1 $< -o $@
 
 -include $(DEPS)
 
@@ -34,7 +34,7 @@ run: all
 	@cd bin && main.exe
 
 clean:
-	@if exist bin del /Q /F bin\*
-	@if exist bin rmdir bin
-	@if exist build del /Q /F build\*
-	@if exist build rmdir build
+	@if exist bin del /Q /F $(BIN_DIR)\*
+	@if exist bin rmdir $(BIN_DIR)
+	@if exist build del /Q /F $(BUILD_DIR)\*
+	@if exist build rmdir $(BUILD_DIR)

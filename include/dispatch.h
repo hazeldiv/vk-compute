@@ -1,24 +1,28 @@
 #ifndef dispatch_h
 #define dispatch_h
+
 #include <vulkan/vulkan.h>
 #include "buffer.h"
-#include "command.h"
-#include "descriptor.h"
 #include "device.h"
+#include "descriptor.h"
 #include "pipeline.h"
+#include "session.h"
 
-typedef struct dispatchContainer {
-    buffer buffer;
-    command command;
-    descriptor descriptor;
-    device device;
-    pipeline pipeline;
-} dispatchContainer;
+#define MAX_OP_BUFFERS 8
+#define MAX_PUSH_CONSTANTS 8
 
-void startDispatch(command command);
-void endDispatch(command command);
-void dispatch(descriptor descriptor, pipeline pipeline, command command, int x, int y, int z, int varCount, int var[]);
-dispatchContainer createDispatchContainer(device dev, int bufferCount, buffer buffers[], int varCount, char shader[]);
-void destroyContainer(device dev, descriptor desc, pipeline pipe, command cmd, VkFence fence);
+typedef struct operation {
+    char shader[128];
+    buffer buffers[MAX_OP_BUFFERS];
+    int bufferCount;
+    int pushConstants[MAX_PUSH_CONSTANTS];
+    int pushConstantCount;
+    int dispatchX;
+    int dispatchY;
+    int dispatchZ;
+} operation;
+
+void execute(session s, operation ops[], int opCount);
+double getExecutionTime(session s);
 
 #endif
