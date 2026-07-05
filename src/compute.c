@@ -10,8 +10,8 @@
 
 
 double compute() {
-    int M = 16;
-    int N = 4096*60;
+    int M = 1;
+    int N = 4096*16;
     int K = 4096;
     float* input = getData(4321, M, K);
     float* gamma = getData(58923, M, K);
@@ -22,26 +22,16 @@ double compute() {
     session session = createSession();
 
     buffer inputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_VRAM);
-    buffer gammaBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_VRAM);
-    buffer weightBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, weight, sizeof(float) * K * N, MEMORY_RAM);
+    // buffer gammaBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_VRAM);
+    buffer weightBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, weight, sizeof(float) * K * N, MEMORY_VRAM);
     buffer outputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, output, sizeof(float) * M * N, MEMORY_VRAM);
 
-    buffer buffers[] = {inputBuffer, gammaBuffer, weightBuffer, outputBuffer};
-    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 4);
+    buffer buffers[] = {inputBuffer, weightBuffer, outputBuffer};
+    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 3);
 
     operation ops[] = {
-        // {
-        //     .shader = "RmsNorm-GEMV.spv",
-        //     .buffers = {inputBuffer, gammaBuffer, weightBuffer, outputBuffer},
-        //     .bufferCount = 4,
-        //     .pushConstants = {M, N, K},
-        //     .pushConstantCount = 3,
-        //     .dispatchX = (K + 255) / 256,
-        //     .dispatchY = 1,
-        //     .dispatchZ = 1
-        // },
         {
-            .shader = "gemm.spv",
+            .shader = "gemv2.spv",
             .buffers = {inputBuffer, weightBuffer, outputBuffer},
             .bufferCount = 3,
             .pushConstants = {M, N, K},
@@ -49,10 +39,652 @@ double compute() {
             .dispatchX = (N + 255) / 256,
             .dispatchY = 1,
             .dispatchZ = 1
-        }
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "gemv2.spv",
+            .buffers = {inputBuffer, weightBuffer, outputBuffer},
+            .bufferCount = 3,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 255) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        
+        
+        // {
+        //     .shader = "gemm.spv",
+        //     .buffers = {inputBuffer, weightBuffer, outputBuffer},
+        //     .bufferCount = 3,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 255) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
     };
 
-    execute(session, ops, 1);
+    execute(session, ops, 32);
     double elapsedMs = getExecutionTime(session);
     printf("Shader execution time: %.3f ms\n", elapsedMs);
 
@@ -80,7 +712,7 @@ double compute() {
     // printf("Output from index %d: %f %f\n", idx, outputVal[idx], result2);
 
     destroyBuffer(session.dev.device, inputBuffer);
-    destroyBuffer(session.dev.device, gammaBuffer);
+    // destroyBuffer(session.dev.device, gammaBuffer);
     destroyBuffer(session.dev.device, weightBuffer);
     destroyBuffer(session.dev.device, outputBuffer);
     destroySession(session);
