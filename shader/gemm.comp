@@ -44,11 +44,13 @@ void main() {
         Asub[row][col] = A[globalRow * dims.K + tiledColA];
         Bsub[row][col] = B[tiledRowB * dims.N + globalCol];
         barrier();
+        memoryBarrierBuffer();
 
         for (uint k = 0; k < TS; ++k) {
             acc += Asub[row][k] * Bsub[k][col];
         }
         barrier();
+        memoryBarrierBuffer();
     }
 
     if (globalRow < dims.M && globalCol < dims.N) {

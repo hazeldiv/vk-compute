@@ -30,14 +30,14 @@ void main() {
         memoryBarrierBuffer();
         for (uint k=0;k<TS; k++) {
             uint row = t * TS*vec + k*vec;
-            vec4 Bsub = {B[(row)*dims.K + globalCol], B[(row+1)*dims.K + globalCol], B[(row+2)*dims.K + globalCol], B[(row+3)*dims.K + globalCol]};
+            vec4 Bsub = {B[(row)*dims.N + globalCol], B[(row+1)*dims.N + globalCol], B[(row+2)*dims.N + globalCol], B[(row+3)*dims.N + globalCol]};
                 
             acc += dot(Asub[k], Bsub);
         }
         barrier();
         memoryBarrierBuffer();
     }
-    if (globalCol < dims.K) {
+    if (globalCol < dims.N) {
         C[globalCol] = acc;
     }
 }
