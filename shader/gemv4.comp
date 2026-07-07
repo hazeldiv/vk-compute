@@ -12,10 +12,10 @@ layout(push_constant) uniform Dimensions {
 } dims;
 
 layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
-layout(set = 0, binding = 1) readonly restrict buffer MatrixB { float B[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
 
-shared vec4 Asub[TS];
+shared vec4 Asub[2][TS];
 
 void main() {
     uint col = gl_LocalInvocationID.x;
@@ -24,16 +24,19 @@ void main() {
     
     float acc = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;
+    Asub[0][col] = A[col];
+    barrier();
     for (uint t = 0; t < numTiles; t++) {
         uint tiledColA = t * TS + col;
-        Asub[col] = A[tiledColA];
-        barrier();
-        for (uint k=0;k<TS; k++) {
-            uint row = t * TS*vec + k*vec;
-            vec4 Bsub = {B[(row)*dims.N + globalCol], B[(row+1)*dims.N + globalCol], B[(row+2)*dims.N + globalCol], B[(row+3)*dims.N + globalCol]};
-                
-            acc += dot(Asub[k], Bsub);
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (t+1 < numTiles) {
+            Asub[nxt][col] = A[(t+1)*TS + col];
         }
+        for (uint k=0;k<TS; k++) {
+            uint row = (t * TS + k) * dims.N;
+            acc += dot(Asub[cur][k], B[row + globalCol]);
+        }
+        
         barrier();
     }
     C[globalCol] = acc;

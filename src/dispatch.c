@@ -19,7 +19,7 @@ void execute(session s, operation ops[], int opCount) {
     vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 0);
 
     for (int i = 0; i < opCount; i++) {
-        operation* op = &ops[i];
+        operation* op = &ops[0];
 
         descriptor desc = createDescriptor(s.dev.device, op->bufferCount, op->buffers);
         pipeline pipe = createPipeline(s.dev.device, desc.layout, op->shader, sizeof(int) * op->pushConstantCount);

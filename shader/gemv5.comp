@@ -13,7 +13,7 @@ layout(push_constant) uniform Dimensions {
 } dims;
 
 layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
-layout(set = 0, binding = 1) readonly restrict buffer MatrixB { float B[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
 
 shared vec4 Asub[TS];
@@ -25,6 +25,7 @@ void main() {
     uint col = gl_LocalInvocationID.x % groupSize;
     uint globalCol = gl_WorkGroupID.x * groupSize + col;
     uint localId = gl_LocalInvocationID.x;
+    if (globalCol >= dims.N) C[0] = 123.0f;
 
     float acc = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;
@@ -32,34 +33,25 @@ void main() {
         uint tiledColA = t * TS + localId;
         Asub[localId] = A[tiledColA];
         barrier();
-        memoryBarrierBuffer();
         for (uint k = 0; k < TS / GB; k++) {
-            uint row = t * TS * vec + k * vec * GB + groupId * vec;
-            vec4 Bsub = {B[(row) * dims.N + globalCol], B[(row + 1) * dims.N + globalCol], B[(row + 2) * dims.N + globalCol], B[(row + 3) * dims.N + globalCol]};
-
-            acc += dot(Asub[k * GB + groupId], Bsub);
+            uint row = t * TS + k * GB + groupId;
+            acc += dot(Asub[k * GB + groupId], B[row * dims.N + globalCol]);
         }
         barrier();
-        memoryBarrierBuffer();
     }
 
     if (GB > 1) {
         uint stride = TS / 2;
-        uint n = 0;
-
         for (uint s = 0; stride >= groupSize; s++) {
             if (localId >= stride) {
                 accSum[localId - stride] = acc;
             }
             barrier();
-            memoryBarrierBuffer();
-            
             if (localId < stride) {
                 acc += accSum[localId];
             }
+            barrier();
             stride /= 2;
-            
-            n++;
         }
     }
 

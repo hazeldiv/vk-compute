@@ -8,6 +8,20 @@
 #include "dispatch.h"
 #include "data.h"
 
+void transpose_block4(const float *input, float *output, int M, int N) {
+    int out_N = N * 4;
+    for (int b = 0; b < M; b += 4) {
+        int out_row = b / 4;
+        for (int j = 0; j < N; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                int in_idx = (b + k) * N + j;
+                int out_idx = out_row * out_N + (j * 4) + k;
+                output[out_idx] = input[in_idx];
+            }
+        }
+    }
+}
+
 
 double compute() {
     int M = 1;
@@ -16,6 +30,8 @@ double compute() {
     float* input = getData(4321, M, K);
     float* gamma = getData(58923, M, K);
     float* weight = getData(936, K, N);
+    float* transposedBlock4Weight = (float*)malloc(sizeof(float) * K * N);
+    transpose_block4(weight, transposedBlock4Weight, K, N);
     float* output = (float*)malloc(sizeof(float) * M * N);
     memset(output, 0, sizeof(float) * M * N);
 
@@ -23,7 +39,7 @@ double compute() {
 
     buffer inputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_VRAM);
     buffer gammaBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_VRAM);
-    buffer weightBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, weight, sizeof(float) * K * N, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedBlock4Weight, sizeof(float) * K * N, MEMORY_VRAM);
     buffer outputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, output, sizeof(float) * M * N, MEMORY_VRAM);
 
     buffer buffers[] = {inputBuffer, gammaBuffer, weightBuffer, outputBuffer};
@@ -41,15 +57,15 @@ double compute() {
         //     .dispatchZ = 1
         // },
         {
-            .shader = "gemv3.spv",
+            .shader = "gemv4.spv",
             .buffers = {inputBuffer, weightBuffer, outputBuffer},
             .bufferCount = 3,
             .pushConstants = {M, N, K},
             .pushConstantCount = 3,
-            .dispatchX = (N + 63) / 64,
+            .dispatchX = (N + 256-1) / 256,
             .dispatchY = 1,
             .dispatchZ = 1
-        }
+        },
     };
 
     execute(session, ops, 1);
@@ -74,7 +90,7 @@ double compute() {
 
     float result2 = 0.0f;
     for (int i = 0; i < K; i++) {
-        result2 += input[i] * weight[i*K + idx];
+        result2 += input[i] * weight[i*N + idx];
     }
 
     printf("Output from index %d: %f %f\n", idx, outputVal[idx], result2);
@@ -90,6 +106,7 @@ double compute() {
     free(gamma);
     free(weight);
     free(output);
+    free(transposedBlock4Weight);
 
     return elapsedMs;
 }
