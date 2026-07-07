@@ -10,8 +10,8 @@
 
 
 double compute() {
-    int M = 16;
-    int N = 4096*60;
+    int M = 1;
+    int N = 4096;
     int K = 4096;
     float* input = getData(4321, M, K);
     float* gamma = getData(58923, M, K);
@@ -41,12 +41,12 @@ double compute() {
         //     .dispatchZ = 1
         // },
         {
-            .shader = "gemm.spv",
+            .shader = "gemv3.spv",
             .buffers = {inputBuffer, weightBuffer, outputBuffer},
             .bufferCount = 3,
             .pushConstants = {M, N, K},
             .pushConstantCount = 3,
-            .dispatchX = (N + 255) / 256,
+            .dispatchX = (N + 63) / 64,
             .dispatchY = 1,
             .dispatchZ = 1
         }
@@ -56,10 +56,10 @@ double compute() {
     double elapsedMs = getExecutionTime(session);
     printf("Shader execution time: %.3f ms\n", elapsedMs);
 
-    // float* outputVal = (float*)malloc(sizeof(float) * M * N);
-    // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, inputBuffer, outputVal);
+    float* outputVal = (float*)malloc(sizeof(float) * M * N);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, outputBuffer, outputVal);
 
-    // int idx = 0;
+    int idx = 0;
     // float rms = 0.0f;
     // for (int i = 0; i < K; i++) rms += input[i] * input[i];
     // rms = sqrt(rms / (float)K) + 1e-5;
@@ -72,12 +72,12 @@ double compute() {
     //     }
     // }
 
-    // float result2 = 0.0f;
-    // for (int i = 0; i < K; i++) {
-    //     result2 += result1[i] * weight[i*K + idx];
-    // }
+    float result2 = 0.0f;
+    for (int i = 0; i < K; i++) {
+        result2 += input[i] * weight[i*K + idx];
+    }
 
-    // printf("Output from index %d: %f %f\n", idx, outputVal[idx], result2);
+    printf("Output from index %d: %f %f\n", idx, outputVal[idx], result2);
 
     destroyBuffer(session.dev.device, inputBuffer);
     destroyBuffer(session.dev.device, gammaBuffer);
@@ -85,7 +85,7 @@ double compute() {
     destroyBuffer(session.dev.device, outputBuffer);
     destroySession(session);
 
-    // free(outputVal);
+    free(outputVal);
     free(input);
     free(gamma);
     free(weight);

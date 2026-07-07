@@ -1,6 +1,7 @@
 #version 450
 #define TS 256
 #define vec 4
+#define GB 4
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
@@ -12,15 +13,19 @@ layout(push_constant) uniform Dimensions {
 } dims;
 
 layout(set = 0, binding = 0) readonly buffer MatrixA { vec4 A[]; };
-layout(set = 0, binding = 1) readonly buffer MatrixB { vec4 B[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixB { float B[]; };
 layout(set = 0, binding = 2) writeonly buffer MatrixC { float C[]; };
 
 shared vec4 Asub[TS];
+shared float accSum[TS/2];
 
 void main() {
-    uint col = gl_LocalInvocationID.x;
-    uint globalCol = gl_WorkGroupID.x*TS + col;
-    
+    uint groupSize = TS / GB;
+    uint groupId = gl_LocalInvocationID.x / groupSize;
+    uint col = gl_LocalInvocationID.x % groupSize;
+    uint globalCol = groupId * groupSize + gl_WorkGroupID.x * TS;
+    uint localId = gl_LocalInvocationID.x;
+
     float acc = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;
     for (uint t = 0; t < numTiles; t++) {
@@ -28,14 +33,32 @@ void main() {
         Asub[col] = A[tiledColA];
         barrier();
         memoryBarrierBuffer();
-        for (uint k=0;k<TS; k++) {
-            vec4 Bsub = Asub[k] * B[(globalCol)*dims.K/vec + (t * TS + k)];
-            acc += dot(Asub[k], Bsub);
+        for (uint k = 0; k < TS / GB; k++) {
+            uint row = t * TS * vec + k * vec * GB + groupId * vec;
+            vec4 Bsub = {B[(row) * dims.N + globalCol], B[(row + 1) * dims.N + globalCol], B[(row + 2) * dims.N + globalCol], B[(row + 3) * dims.N + globalCol]};
+
+            acc += dot(Asub[k * GB + groupId], Bsub);
         }
         barrier();
         memoryBarrierBuffer();
     }
-    if (globalCol < dims.K) {
-        C[globalCol] = acc;
+
+    if (GB > 1) {
+        uint stride = TS / 2;
+        for (uint s = 0; stride >= groupSize; s++) {
+            if (localId >= stride) {
+                accSum[localId - stride] = acc;
+            }
+            barrier();
+            memoryBarrierBuffer();
+            if (localId < stride) {
+                acc += accSum[localId];
+            }
+            stride /= 2;
+        }
+    }
+
+    if (globalCol < dims.N && col < GB) {
+        C[col + gl_WorkGroupID.x * (TS/GB)] = accSum[col];
     }
 }
