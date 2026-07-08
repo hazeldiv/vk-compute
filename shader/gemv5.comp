@@ -25,7 +25,7 @@ void main() {
     uint col = gl_LocalInvocationID.x % groupSize;
     uint globalCol = gl_WorkGroupID.x * groupSize + col;
     uint localId = gl_LocalInvocationID.x;
-    if (globalCol >= dims.N) C[0] = 123.0f;
+    if (globalCol >= dims.N) return;
 
     float acc = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;

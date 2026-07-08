@@ -1,0 +1,84 @@
+#version 450
+#define TS 256
+#define vec 4
+#define GB 4
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+
+shared vec4 Asub[2][TS];
+shared float accSum[4][TS/2];
+
+void main() {
+    uint groupSize = TS / GB;
+    uint groupId = gl_LocalInvocationID.x / groupSize;
+    uint col = gl_LocalInvocationID.x % groupSize;
+    uint globalCol = gl_WorkGroupID.x * TS + col * 4;
+    uint c0 = globalCol;
+    uint c1 = globalCol + 1;
+    uint c2 = globalCol + 2;
+    uint c3 = globalCol + 3;
+    
+    uint localId = gl_LocalInvocationID.x;
+    if (c3 >= dims.N) return;
+
+    float acc[4] = {0.0, 0.0, 0.0, 0.0};
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+    Asub[0][localId] = A[localId];
+    barrier();
+    for (uint t = 0; t < numTiles; t++) {
+        uint tiledColA = t * TS + localId;
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (t+1 < numTiles) {
+            Asub[nxt][localId] = A[(t+1)*TS + localId];
+        }
+
+        #pragma unroll
+        for (uint k = 0; k < TS / GB; k++) {
+            uint row = t * TS + k * GB + groupId;
+            acc[0] += dot(Asub[cur][k * GB + groupId], B[row * dims.N + c0]);
+            acc[1] += dot(Asub[cur][k * GB + groupId], B[row * dims.N + c1]);
+            acc[2] += dot(Asub[cur][k * GB + groupId], B[row * dims.N + c2]);
+            acc[3] += dot(Asub[cur][k * GB + groupId], B[row * dims.N + c3]);
+        }
+        barrier();
+    }
+
+    if (GB > 1) {
+        uint stride = TS / 2;
+        for (uint s = 0; stride >= groupSize; s++) {
+            if (localId >= stride) {
+                accSum[0][localId - stride] = acc[0];
+                accSum[1][localId - stride] = acc[1];
+                accSum[2][localId - stride] = acc[2];
+                accSum[3][localId - stride] = acc[3];
+            }
+            barrier();
+            if (localId < stride) {
+                acc[0] += accSum[0][localId];
+                acc[1] += accSum[1][localId];
+                acc[2] += accSum[2][localId];
+                acc[3] += accSum[3][localId];
+            }
+            barrier();
+            stride /= 2;
+        }
+    }
+
+    if (c3 < dims.N && groupId == 0) {
+        C[c0] = acc[0];
+        C[c1] = acc[1];
+        C[c2] = acc[2];
+        C[c3] = acc[3];
+    }
+}
