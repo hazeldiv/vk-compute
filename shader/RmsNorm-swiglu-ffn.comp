@@ -1,0 +1,71 @@
+#version 450
+#define TS 256
+#define vec 4
+#define d_model 4096
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_atomic_float : enable
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 X[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { vec4 gate[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 up[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float Y[]; };
+
+shared vec4 cache[d_model/4];
+shared float shared_sum;
+const float EPSILON = 1e-5;
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    if (globalCol >= dims.N) return;
+    
+    float sum_sq = 0.0;
+    uint numTiles = (d_model + TS - 1) / TS / vec;
+    for (uint t = 0; t < numTiles; t++) {
+        uint idx = t * TS + col;
+        vec4 val = X[idx];
+        cache[idx] = val;
+        sum_sq += dot(val, val);
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+
+    if (subgroupElect()) {
+        if (gl_SubgroupID == 0) {
+            shared_sum = 0.0;
+        }
+        barrier();
+        atomicAdd(shared_sum, sum_sq);
+    }
+    barrier();
+    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
+    float inv_rms = 1.0 / rms;
+    
+    float gateResult = 0.0;
+    float upResult = 0.0;
+    uint baseRow = 0;
+    #pragma unroll
+    for (uint k=0;k<dims.K/vec; k++) {
+        vec4 tempA = cache[k] * inv_rms;
+        gateResult += dot(tempA, gate[baseRow + globalCol]);
+        upResult += dot(tempA, up[baseRow + globalCol]);
+        baseRow += dims.N;
+    }
+    
+    barrier();
+
+    gateResult /= (1.0 + exp2(-gateResult * 1.44269504));
+    Y[globalCol] = gateResult * upResult;
+}
