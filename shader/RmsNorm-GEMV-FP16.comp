@@ -19,7 +19,7 @@ const float EPSILON = 1e-5;
 
 layout(set = 0, binding = 0) buffer DataBuffer { vec4 x[]; };
 layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };
-layout(set = 0, binding = 2) readonly buffer weightBuffer { vec4 w[]; };
+layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
 
 
@@ -59,21 +59,9 @@ void main() {
     uint baseRow = 0;
     #pragma unroll
     for (uint k=0;k<dims.K/vec; k+=2) {
-        vec4 rawInput = w[baseRow + globalCol];
-
-        // 2. Reinterpret the 32-bit float bit patterns into 32-bit Unsigned Integers
-        uvec4 uintContainers = floatBitsToUint(rawInput);
-
-        // 3. Unpack each 32-bit container into 2 components of a standard 32-bit vec2.
-        // unpackHalf2x16 handles the bit-shifting and fp16->fp32 math natively.
-        vec2 pair0 = unpackHalf2x16(uintContainers.x); // Holds fp16 values #1 and #2
-        vec2 pair1 = unpackHalf2x16(uintContainers.y); // Holds fp16 values #3 and #4
-        vec2 pair2 = unpackHalf2x16(uintContainers.z); // Holds fp16 values #5 and #6
-        vec2 pair3 = unpackHalf2x16(uintContainers.w); // Holds fp16 values #7 and #8
-
-        // 4. Repack the results into two separate standard 32-bit vec4 vectors
-        vec4 outVectorA = vec4(pair0.x, pair0.y, pair1.x, pair1.y); // Values 1 to 4
-        vec4 outVectorB = vec4(pair2.x, pair2.y, pair3.x, pair3.y);
+        uvec4 rawInput = w[baseRow + globalCol];
+        vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+        vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
         acc += dot(cache[k] * inv_rms, outVectorA);
         acc += dot(cache[k+1] * inv_rms, outVectorB);
         baseRow += dims.N;

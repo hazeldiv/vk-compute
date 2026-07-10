@@ -12,7 +12,7 @@ layout(push_constant) uniform Dimensions {
 } dims;
 
 layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
-layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 B[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
 
 shared vec4 Asub[2][TS];
@@ -36,8 +36,13 @@ void main() {
         uint baseRow = t * TS * dims.N;
 
         #pragma unroll
-        for (uint k=0;k<TS; k++) {
-            acc += dot(Asub[cur][k], B[baseRow + globalCol]);
+        for (uint k=0;k<TS; k+=2) {
+            uvec4 rawInput = B[baseRow + globalCol];
+            vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+            vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+            acc += dot(Asub[cur][k], outVectorA);
+            acc += dot(Asub[cur][k+1], outVectorB);
             baseRow += dims.N;
         }
         

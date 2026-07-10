@@ -33,18 +33,16 @@ uint16_t float_to_fp16(float f) {
     uint32_t mant = x & 0x7FFFFF;
     if (exp <= -15) {
         if (exp < -24) {
-            return sign; // Too small, turn into 0
+            return sign;
         }
-        mant = mant | 0x800000; // Add implicit leading bit
+        mant = mant | 0x800000;
         return sign | (mant >> (-14 - exp));
     }
     
-    // Handle Overflow / Infinity
     if (exp >= 16) {
-        return sign | 0x7C00; // Set to Infinity
+        return sign | 0x7C00;
     }
     
-    // Normal numbers
     return sign | ((exp + 15) << 10) | (mant >> 13);
 }
 
@@ -57,10 +55,8 @@ float fp16_to_float(uint16_t h) {
 
     if (exp == 0) {
         if (mant == 0) {
-            // Plus or Minus Zero
             res_bits = sign;
         } else {
-            // Denormalized number - normalize it
             while (!(mant & 0x0400)) {
                 mant <<= 1;
                 exp--;
@@ -70,7 +66,6 @@ float fp16_to_float(uint16_t h) {
             res_bits = sign | ((exp - 15 + 127) << 23) | (mant << 13);
         }
     } else if (exp == 31) {
-        // Infinity or NaN
         res_bits = sign | (0xFF << 23) | (mant << 13);
     } else {
         // Normal number
@@ -78,7 +73,6 @@ float fp16_to_float(uint16_t h) {
     }
 
     float f;
-    // Safely copy bits to a float variable to avoid type-punning warnings
     memcpy(&f, &res_bits, sizeof(f));
     return f;
 }

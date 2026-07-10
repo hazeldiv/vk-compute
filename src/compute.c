@@ -20,7 +20,7 @@ double compute() {
     transpose_block4(weight, transposedBlock4Weight, K, N);
 
     uint16_t* weightFP16 = getDataFP16(936, K, N);
-    uint16_t* transposedBlock4WeightFP16 = (float*)malloc(sizeof(uint16_t) * K * N);
+    uint16_t* transposedBlock4WeightFP16 = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
     transpose_block4_FP16(weightFP16, transposedBlock4WeightFP16, K, N);
 
     float* output = (float*)malloc(sizeof(float) * M * N);
@@ -93,7 +93,7 @@ double compute() {
     // }
 
     float result2 = 0.0f;
-    float down = 0.0f;
+    // float down = 0.0f;
     for (int i = 0; i < K; i++) {
         result2 += (input[i] * gamma[i]) / rms * weight[i*N + idx] ;
     }
