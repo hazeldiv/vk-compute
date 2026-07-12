@@ -8,7 +8,7 @@
 #include "pipeline.h"
 #include "session.h"
 
-#define MAX_OP_BUFFERS 8
+#define MAX_OP_BUFFERS 16
 #define MAX_PUSH_CONSTANTS 8
 
 typedef struct operation {

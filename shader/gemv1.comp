@@ -1,0 +1,42 @@
+#version 450
+#define TS 512
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly buffer MatrixA { float A[]; };
+layout(set = 0, binding = 1) readonly buffer MatrixB { float B[]; };
+layout(set = 0, binding = 2) writeonly buffer MatrixC { float C[]; };
+
+shared float Asub[TS];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    
+    float acc = 0.0;
+
+    uint numTiles = (dims.K + TS - 1) / TS;
+    for (uint t = 0; t < numTiles; t++) {
+        uint tiledColA = t * TS + col;
+        Asub[col] = A[tiledColA];
+
+        barrier();
+        memoryBarrierBuffer();
+
+        for (uint k=0;k < TS; k++) {
+            acc += B[(t * TS + k)*dims.K + globalCol] * Asub[k];
+        }
+        barrier();
+        memoryBarrierBuffer();
+    }
+    
+    if (globalCol < dims.K) {
+        C[globalCol] = acc;
+    }
+}

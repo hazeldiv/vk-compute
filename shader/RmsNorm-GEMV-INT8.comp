@@ -21,21 +21,34 @@ layout(set = 0, binding = 0) buffer DataBuffer { vec4 x[]; };
 layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };
 layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 5) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
+shared vec4 scaleSub[d_model/vec];
+shared vec4 zeroSub[d_model/vec];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes); 
+}
 
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
     if (globalCol >= dims.N) return;
-    
+
+    uint scaleIdx = gl_WorkGroupID.x * dims.K / vec;
     float sum_sq = 0.0;
 
     for (uint t = 0; t < dims.K/vec; t+=TS) {
         uint idx = t + col;
         vec4 val = x[idx];
         cache[idx] = val * gamma[idx];
+        scaleSub[idx] = scale[idx + scaleIdx];
+        zeroSub[idx] = zeroPoint[idx + scaleIdx];
         sum_sq += dot(val, val);
     }
 
@@ -57,12 +70,17 @@ void main() {
     float acc = 0.0;
     uint baseRow = 0;
     #pragma unroll
-    for (uint k=0;k<dims.K/vec; k+=2) {
+    for (uint k=0;k<dims.K/vec; k+=4) {
         uvec4 rawInput = w[baseRow + globalCol];
-        vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
-        vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
-        acc += dot(cache[k] * inv_rms, outVectorA);
-        acc += dot(cache[k+1] * inv_rms, outVectorB);
+        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSub[k] - zeroSub[k];
+        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSub[k+1] - zeroSub[k+1];
+        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSub[k+2] - zeroSub[k+2];
+        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSub[k+3] - zeroSub[k+3];
+
+        acc += dot(cache[k] * inv_rms, w0);
+        acc += dot(cache[k+1] * inv_rms, w1);
+        acc += dot(cache[k+2] * inv_rms, w2);
+        acc += dot(cache[k+3] * inv_rms, w3);
         baseRow += dims.N;
     }
 

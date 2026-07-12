@@ -26,14 +26,13 @@ void main() {
     uint numTiles = (dims.K + TS - 1) / TS / vec;
     Asub[0][col] = A[col];
     barrier();
+     uint baseRow = 0;
     for (uint t = 0; t < numTiles; t++) {
         uint tiledColA = t * TS + col;
         uint cur = t & 1, nxt = (t+1) & 1;
         if (t+1 < numTiles) {
             Asub[nxt][col] = A[(t+1)*TS + col];
         }
-
-        uint baseRow = t * TS * dims.N;
 
         #pragma unroll
         for (uint k=0;k<TS; k+=2) {

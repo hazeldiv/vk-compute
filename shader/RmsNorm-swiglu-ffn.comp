@@ -36,7 +36,7 @@ void main() {
     for (uint t = 0; t < numTiles; t++) {
         uint idx = t * TS + col;
         vec4 val = X[idx];
-        cache[idx] = val;
+        cache[idx] = val * gamma[idx];
         sum_sq += dot(val, val);
     }
 

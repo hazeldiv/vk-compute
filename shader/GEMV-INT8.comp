@@ -1,0 +1,71 @@
+#version 450
+#define TS 256
+#define vec 4
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+
+shared vec4 aSub[2][TS];
+shared vec4 scaleSub[2][TS];
+shared vec4 zeroSub[2][TS];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes); 
+}
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    if (globalCol >= dims.N) return;
+    uint scaleIdx = gl_WorkGroupID.x * dims.K / vec + col;
+    
+    float acc = 0.0;
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+    aSub[0][col] = A[col];
+    scaleSub[0][col] = scale[scaleIdx];
+    zeroSub[0][col] = zeroPoint[scaleIdx];
+
+    barrier();
+    uint baseRow = 0;
+    
+    for (uint t = 0; t < numTiles; t++) {
+        uint tiledColA = t * TS + col;
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (t+1 < numTiles) {
+            aSub[nxt][col] = A[(t+1)*TS + col];
+            scaleSub[nxt][col] = scale[(t+1)*TS + scaleIdx];
+            zeroSub[nxt][col] = zeroPoint[(t+1)*TS + scaleIdx];
+        }
+
+        #pragma unroll
+        for (uint k=0;k<TS; k+=4) {
+            uvec4 rawInput = B[baseRow + globalCol];
+            vec4 w0 = unpackUint8x4(rawInput.x) * scaleSub[cur][k] - zeroSub[cur][k];
+            vec4 w1 = unpackUint8x4(rawInput.y) * scaleSub[cur][k+1] - zeroSub[cur][k+1];
+            vec4 w2 = unpackUint8x4(rawInput.z) * scaleSub[cur][k+2] - zeroSub[cur][k+2];
+            vec4 w3 = unpackUint8x4(rawInput.w) * scaleSub[cur][k+3] - zeroSub[cur][k+3];
+
+            acc += dot(aSub[cur][k], w0);
+            acc += dot(aSub[cur][k+1], w1);
+            acc += dot(aSub[cur][k+2], w2);
+            acc += dot(aSub[cur][k+3], w3);
+            baseRow += dims.N;
+        }
+        
+        barrier();
+    }
+    C[globalCol] = acc;
+}
