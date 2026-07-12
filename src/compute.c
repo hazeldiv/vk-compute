@@ -47,8 +47,6 @@ double compute() {
 
     buffer buffers[] = {inputBuffer, gammaBuffer, weightBufferFP16, weightBufferINT8, weightBuffer, gateBuffer, upBuffer, outputBuffer, scaleBuffer, zeroPointBuffer};
     createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 10);
-    // buffer buffers[] = {inputBuffer, gammaBuffer, weightBuffer, outputBuffer};
-    // createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 4);
 
     operation ops[] = {
         // {
@@ -180,6 +178,5 @@ double compute() {
     free(transposedWeightINT8);
     free(weightFP16);
 
-    // return elapsedMs;
     return 0;
 }
