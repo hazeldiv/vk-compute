@@ -164,10 +164,9 @@ QuantizedData getDataINT4(int seed, int M, int N) {
                 if (val > max_val) max_val = val;
             }
             
-            int block_idx = bj * M + i/8 * 8 + (i % 8 < 4 ? ((i % 8) * 2) : ((i % 4) * 2 + 1));
+            int block_idx = bj * M + i;
             q.scale[block_idx] = (max_val - min_val) / 15.0f;
             q.z[block_idx] = -min_val;
-            // if (bj == 0 && i < 20) printf("%d %d %f %f\n", i, block_idx, q.scale[block_idx], q.z[block_idx]);
 
             for (int k = 0; k < q.group_size; k += 2) {
                 int j0 = base_j + k;
@@ -200,20 +199,16 @@ void transpose_block16(const uint8_t *input, uint8_t *output, int M, int N, int 
     int out_N = N * 16;
     for (int b = 0; b < M; b += 128/data_type) {
         int out_row = b / (128/data_type);
-        // if (data_type == 4) printf("%d\n", b);
         for (int j = 0; j < N; j++) {
-            // if (data_type == 4 && b == 4064) printf("%d %d\n", b,j);
             for (int k = 0; k < 128/data_type; k++) {
                 if (data_type == 4) {
                     int in_idx = (b + k) * (N / 2) + j/2;
                     int out_idx = out_row * out_N + (j * 16) + (k / 2);
-                    // if (b == 4064 && j == 4095) printf("%d %d %d %d\n", out_N, in_idx,out_idx, input[out_idx]);
                     if (k%2==0) {
                         output[out_idx] = j%2==0 ? ((input[in_idx] & 0xF0) >> 4) : (input[in_idx] & 0x0F);
                     } else {
                         output[out_idx] = output[out_idx] | (j%2==0 ? (input[in_idx] & 0xF0) : ((input[in_idx] & 0x0F) << 4));
                     }
-                    // if (b == 4064 && j == 4095) printf("test\n");
                 } else {
                     for (int l=0; l < data_type/8; l++) {
                         int in_idx = (b + k) * (N * (data_type/8)) + j*(data_type/8) + l;

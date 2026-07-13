@@ -21,8 +21,8 @@ shared vec4 aSub[2][TS];
 shared vec4 scaleSub[2][TS];
 shared vec4 zeroSub[2][TS];
 
-const uvec4 lowShifts  = uvec4(0, 8, 16, 24);  
-const uvec4 highShifts = uvec4(4, 12, 20, 28);
+const uvec4 lowShifts  = uvec4(0, 4, 8, 12);  
+const uvec4 highShifts = uvec4(16, 20, 24, 28);
 
 vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
     return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
@@ -42,8 +42,7 @@ void main() {
 
     barrier();
     uint baseRow = 0;
-    if (globalCol != 0) return;
-    for (uint t = 0; t < 1; t++) {
+    for (uint t = 0; t < numTiles; t++) {
         uint tiledColA = t * TS + col;
         uint cur = t & 1, nxt = (t+1) & 1;
         if (t+1 < numTiles) {
@@ -72,15 +71,10 @@ void main() {
             acc += dot(aSub[cur][k+5], w5);
             acc += dot(aSub[cur][k+6], w6);
             acc += dot(aSub[cur][k+7], w7);
-            // if (globalCol == 0) C[0] = scaleSub[cur][k].x;
-            // return;
-            C[0] = w0.x;
-            C[1] = (rawInput.x >> 4) & 0x0F;
-            break;
             baseRow += dims.N;
         }
         
         barrier();
     }
-    // C[globalCol] = acc;
+    C[globalCol] = acc;
 }

@@ -27,12 +27,14 @@ layout(set = 0, binding = 6) readonly restrict buffer MatrixG { vec4 zeroPointGa
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared vec4 scaleSubGate[d_model/vec];
-shared vec4 zeroSubGate[d_model/vec];
+shared vec4 scaleCache[d_model/vec];
+shared vec4 zeroCache[d_model/vec];
 
-vec4 unpackUint8x4(uint packedData) {
-    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
-    return vec4(bytes); 
+const uvec4 lowShifts  = uvec4(0, 4, 8, 12);  
+const uvec4 highShifts = uvec4(16, 20, 24, 28);
+
+vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
+    return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
 }
 
 void main() {
@@ -47,8 +49,8 @@ void main() {
         uint idx = t + col;
         vec4 val = x[idx];
         cache[idx] = val * gamma[idx];
-        scaleSubGate[idx] = scaleGate[idx + scaleIdx];
-        zeroSubGate[idx] = zeroPointGate[idx + scaleIdx];
+        scaleCache[idx] = scaleGate[idx + scaleIdx];
+        zeroCache[idx] = zeroPointGate[idx + scaleIdx];
         // scaleSubUp[idx] = scaleGate[idx + scaleIdx];
         // zeroSubUp[idx] = zeroPointGate[idx + scaleIdx];
         sum_sq += dot(val, val);
@@ -71,31 +73,51 @@ void main() {
     float upResult = 0.0;
     uint baseRow = 0;
     #pragma unroll
-    for (uint k=0;k<dims.K/vec; k+=4) {
+    for (uint k=0;k<dims.K/vec; k+=8) {
         vec4 tempA0 = cache[k] * inv_rms;
         vec4 tempA1 = cache[k+1] * inv_rms;
         vec4 tempA2 = cache[k+2] * inv_rms;
         vec4 tempA3 = cache[k+3] * inv_rms;
+        vec4 tempA4 = cache[k+4] * inv_rms;
+        vec4 tempA5 = cache[k+5] * inv_rms;
+        vec4 tempA6 = cache[k+6] * inv_rms;
+        vec4 tempA7 = cache[k+7] * inv_rms;
 
         uvec4 rawInput = gate[baseRow + globalCol];
-        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSubGate[k] - zeroSubGate[k];
-        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSubGate[k+1] - zeroSubGate[k+1];
-        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSubGate[k+2] - zeroSubGate[k+2];
-        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSubGate[k+3] - zeroSubGate[k+3];
+        vec4 w0 = unpackInt4x4(rawInput.x, lowShifts) * scaleCache[k] - zeroCache[k];
+        vec4 w1 = unpackInt4x4(rawInput.x, highShifts) * scaleCache[k+1] - zeroCache[k+1];
+        vec4 w2 = unpackInt4x4(rawInput.y, lowShifts) * scaleCache[k+2] - zeroCache[k+2];
+        vec4 w3 = unpackInt4x4(rawInput.y, highShifts) * scaleCache[k+3] - zeroCache[k+3];
+        vec4 w4 = unpackInt4x4(rawInput.z, lowShifts) * scaleCache[k+4] - zeroCache[k+4];
+        vec4 w5 = unpackInt4x4(rawInput.z, highShifts) * scaleCache[k+5] - zeroCache[k+5];
+        vec4 w6 = unpackInt4x4(rawInput.w, lowShifts) * scaleCache[k+6] - zeroCache[k+6];
+        vec4 w7 = unpackInt4x4(rawInput.w, highShifts) * scaleCache[k+7] - zeroCache[k+7];
         gateResult += dot(tempA0, w0);
         gateResult += dot(tempA1, w1);
         gateResult += dot(tempA2, w2);
         gateResult += dot(tempA3, w3);
+        gateResult += dot(tempA4, w4);
+        gateResult += dot(tempA5, w5);
+        gateResult += dot(tempA6, w6);
+        gateResult += dot(tempA7, w7);
 
         rawInput = up[baseRow + globalCol];
-        w0 = unpackUint8x4(rawInput.x) * scaleSubGate[k] - zeroSubGate[k];
-        w1 = unpackUint8x4(rawInput.y) * scaleSubGate[k+1] - zeroSubGate[k+1];
-        w2 = unpackUint8x4(rawInput.z) * scaleSubGate[k+2] - zeroSubGate[k+2];
-        w3 = unpackUint8x4(rawInput.w) * scaleSubGate[k+3] - zeroSubGate[k+3];
+        w0 = unpackInt4x4(rawInput.x, lowShifts) * scaleCache[k] - zeroCache[k];
+        w1 = unpackInt4x4(rawInput.x, highShifts) * scaleCache[k+1] - zeroCache[k+1];
+        w2 = unpackInt4x4(rawInput.y, lowShifts) * scaleCache[k+2] - zeroCache[k+2];
+        w3 = unpackInt4x4(rawInput.y, highShifts) * scaleCache[k+3] - zeroCache[k+3];
+        w4 = unpackInt4x4(rawInput.z, lowShifts) * scaleCache[k+4] - zeroCache[k+4];
+        w5 = unpackInt4x4(rawInput.z, highShifts) * scaleCache[k+5] - zeroCache[k+5];
+        w6 = unpackInt4x4(rawInput.w, lowShifts) * scaleCache[k+6] - zeroCache[k+6];
+        w7 = unpackInt4x4(rawInput.w, highShifts) * scaleCache[k+7] - zeroCache[k+7];
         upResult += dot(tempA0, w0);
         upResult += dot(tempA1, w1);
         upResult += dot(tempA2, w2);
         upResult += dot(tempA3, w3);
+        upResult += dot(tempA4, w4);
+        upResult += dot(tempA5, w5);
+        upResult += dot(tempA6, w6);
+        upResult += dot(tempA7, w7);
 
         baseRow += dims.N;
     }

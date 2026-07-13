@@ -50,8 +50,21 @@ double compute() {
     buffer gateBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer upBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer outputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, output, sizeof(float) * M * N, MEMORY_RAM);
-    buffer buffers[] = {inputBuffer, gammaBuffer, weightBufferFP16, weightBufferINT8, weightBuffer, gateBuffer, upBuffer, outputBuffer, scaleBufferINT8, zeroPointBufferINT8, scaleBufferINT4, zeroPointBufferINT4};
-    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 12);
+    buffer buffers[] = {
+        inputBuffer, 
+        gammaBuffer, 
+        weightBufferFP16, 
+        weightBufferINT8, 
+        weightBufferINT4, 
+        weightBuffer, 
+        gateBuffer, 
+        upBuffer, 
+        outputBuffer, 
+        scaleBufferINT8, 
+        zeroPointBufferINT8, 
+        scaleBufferINT4, 
+        zeroPointBufferINT4};
+    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 13);
 
     operation ops[] = {
         // {
@@ -64,16 +77,16 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
-        {
-            .shader = "GEMV-INT4.spv",
-            .buffers = {inputBuffer, weightBufferINT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4},
-            .bufferCount = 5,
-            .pushConstants = {M, N, K},
-            .pushConstantCount = 3,
-            .dispatchX = (N + 255) / 256,
-            .dispatchY = 1,
-            .dispatchZ = 1
-        },
+        // {
+        //     .shader = "GEMV-INT4.spv",
+        //     .buffers = {inputBuffer, weightBufferINT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4},
+        //     .bufferCount = 5,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 255) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
         // {
         //     .shader = "RmsNorm-GEMV-FP16.spv",
         //     .buffers = {inputBuffer, gammaBuffer, weightBufferFP16, outputBuffer},
@@ -86,7 +99,17 @@ double compute() {
         // },
         // {
         //     .shader = "RmsNorm-GEMV-INT8.spv",
-        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, outputBuffer, scaleBuffer, zeroPointBuffer},
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8},
+        //     .bufferCount = 6,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 255) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
+        // {
+        //     .shader = "RmsNorm-GEMV-INT4.spv",
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4},
         //     .bufferCount = 6,
         //     .pushConstants = {M, N, K},
         //     .pushConstantCount = 3,
@@ -106,7 +129,7 @@ double compute() {
         // },
         // {
         //     .shader = "GEMV-INT8.spv",
-        //     .buffers = {inputBuffer, weightBufferINT8, outputBuffer, scaleBuffer, zeroPointBuffer},
+        //     .buffers = {inputBuffer, weightBufferINT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8},
         //     .bufferCount = 5,
         //     .pushConstants = {M, N, K},
         //     .pushConstantCount = 3,
@@ -136,7 +159,7 @@ double compute() {
         // },
         // {
         //     .shader = "RmsNorm-swiglu-ffn-INT8.spv",
-        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, weightBufferINT8, outputBuffer, scaleBuffer, zeroPointBuffer},
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, weightBufferINT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8},
         //     .bufferCount = 7,
         //     .pushConstants = {M, N, K},
         //     .pushConstantCount = 3,
@@ -144,14 +167,28 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
+        {
+            .shader = "RmsNorm-swiglu-ffn-INT4.spv",
+            .buffers = {inputBuffer, gammaBuffer, weightBufferINT4, weightBufferINT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4},
+            .bufferCount = 7,
+            .pushConstants = {M, N, K},
+            .pushConstantCount = 3,
+            .dispatchX = (N + 256-1) / 256,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
     };
     execute(session, ops, 1);
     double elapsedMs = getExecutionTime(session);
     printf("Shader execution time: %.3f ms\n", elapsedMs);
     float* outputVal = (float*)malloc(sizeof(float) * M * N);
+    float* outputVal_1 = (float*)malloc(sizeof(float) * K * N);
+    float* outputVal_2 = (float*)malloc(sizeof(float) * K * N);
     readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, outputBuffer, outputVal);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, gateBuffer, outputVal_1);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
     
-    int idx = 0;
+    int idx = 1000;
     float result = 0.0f;
 
     //gemv
@@ -159,7 +196,7 @@ double compute() {
     //     result += input[i] * weight[i*N + idx];
     // }
 
-    //gemv with rms norm
+    //gemv with pre rms norm
     // float rms = 0.0f;
     // for (int i = 0; i < K; i++) rms += input[i] * input[i];
     // rms = sqrt(rms / (float)K) + 1e-5;
@@ -167,38 +204,33 @@ double compute() {
     //     result += (input[i] * gamma[i]) / rms * weight[i*N + idx];
     // }
 
-    //swiglu ffn up & gate with rms norm
-    // float gate = 0.0f;
-    // float up = 0.0f;
-    // float rms = 0.0f;
-    // for (int i = 0; i < K; i++) rms += input[i] * input[i];
-    // rms = sqrt(rms / (float)K) + 1e-5;
-    // for (int i = 0; i < K; i++) {
-    //     gate += (input[i] * gamma[i]) / rms * weight[i*N + idx];
-    // }
-    // for (int i = 0; i < K; i++) {
-    //     up += (input[i] * gamma[i]) / rms * weight[i*N + idx];
-    // }
-    // gate /= (1.0 + exp2(-gate * 1.44269504));
-    // result = gate * up;
+    //swiglu ffn up & gate with pre rms norm
+    float gate = 0.0f;
+    float up = 0.0f;
+    float rms = 0.0f;
+    for (int i = 0; i < K; i++) rms += input[i] * input[i];
+    rms = sqrt(rms / (float)K) + 1e-5;
+    for (int i = 0; i < K; i++) {
+        gate += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+    }
+    for (int i = 0; i < K; i++) {
+        up += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+    }
+    gate /= (1.0 + exp2(-gate * 1.44269504));
+    result = gate * up;
 
     // printf("%d %f\n", weightINT4.data[0] >> 4, weightINT4.scale[0]);
 
-    float quantizedResult = 0.0f;
-    for (int i = 0; i < 3; i++) {
-        int idx = i/8 * 8 + (i % 8 < 4 ? ((i % 8) * 2) : ((i % 4) * 2 + 1));
-        // printf("%d\n", idx);
-        int q = (weightINT4.data[(i*N/2+idx)] >> 4) & 0x0F;
-        // printf("%d %f %f\n", q, weightINT4.scale[idx] , weightINT4.z[idx]);
-        float d_q = q * weightINT4.scale[idx] - weightINT4.z[idx];
-        quantizedResult += input[i] * d_q;
-        result += input[i] * weight[i*N + idx];
-        printf("%d %f %f %d %f %f\n", i, d_q, outputVal[i], q, weightINT4.scale[idx] , weightINT4.z[idx]);
-    }
+    // float quantizedResult = 0.0f;
+    // for (int i = 0; i < K; i++) {
+    //     int q = (weightINT4.data[(i*(N/2)+idx/2)] >> 4) & 0x0F;
+    //     float d_q = q * weightINT4.scale[i] - weightINT4.z[i];
+    //     quantizedResult += input[i] * d_q;
+    //     result += input[i] * weight[i*N + idx];
+    // }
 
 
-    // printf("Output from index %d: %f %f\n", idx, outputVal[idx], result);
-    // printf("Output from index %d: %f %f\n", idx, quantizedResult, result);
+    printf("Output from index %d: %f %f\n", idx, outputVal[idx], result);
 
     destroyBuffer(session.dev.device, inputBuffer);
     destroyBuffer(session.dev.device, gammaBuffer);
