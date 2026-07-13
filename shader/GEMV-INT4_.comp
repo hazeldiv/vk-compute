@@ -1,0 +1,118 @@
+#version 450
+#define TS 256
+#define GROUP_SIZE 256
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uint B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+
+shared vec4 aSub[2][TS];
+shared vec4 scaleSub[2][TS];
+shared vec4 zeroSub[2][TS];
+
+const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
+const uvec4 highShifts = uvec4(16, 20, 24, 28);
+
+// Unpack 8 int4 values from 4 bytes packed in a uint
+// Each byte contains 2 int4 values: upper nibble (q0) and lower nibble (q1)
+// Returns: q0 in first vec4, q1 in second vec4
+vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
+    // 1. Parallel right-shift across all 4 vector lanes
+    uvec4 bits = uvec4(packedComponent) >> shiftOffsets;
+    
+    // 2. Clear out adjacent bits (0xF = 1111 in binary)
+    bits = bits & uvec4(0xF);
+    
+    // 3. Branchless Sign Extension for INT4 (-8 to 7)
+    ivec4 signedInts = ivec4((bits ^ 0x8) - 0x8);
+    
+    // 4. Cast to FP32 vector
+    return vec4(signedInts);
+}
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x * TS + col;
+    if (globalCol >= dims.N) return;
+
+    // INT4: 2 values per byte, so stride = N/4 uints
+    uint stride = dims.N / 4;
+
+    // Scale index: one scale per GROUP_SIZE values
+    // For INT4 with vec4 scale elements, scale idx = workgroup * (K/4) + col
+    uint scaleIdx = gl_WorkGroupID.x * dims.K / 4 + col;
+
+    float acc = 0.0f;
+
+    // Number of tiles (matching original INT8 structure)
+    uint numTiles = (dims.K + TS - 1) / TS;
+
+    // Load first tile
+    aSub[0][col] = A[col];
+    scaleSub[0][col] = scale[scaleIdx];
+    zeroSub[0][col] = zeroPoint[scaleIdx];
+
+    barrier();
+    uint baseRow = 0;
+
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1;
+        uint nxt = (t + 1) & 1;
+
+        if (t + 1 < numTiles) {
+            aSub[nxt][col] = A[(t + 1) * TS + col];
+            scaleSub[nxt][col] = scale[(t + 1) * TS / 4 + scaleIdx];
+            zeroSub[nxt][col] = zeroPoint[(t + 1) * TS / 4 + scaleIdx];
+        }
+
+        // Original INT8 inner loop: k += 4, baseRow += dims.N
+        // INT4 inner loop: k += 8, baseRow += stride
+        #pragma unroll
+        for (uint k = 0; k < TS; k += 8) {
+            // Read packed int4 data for this k-group
+            // uint packed = B[baseRow + globalCol];
+
+            // // Unpack 8 int4 values (q0 = upper nibble, q1 = lower nibble)
+            // vec4 q0 = unpackUint4x4(packed, highShifts);
+            // vec4 q1 = unpackUint4x4(packed, lowShifts);
+
+            // // Dequantize: w = q * scale - zeroPoint
+            // vec4 w0 = q0.x * scaleSub[cur][k + 0] - zeroSub[cur][k + 0];
+            // vec4 w1 = q0.y * scaleSub[cur][k + 1] - zeroSub[cur][k + 1];
+            // vec4 w2 = q0.z * scaleSub[cur][k + 2] - zeroSub[cur][k + 2];
+            // vec4 w3 = q0.w * scaleSub[cur][k + 3] - zeroSub[cur][k + 3];
+            // vec4 w4 = q1.x * scaleSub[cur][k + 4] - zeroSub[cur][k + 4];
+            // vec4 w5 = q1.y * scaleSub[cur][k + 5] - zeroSub[cur][k + 5];
+            // vec4 w6 = q1.z * scaleSub[cur][k + 6] - zeroSub[cur][k + 6];
+            // vec4 w7 = q1.w * scaleSub[cur][k + 7] - zeroSub[cur][k + 7];
+
+            // // Accumulate dot products
+            // acc += dot(aSub[cur][k + 0], w0);
+            // acc += dot(aSub[cur][k + 1], w1);
+            // acc += dot(aSub[cur][k + 2], w2);
+            // acc += dot(aSub[cur][k + 3], w3);
+            // acc += dot(aSub[cur][k + 4], w4);
+            // acc += dot(aSub[cur][k + 5], w5);
+            // acc += dot(aSub[cur][k + 6], w6);
+            // acc += dot(aSub[cur][k + 7], w7);
+            // if (globalCol == 0) C[0] = q0.x;
+            // return;
+        }
+
+        baseRow += stride;
+        barrier();
+    }
+
+    // C[globalCol] = acc;
+}

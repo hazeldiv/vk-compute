@@ -143,10 +143,10 @@ QuantizedData getDataINT4(int seed, int M, int N) {
     q.group_size = 256;
     q.type       = QUANT_INT4;
 
-    int blocks_per_row = N / 256;
+    int blocks_per_row = N / q.group_size;
     int blocks_count   = M * blocks_per_row;
 
-    q.data   = (uint8_t*)malloc(sizeof(uint8_t) * M * (N / 2));
+    q.data   = (uint8_t*)malloc(sizeof(uint8_t) * M * N / 2);
     q.scale  = (float*)malloc(sizeof(float) * blocks_count);
     q.z      = (float*)malloc(sizeof(float) * blocks_count);
 
@@ -155,27 +155,28 @@ QuantizedData getDataINT4(int seed, int M, int N) {
             float min_val = 1e9f;
             float max_val = -1e9f;
 
-            int base_j = bj * 256;
-            for (int k = 0; k < 256; k++) {
+            int base_j = bj * q.group_size;
+            for (int k = 0; k < q.group_size; k++) {
                 int j = base_j + k;
                 if (j >= N) break;
                 float val = get_pseudo_random(i, j, seed);
                 if (val < min_val) min_val = val;
                 if (val > max_val) max_val = val;
             }
-
-            int block_idx = i * blocks_per_row + bj;
+            
+            int block_idx = bj * M + i/8 * 8 + (i % 8 < 4 ? ((i % 8) * 2) : ((i % 4) * 2 + 1));
             q.scale[block_idx] = (max_val - min_val) / 15.0f;
             q.z[block_idx] = -min_val;
+            // if (bj == 0 && i < 20) printf("%d %d %f %f\n", i, block_idx, q.scale[block_idx], q.z[block_idx]);
 
-            for (int k = 0; k < 256; k += 2) {
+            for (int k = 0; k < q.group_size; k += 2) {
                 int j0 = base_j + k;
                 int j1 = base_j + k + 1;
 
-                uint8_t q0 = (uint8_t)roundf((get_pseudo_random(i, j0, seed) - q.z[block_idx]) / q.scale[block_idx]);
-                uint8_t q1 = (j1 < N) ? (uint8_t)roundf((get_pseudo_random(i, j1, seed) - q.z[block_idx]) / q.scale[block_idx]) : 0;
+                uint8_t q0 = (uint8_t)roundf((get_pseudo_random(i, j0, seed) + q.z[block_idx]) / q.scale[block_idx]);
+                uint8_t q1 = (j1 < N) ? (uint8_t)roundf((get_pseudo_random(i, j1, seed) + q.z[block_idx]) / q.scale[block_idx]) : 0;
 
-                int packed_idx = i * (N / 2) + (bj * 256 + k) / 2;
+                int packed_idx = i * (N / 2) + (bj * q.group_size + k) / 2;
                 q.data[packed_idx] = ((q0 & 0x0F) << 4) | ((q1 & 0x0F) << 0);
             }
         }
@@ -199,15 +200,40 @@ void transpose_block16(const uint8_t *input, uint8_t *output, int M, int N, int 
     int out_N = N * 16;
     for (int b = 0; b < M; b += 128/data_type) {
         int out_row = b / (128/data_type);
+        // if (data_type == 4) printf("%d\n", b);
         for (int j = 0; j < N; j++) {
+            // if (data_type == 4 && b == 4064) printf("%d %d\n", b,j);
             for (int k = 0; k < 128/data_type; k++) {
-                for (int l=0; l < data_type/8; l++) {
-                    int in_idx = (b + k) * (N * (data_type/8)) + j*(data_type/8) + l;
-                    int out_idx = out_row * out_N + (j * 16) + (k*(data_type/8)) + l;
-                    output[out_idx] = input[in_idx];
+                if (data_type == 4) {
+                    int in_idx = (b + k) * (N / 2) + j/2;
+                    int out_idx = out_row * out_N + (j * 16) + (k / 2);
+                    // if (b == 4064 && j == 4095) printf("%d %d %d %d\n", out_N, in_idx,out_idx, input[out_idx]);
+                    if (k%2==0) {
+                        output[out_idx] = j%2==0 ? ((input[in_idx] & 0xF0) >> 4) : (input[in_idx] & 0x0F);
+                    } else {
+                        output[out_idx] = output[out_idx] | (j%2==0 ? (input[in_idx] & 0xF0) : ((input[in_idx] & 0x0F) << 4));
+                    }
+                    // if (b == 4064 && j == 4095) printf("test\n");
+                } else {
+                    for (int l=0; l < data_type/8; l++) {
+                        int in_idx = (b + k) * (N * (data_type/8)) + j*(data_type/8) + l;
+                        int out_idx = out_row * out_N + (j * 16) + (k*(data_type/8)) + l;
+                        output[out_idx] = input[in_idx];
+                    }
                 }
-                
             }
         }
+    }
+}
+
+void free_quantized_data(QuantizedData q) {
+    if (q.data) {
+        free(q.data);
+    }
+    if (q.scale) {
+        free(q.scale);
+    }
+    if (q.z) {
+        free(q.z);
     }
 }
