@@ -1,0 +1,110 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define TS 256
+#define vec 4
+#define d_model 4096
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+    uint tokenIdx;
+} param;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) buffer DataBuffer { vec4 x[]; };
+layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
+layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 5) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+layout(set = 0, binding = 6) readonly buffer thetaBuffer { float theta[]; };
+
+
+shared float shared_sum;
+shared vec4 cache[d_model/vec];
+shared vec4 scaleSub[d_model/vec];
+shared vec4 zeroSub[d_model/vec];
+shared float sub_sums[TS / 64];
+shared float shared_rope[64];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes); 
+}
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    if (globalCol >= param.N) return;
+
+    uint scaleIdx = gl_WorkGroupID.x * param.K / vec;
+    float sum_sq = 0.0;
+
+    for (uint t = 0; t < param.K/vec; t+=TS) {
+        uint idx = t + col;
+        vec4 val = x[idx];
+        cache[idx] = val * gamma[idx];
+        scaleSub[idx] = scale[idx + scaleIdx];
+        zeroSub[idx] = zeroPoint[idx + scaleIdx];
+        sum_sq += dot(val, val);
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+    if (subgroupElect()) {
+        sub_sums[gl_SubgroupID] = sum_sq;
+    }
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
+        }
+        shared_sum = final_sum;
+    }
+    barrier();
+    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
+    float inv_rms = 1.0 / rms;
+    
+    float acc = 0.0;
+    uint baseRow = 0;
+    #pragma unroll
+    for (uint k=0;k<param.K/vec; k+=4) {
+        uvec4 rawInput = w[baseRow + globalCol];
+        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSub[k] - zeroSub[k];
+        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSub[k+1] - zeroSub[k+1];
+        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSub[k+2] - zeroSub[k+2];
+        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSub[k+3] - zeroSub[k+3];
+
+        acc += dot(cache[k] * inv_rms, w0);
+        acc += dot(cache[k+1] * inv_rms, w1);
+        acc += dot(cache[k+2] * inv_rms, w2);
+        acc += dot(cache[k+3] * inv_rms, w3);
+        baseRow += param.N;
+    }
+
+    if (col < 64) {
+        shared_rope[col] = theta[col];
+    }
+    barrier();
+    if (col < 64) {
+        float angle = param.tokenIdx * theta[col/2];
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        if (col%2 == 0) {
+            acc = acc * cos_a - shared_rope[col+1] * sin_a;
+        } else {
+            acc = shared_rope[col-1] * sin_a + acc * cos_a;
+        }
+    }
+
+    y[globalCol] = acc;
+}
