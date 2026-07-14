@@ -24,11 +24,16 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { uvec4 up[]; };
 layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float y[]; };
 layout(set = 0, binding = 5) readonly restrict buffer MatrixF { vec4 scaleGate[]; };
 layout(set = 0, binding = 6) readonly restrict buffer MatrixG { vec4 zeroPointGate[]; };
+layout(set = 0, binding = 7) readonly restrict buffer MatrixH { vec4 scaleUp[]; };
+layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 zeroPointUp[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared vec4 scaleSubGate[d_model/vec];
-shared vec4 zeroSubGate[d_model/vec];
+shared vec4 scaleSubCacheGate[2][TS];
+shared vec4 zeroSubCacheGate[2][TS];
+shared vec4 scaleSubCacheUp[2][TS];
+shared vec4 zeroSubCacheUp[2][TS];
+shared float sub_sums[TS / 64];
 
 vec4 unpackUint8x4(uint packedData) {
     uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
@@ -39,7 +44,7 @@ void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
     if (globalCol >= dims.N) return;
-    uint scaleIdx = gl_WorkGroupID.x * dims.K / vec;
+    uint blockIdx = gl_WorkGroupID.x * dims.K / vec + col;
     
     float sum_sq = 0.0;
     uint numTiles = (d_model + TS - 1) / TS / vec;
@@ -47,51 +52,75 @@ void main() {
         uint idx = t + col;
         vec4 val = x[idx];
         cache[idx] = val * gamma[idx];
-        scaleSubGate[idx] = scaleGate[idx + scaleIdx];
-        zeroSubGate[idx] = zeroPointGate[idx + scaleIdx];
-        // scaleSubUp[idx] = scaleGate[idx + scaleIdx];
-        // zeroSubUp[idx] = zeroPointGate[idx + scaleIdx];
         sum_sq += dot(val, val);
     }
 
     sum_sq = subgroupAdd(sum_sq);
-
     if (subgroupElect()) {
-        if (gl_SubgroupID == 0) {
-            shared_sum = 0.0;
-        }
-        barrier();
-        atomicAdd(shared_sum, sum_sq);
+        sub_sums[gl_SubgroupID] = sum_sq;
     }
     barrier();
+
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
+        }
+        shared_sum = final_sum;
+    }
+    barrier();
+
     float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
     float inv_rms = 1.0 / rms;
+    scaleSubCacheGate[0][col] = scaleGate[blockIdx];
+    zeroSubCacheGate[0][col] = zeroPointGate[blockIdx];
+    scaleSubCacheUp[0][col] = scaleUp[blockIdx];
+    zeroSubCacheUp[0][col] = zeroPointUp[blockIdx];
+    blockIdx += TS;
+    uint blockCount = 0;
+    uint cur = 0;
     
     float gateResult = 0.0;
     float upResult = 0.0;
     uint baseRow = 0;
     #pragma unroll
     for (uint k=0;k<dims.K/vec; k+=4) {
+        uint curBlockIdx = k%TS;
+        if (curBlockIdx == 0) {
+            barrier();
+            cur = blockCount & 1;
+            if (k < dims.K/vec - TS) {
+                uint nxt = (blockCount+1) & 1;
+                scaleSubCacheGate[nxt][col] = scaleGate[blockIdx];
+                zeroSubCacheGate[nxt][col] = zeroPointGate[blockIdx];
+                scaleSubCacheUp[nxt][col] = scaleUp[blockIdx];
+                zeroSubCacheUp[nxt][col] = zeroPointUp[blockIdx];
+                blockCount++;
+                blockIdx += TS;
+            }
+        }
+
         vec4 tempA0 = cache[k] * inv_rms;
         vec4 tempA1 = cache[k+1] * inv_rms;
         vec4 tempA2 = cache[k+2] * inv_rms;
         vec4 tempA3 = cache[k+3] * inv_rms;
 
         uvec4 rawInput = gate[baseRow + globalCol];
-        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSubGate[k] - zeroSubGate[k];
-        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSubGate[k+1] - zeroSubGate[k+1];
-        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSubGate[k+2] - zeroSubGate[k+2];
-        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSubGate[k+3] - zeroSubGate[k+3];
+        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSubCacheGate[cur][curBlockIdx] - zeroSubCacheGate[cur][curBlockIdx];
+        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSubCacheGate[cur][curBlockIdx+1] - zeroSubCacheGate[cur][curBlockIdx+1];
+        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSubCacheGate[cur][curBlockIdx+2] - zeroSubCacheGate[cur][curBlockIdx+2];
+        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSubCacheGate[cur][curBlockIdx+3] - zeroSubCacheGate[cur][curBlockIdx+3];
         gateResult += dot(tempA0, w0);
         gateResult += dot(tempA1, w1);
         gateResult += dot(tempA2, w2);
         gateResult += dot(tempA3, w3);
 
         rawInput = up[baseRow + globalCol];
-        w0 = unpackUint8x4(rawInput.x) * scaleSubGate[k] - zeroSubGate[k];
-        w1 = unpackUint8x4(rawInput.y) * scaleSubGate[k+1] - zeroSubGate[k+1];
-        w2 = unpackUint8x4(rawInput.z) * scaleSubGate[k+2] - zeroSubGate[k+2];
-        w3 = unpackUint8x4(rawInput.w) * scaleSubGate[k+3] - zeroSubGate[k+3];
+        w0 = unpackUint8x4(rawInput.x) * scaleSubCacheUp[cur][curBlockIdx] - zeroSubCacheUp[cur][curBlockIdx];
+        w1 = unpackUint8x4(rawInput.y) * scaleSubCacheUp[cur][curBlockIdx+1] - zeroSubCacheUp[cur][curBlockIdx+1];
+        w2 = unpackUint8x4(rawInput.z) * scaleSubCacheUp[cur][curBlockIdx+2] - zeroSubCacheUp[cur][curBlockIdx+2];
+        w3 = unpackUint8x4(rawInput.w) * scaleSubCacheUp[cur][curBlockIdx+3] - zeroSubCacheUp[cur][curBlockIdx+3];
         upResult += dot(tempA0, w0);
         upResult += dot(tempA1, w1);
         upResult += dot(tempA2, w2);

@@ -25,6 +25,7 @@ layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float y[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
+shared float sub_sums[TS / 64];
 
 void main() {
     uint col = gl_LocalInvocationID.x;
@@ -41,13 +42,18 @@ void main() {
     }
 
     sum_sq = subgroupAdd(sum_sq);
-
     if (subgroupElect()) {
-        if (gl_SubgroupID == 0) {
-            shared_sum = 0.0;
+        sub_sums[gl_SubgroupID] = sum_sq;
+    }
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
         }
-        barrier();
-        atomicAdd(shared_sum, sum_sq);
+        shared_sum = final_sum;
     }
     barrier();
     float rms = sqrt((shared_sum / float(d_model)) + EPSILON);

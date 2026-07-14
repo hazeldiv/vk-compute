@@ -13,7 +13,7 @@ uint16_t float_to_fp16(float f);
 
 double compute() {
     int M = 1;
-    int N = 1024 * 4;
+    int N = 1024 * 12;
     int K = 1024 * 4;
     float* input = getData(4321, M, K);
     float* gamma = getData(58923, M, K);
@@ -31,8 +31,20 @@ double compute() {
 
     QuantizedData weightINT4 = getDataINT4(936, K, N);
     uint8_t* transposedWeightINT4 = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
-    printf("%d\n", weightINT4.data[0]);
     transpose_block16(weightINT4.data, transposedWeightINT4, K, N, QUANT_INT4);
+
+    uint16_t* weight2FP16 = getDataFP16(1348, K, N);
+    uint16_t* transposedWeight2FP16 = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
+    transpose_block16((uint8_t*)weight2FP16, (uint8_t*)transposedWeight2FP16, K, N, QUANT_FP16);
+
+    QuantizedData weight2INT8 = getDataINT8(1348, K, N);
+    uint8_t* transposedWeight2INT8 = (uint8_t*)malloc(sizeof(uint8_t) * K * N);
+    transpose_block16(weight2INT8.data, transposedWeight2INT8, K, N, QUANT_INT8);
+
+    QuantizedData weight2INT4 = getDataINT4(1348, K, N);
+    uint8_t* transposedWeight2INT4 = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
+    transpose_block16(weight2INT4.data, transposedWeight2INT4, K, N, QUANT_INT4);
+
     float* output = (float*)malloc(sizeof(float) * M * N);
     memset(output, 0, sizeof(float) * M * N);
 
@@ -47,6 +59,15 @@ double compute() {
     buffer zeroPointBufferINT8 = createBuffer(session.dev.device, session.dev.physicalDevice, weightINT8.z, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
     buffer scaleBufferINT4 = createBuffer(session.dev.device, session.dev.physicalDevice, weightINT4.scale, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
     buffer zeroPointBufferINT4 = createBuffer(session.dev.device, session.dev.physicalDevice, weightINT4.z, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    
+    buffer weightBuffer2FP16 = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight2FP16, sizeof(uint16_t) * K * N, MEMORY_RAM);
+    buffer weightBuffer2INT8 = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight2INT8, sizeof(uint8_t) * K * N, MEMORY_RAM);
+    buffer weightBuffer2INT4 = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight2INT4, sizeof(uint8_t) * K * N / 2, MEMORY_RAM);
+    buffer scaleBuffer2INT8 = createBuffer(session.dev.device, session.dev.physicalDevice, weight2INT8.scale, sizeof(float) * K * N / weight2INT8.group_size, MEMORY_RAM);
+    buffer zeroPointBuffer2INT8 = createBuffer(session.dev.device, session.dev.physicalDevice, weight2INT8.z, sizeof(float) * K * N / weight2INT8.group_size, MEMORY_RAM);
+    buffer scaleBuffer2INT4 = createBuffer(session.dev.device, session.dev.physicalDevice, weight2INT4.scale, sizeof(float) * K * N / weight2INT4.group_size, MEMORY_RAM);
+    buffer zeroPointBuffer2INT4 = createBuffer(session.dev.device, session.dev.physicalDevice, weight2INT4.z, sizeof(float) * K * N / weight2INT4.group_size, MEMORY_RAM);
+
     buffer gateBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer upBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer outputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, output, sizeof(float) * M * N, MEMORY_RAM);
@@ -147,36 +168,36 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
-        // {
-        //     .shader = "RmsNorm-swiglu-ffn-FP16.spv",
-        //     .buffers = {inputBuffer, gammaBuffer, weightBufferFP16, weightBufferFP16, outputBuffer},
-        //     .bufferCount = 5,
-        //     .pushConstants = {M, N, K},
-        //     .pushConstantCount = 3,
-        //     .dispatchX = (N + 256-1) / 256,
-        //     .dispatchY = 1,
-        //     .dispatchZ = 1
-        // },
-        // {
-        //     .shader = "RmsNorm-swiglu-ffn-INT8.spv",
-        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, weightBufferINT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8},
-        //     .bufferCount = 7,
-        //     .pushConstants = {M, N, K},
-        //     .pushConstantCount = 3,
-        //     .dispatchX = (N + 256-1) / 256,
-        //     .dispatchY = 1,
-        //     .dispatchZ = 1
-        // },
         {
-            .shader = "RmsNorm-swiglu-ffn-INT4.spv",
-            .buffers = {inputBuffer, gammaBuffer, weightBufferINT4, weightBufferINT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4},
-            .bufferCount = 7,
+            .shader = "RmsNorm-swiglu-ffn-FP16.spv",
+            .buffers = {inputBuffer, gammaBuffer, weightBufferFP16, weightBuffer2FP16, outputBuffer},
+            .bufferCount = 5,
             .pushConstants = {M, N, K},
             .pushConstantCount = 3,
             .dispatchX = (N + 256-1) / 256,
             .dispatchY = 1,
             .dispatchZ = 1
         },
+        // {
+        //     .shader = "RmsNorm-swiglu-ffn-INT8.spv",
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, weightBuffer2INT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8, scaleBuffer2INT8, zeroPointBuffer2INT8},
+        //     .bufferCount = 9,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 256-1) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
+        // {
+        //     .shader = "RmsNorm-swiglu-ffn-INT4.spv",
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT4, weightBuffer2INT4, outputBuffer, scaleBufferINT4, zeroPointBufferINT4, scaleBuffer2INT4, zeroPointBuffer2INT4},
+        //     .bufferCount = 9,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 256-1) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
     };
     execute(session, ops, 1);
     double elapsedMs = getExecutionTime(session);
@@ -188,7 +209,7 @@ double compute() {
     readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, gateBuffer, outputVal_1);
     readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
     
-    int idx = 1000;
+    int idx = 10;
     float result = 0.0f;
 
     //gemv
@@ -197,27 +218,59 @@ double compute() {
     // }
 
     //gemv with pre rms norm
-    // float rms = 0.0f;
-    // for (int i = 0; i < K; i++) rms += input[i] * input[i];
-    // rms = sqrt(rms / (float)K) + 1e-5;
-    // for (int i = 0; i < K; i++) {
-    //     result += (input[i] * gamma[i]) / rms * weight[i*N + idx];
-    // }
-
-    //swiglu ffn up & gate with pre rms norm
-    float gate = 0.0f;
-    float up = 0.0f;
     float rms = 0.0f;
     for (int i = 0; i < K; i++) rms += input[i] * input[i];
     rms = sqrt(rms / (float)K) + 1e-5;
     for (int i = 0; i < K; i++) {
-        gate += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+        result += (input[i] * gamma[i]) / rms * weight[i*N + idx];
     }
-    for (int i = 0; i < K; i++) {
-        up += (input[i] * gamma[i]) / rms * weight[i*N + idx];
-    }
-    gate /= (1.0 + exp2(-gate * 1.44269504));
-    result = gate * up;
+
+    //swiglu ffn up & gate with pre rms norm
+    // float gate = 0.0f;
+    // float up = 0.0f;
+    // float rms = 0.0f;
+    // for (int i = 0; i < K; i++) rms += input[i] * input[i];
+    // rms = sqrt(rms / (float)K) + 1e-5;
+    // for (int i = 0; i < K; i++) {
+    //     gate += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+    // }
+    // for (int i = 0; i < K; i++) {
+    //     up += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+    // }
+    // gate /= (1.0 + exp2(-gate * 1.44269504));
+    // result = gate * up;
+
+
+    // gate = 0.0f;
+    // up = 0.0f;
+    // float quantizedResult = 0.0f;
+    // for (int i = 0; i < K; i++) {
+    //     float d_q = weightINT8.data[i*N+idx] * weightINT8.scale[i] - weightINT8.z[i];
+    //     gate += (input[i] * gamma[i]) / rms * d_q;
+    // }
+    // for (int i = 0; i < K; i++) {
+    //     float d_q = weightINT8.data[i*N+idx] * weightINT8.scale[i] - weightINT8.z[i];
+    //     up += (input[i] * gamma[i]) / rms * d_q;
+    // }
+    // gate /= (1.0 + exp2(-gate * 1.44269504));
+    // quantizedResult = gate * up;
+
+    // gate = 0.0f;
+    // up = 0.0f;
+    // float quantizedResult = 0.0f;
+    // for (int i = 0; i < K; i++) {
+    //     int q = (weightINT4.data[(i*(N/2)+idx/2)] >> 4) & 0x0F;
+    //     float d_q = q * weightINT4.scale[i] - weightINT4.z[i];
+    //     gate += (input[i] * gamma[i]) / rms * d_q;
+    // }
+    // for (int i = 0; i < K; i++) {
+    //     int q = (weightINT4.data[(i*(N/2)+idx/2)] >> 4) & 0x0F;
+    //     float d_q = q * weightINT4.scale[i] - weightINT4.z[i];
+    //     up += (input[i] * gamma[i]) / rms * d_q;
+    // }
+    // gate /= (1.0 + exp2(-gate * 1.44269504));
+    // quantizedResult = gate * up;
+
 
     // printf("%d %f\n", weightINT4.data[0] >> 4, weightINT4.scale[0]);
 
@@ -228,9 +281,17 @@ double compute() {
     //     quantizedResult += input[i] * d_q;
     //     result += input[i] * weight[i*N + idx];
     // }
+    // float quantizedResult = 0.0f;
+    // for (int i = 0; i < K; i++) {
+    //     int q = weightINT8.data[i*N+idx];
+    //     float d_q = q * weightINT8.scale[i] - weightINT8.z[i];
+    //     quantizedResult += input[i] * d_q;
+    //     result += input[i] * weight[i*N + idx];
+    // }
 
 
     printf("Output from index %d: %f %f\n", idx, outputVal[idx], result);
+    // printf("Output from index %d: %f %f\n", idx, outputVal[idx], quantizedResult);
 
     destroyBuffer(session.dev.device, inputBuffer);
     destroyBuffer(session.dev.device, gammaBuffer);

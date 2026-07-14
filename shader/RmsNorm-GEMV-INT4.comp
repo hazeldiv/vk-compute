@@ -29,6 +29,7 @@ shared float shared_sum;
 shared vec4 cache[d_model/vec];
 shared vec4 scaleCache[d_model/vec];
 shared vec4 zeroCache[d_model/vec];
+shared float sub_sums[TS / 64];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);  
 const uvec4 highShifts = uvec4(16, 20, 24, 28);
@@ -55,16 +56,19 @@ void main() {
     }
 
     sum_sq = subgroupAdd(sum_sq);
-
     if (subgroupElect()) {
-        if (gl_SubgroupID == 0) {
-            shared_sum = 0.0;
-        }
-        barrier();
-        memoryBarrierBuffer();
-        atomicAdd(shared_sum, sum_sq);
+        sub_sums[gl_SubgroupID] = sum_sq;
     }
+    barrier();
 
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
+        }
+        shared_sum = final_sum;
+    }
     barrier();
     float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
     float inv_rms = 1.0 / rms;
