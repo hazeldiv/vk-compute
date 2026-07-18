@@ -1,0 +1,59 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define TS 64
+#define vec 4
+#define head_dim 256
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+    uint context_length;
+} param;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) readonly buffer keyBuffer { uvec4 key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uvec4 value[]; };
+layout(set = 0, binding = 2) readonly buffer queryBuffer { uvec4 query[]; };
+layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
+
+shared float shared_sum;
+shared vec4 cache[head_dim/vec];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    if (globalCol >= param.N) return;
+    //step 1 -> Q (1x256) @ K (256xcontext_length) = (1xcontext_length)
+    cache[col] = query[globalCol];
+
+    // 1 tiles = 64 contexts, 1 tile = 64 threads, 1 thread = 4 dims
+    float acc = 0.0;
+    uint numtiles = (param.context_length + TS - 1) / TS;
+    for (uint t=0; t<numtiles; t++) {
+        uint baseRow = t*TS + col;
+        if (baseRow >= param.context_length) break;
+
+        // 1 vec4 contain 8 float, 1 thread = 32 vec4 = 256 float
+        baseRow *= TS/2;
+        #pragma unroll
+        for (uint k=0;k<head_dim/vec; k+=2) {
+            uvec4 rawInput = key[baseRow];
+            vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+            vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+            acc += dot(cache[k], outVectorA);
+            acc += dot(cache[k+1], outVectorB);
+            baseRow++;
+        }
+    }
+    
+    
+
+    y[globalCol] = acc;
+}
