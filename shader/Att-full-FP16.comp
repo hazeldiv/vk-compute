@@ -3,7 +3,7 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#define TS 64
+#define TS 256
 #define vec 4
 #define head_dim 256
 
@@ -31,17 +31,19 @@ void main() {
     uint globalCol = gl_WorkGroupID.x*TS + col;
     if (globalCol >= param.N) return;
     //step 1 -> Q (1x256) @ K (256xcontext_length) = (1xcontext_length)
-    cache[col] = query[globalCol];
+    if (col < head_dim/vec) {
+        cache[col] = query[globalCol];
+    }
 
-    // 1 tiles = 64 contexts, 1 tile = 64 threads, 1 thread = 4 dims
+    // 1 tiles = 256 contexts, 1 tile = 256 threads, 1 thread = 4 dims
     float acc = 0.0;
     uint numtiles = (param.context_length + TS - 1) / TS;
     for (uint t=0; t<numtiles; t++) {
         uint baseRow = t*TS + col;
         if (baseRow >= param.context_length) break;
 
-        // 1 vec4 contain 8 float, 1 thread = 32 vec4 = 256 float
-        baseRow *= TS/2;
+        // 1 vec4 contain 8 float, 1 thread = 64 vec4 = 256 float
+        baseRow *= TS/4;
         #pragma unroll
         for (uint k=0;k<head_dim/vec; k+=2) {
             uvec4 rawInput = key[baseRow];
