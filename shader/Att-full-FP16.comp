@@ -21,41 +21,65 @@ const float EPSILON = 1e-5;
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uvec4 key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uvec4 value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { uvec4 query[]; };
-layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
+layout(set = 0, binding = 3) writeonly buffer outBuffer { vec4 y[]; };
 
-shared float shared_sum;
 shared vec4 cache[head_dim/vec];
 
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
     if (globalCol >= param.N) return;
-    //step 1 -> Q (1x256) @ K (256xcontext_length) = (1xcontext_length)
+
+    uint q_head_id = gl_WorkGroupID.x;
+    uint kv_block_id = q_head_id / 4;
+    uint kv_offset = kv_block_id * head_dim;
+    uint q_base = q_head_id * 32;
+
     if (col < head_dim/vec) {
-        cache[col] = query[globalCol];
+        cache[col] = query[q_base + col];
     }
 
-    // 1 tiles = 256 contexts, 1 tile = 256 threads, 1 thread = 4 dims
-    float acc = 0.0;
-    uint numtiles = (param.context_length + TS - 1) / TS;
-    for (uint t=0; t<numtiles; t++) {
-        uint baseRow = t*TS + col;
-        if (baseRow >= param.context_length) break;
+    barrier();
 
-        // 1 vec4 contain 8 float, 1 thread = 64 vec4 = 256 float
-        baseRow *= TS/4;
-        #pragma unroll
-        for (uint k=0;k<head_dim/vec; k+=2) {
-            uvec4 rawInput = key[baseRow];
-            vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
-            vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
-            acc += dot(cache[k], outVectorA);
-            acc += dot(cache[k+1], outVectorB);
-            baseRow++;
+    float soft_sum = 0.0;
+    vec4 output_acc[32];
+
+    for (uint i = 0; i < 32; i++) {
+        output_acc[i] = vec4(0.0);
+    }
+
+    uint k_row_base = kv_offset / 8;
+
+    for (uint row = 0; row < param.context_length; row++) {
+        float score = 0.0;
+        uint k_idx_base = row * 128 + k_row_base;
+
+        for (uint k = 0; k < 32; k++) {
+            uint k_idx = k_idx_base + k;
+            uvec4 rawInput = key[k_idx];
+            vec4 kA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+            vec4 kB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+            score += dot(cache[k], kA);
+            score += dot(cache[k + 32], kB);
+        }
+
+        float exp_score = exp(score);
+        soft_sum += exp_score;
+
+        uint v_col_base = k_row_base * param.context_length + row;
+
+        for (uint k = 0; k < 32; k++) {
+            uint v_idx = v_col_base + k * param.context_length;
+            uvec4 rawInput = value[v_idx];
+            vec4 vA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+            vec4 vB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+            output_acc[k] += exp_score * vA;
+            output_acc[k + 32] += exp_score * vB;
         }
     }
-    
-    
 
-    y[globalCol] = acc;
+    if (col < 64) {
+        uint out_idx = q_head_id * 64 + col;
+        y[out_idx] = output_acc[col] / soft_sum;
+    }
 }
