@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <float.h>
 #include "session.h"
 #include "buffer.h"
 #include "dispatch.h"
@@ -10,6 +11,29 @@
 
 float fp16_to_float(uint16_t h);
 uint16_t float_to_fp16(float f);
+
+void validate_softmax_v(const float *x, const float *v, float *o, int n) {
+    float max_val = -FLT_MAX;
+    for (int i = 0; i < n; i++) {
+        if (x[i] > max_val) {
+            max_val = x[i];
+        }
+    }
+
+    float sum_exp = 0.0f;
+    for (int i = 0; i < n; i++) {
+        sum_exp += expf(x[i] - max_val);
+    }
+
+    for (int col = 0; col < 256; col++) {
+        float acc = 0.0f;
+        for (int row = 0; row < n; row++) {
+            float exp_x = expf(x[row] - max_val);
+            acc += (exp_x / sum_exp) * v[row * 256 + col];
+        }
+        o[col] = acc;
+    }
+}
 
 double compute() {
     int M = 1;
@@ -45,6 +69,12 @@ double compute() {
     uint8_t* transposedWeight2INT4 = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
     transpose_block16(weight2INT4.data, transposedWeight2INT4, K, N, QUANT_INT4);
 
+    int softmax_n = 1000;
+    float* softmax_x = getData(2335, 1, softmax_n);
+    float* softmax_v = getData(6346, softmax_n, 256);
+    float* softmax_o = (float*)malloc(sizeof(float) * 1 * 256);
+    memset(softmax_o, 0, sizeof(float) * 1 * 256);
+
     float* output = (float*)malloc(sizeof(float) * M * N);
     memset(output, 0, sizeof(float) * M * N);
 
@@ -71,6 +101,12 @@ double compute() {
     buffer gateBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer upBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, transposedWeight, sizeof(float) * K * N, MEMORY_RAM);
     buffer outputBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, output, sizeof(float) * M * N, MEMORY_RAM);
+
+    buffer softmax_xBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, softmax_x, sizeof(float) * softmax_n, MEMORY_VRAM);
+    buffer softmax_vBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, softmax_v, sizeof(float) * softmax_n * 256, MEMORY_VRAM);
+    buffer softmax_oBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, softmax_o, sizeof(float) * 256, MEMORY_VRAM);
+
+    int bufferCount = 16;
     buffer buffers[] = {
         inputBuffer, 
         gammaBuffer, 
@@ -84,8 +120,11 @@ double compute() {
         scaleBufferINT8, 
         zeroPointBufferINT8, 
         scaleBufferINT4, 
-        zeroPointBufferINT4};
-    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, 13);
+        zeroPointBufferINT4,
+        softmax_xBuffer,
+        softmax_vBuffer,
+        softmax_oBuffer};
+    createTransferAndCopy(session.dev.device, session.dev.queue, buffers, bufferCount);
 
     operation ops[] = {
         // {
@@ -168,16 +207,16 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
-        {
-            .shader = "RmsNorm-swiglu-ffn-FP16.spv",
-            .buffers = {inputBuffer, gammaBuffer, weightBufferFP16, weightBuffer2FP16, outputBuffer},
-            .bufferCount = 5,
-            .pushConstants = {M, N, K},
-            .pushConstantCount = 3,
-            .dispatchX = (N + 256-1) / 256,
-            .dispatchY = 1,
-            .dispatchZ = 1
-        },
+        // {
+        //     .shader = "RmsNorm-swiglu-ffn-FP16.spv",
+        //     .buffers = {inputBuffer, gammaBuffer, weightBufferFP16, weightBuffer2FP16, outputBuffer},
+        //     .bufferCount = 5,
+        //     .pushConstants = {M, N, K},
+        //     .pushConstantCount = 3,
+        //     .dispatchX = (N + 256-1) / 256,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
         // {
         //     .shader = "RmsNorm-swiglu-ffn-INT8.spv",
         //     .buffers = {inputBuffer, gammaBuffer, weightBufferINT8, weightBuffer2INT8, outputBuffer, scaleBufferINT8, zeroPointBufferINT8, scaleBuffer2INT8, zeroPointBuffer2INT8},
@@ -198,16 +237,28 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
+        {
+            .shader = "online-softmax.spv",
+            .buffers = {softmax_xBuffer, softmax_vBuffer, softmax_oBuffer},
+            .bufferCount = 3,
+            .pushConstants = {softmax_n},
+            .pushConstantCount = 1,
+            .dispatchX = 1,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
     };
     execute(session, ops, 1);
     double elapsedMs = getExecutionTime(session);
     printf("Shader execution time: %.3f ms\n", elapsedMs);
-    float* outputVal = (float*)malloc(sizeof(float) * M * N);
-    float* outputVal_1 = (float*)malloc(sizeof(float) * K * N);
-    float* outputVal_2 = (float*)malloc(sizeof(float) * K * N);
-    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, outputBuffer, outputVal);
-    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, gateBuffer, outputVal_1);
-    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
+    float* outputValSoftmax = (float*)malloc(sizeof(float) * 256);
+    // float* outputVal = (float*)malloc(sizeof(float) * M * N);
+    // float* outputVal_1 = (float*)malloc(sizeof(float) * K * N);
+    // float* outputVal_2 = (float*)malloc(sizeof(float) * K * N);
+    // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, outputBuffer, outputVal);
+    // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, gateBuffer, outputVal_1);
+    // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, softmax_oBuffer, outputValSoftmax);
     
     int idx = 10;
     float result = 0.0f;
@@ -218,12 +269,12 @@ double compute() {
     // }
 
     //gemv with pre rms norm
-    float rms = 0.0f;
-    for (int i = 0; i < K; i++) rms += input[i] * input[i];
-    rms = sqrt(rms / (float)K) + 1e-5;
-    for (int i = 0; i < K; i++) {
-        result += (input[i] * gamma[i]) / rms * weight[i*N + idx];
-    }
+    // float rms = 0.0f;
+    // for (int i = 0; i < K; i++) rms += input[i] * input[i];
+    // rms = sqrt(rms / (float)K) + 1e-5;
+    // for (int i = 0; i < K; i++) {
+    //     result += (input[i] * gamma[i]) / rms * weight[i*N + idx];
+    // }
 
     //swiglu ffn up & gate with pre rms norm
     // float gate = 0.0f;
@@ -290,23 +341,30 @@ double compute() {
     // }
 
 
-    printf("Output from index %d: %f %f\n", idx, outputVal[idx], result);
+    // printf("Output from index %d: %f %f\n", idx, outputVal[idx], result);
     // printf("Output from index %d: %f %f\n", idx, outputVal[idx], quantizedResult);
 
-    destroyBuffer(session.dev.device, inputBuffer);
-    destroyBuffer(session.dev.device, gammaBuffer);
-    destroyBuffer(session.dev.device, weightBuffer);
-    destroyBuffer(session.dev.device, outputBuffer);
-    destroyBuffer(session.dev.device, gateBuffer);
-    destroyBuffer(session.dev.device, weightBufferFP16);
-    destroyBuffer(session.dev.device, weightBufferINT8);
-    destroyBuffer(session.dev.device, weightBufferINT4);
-    destroyBuffer(session.dev.device, scaleBufferINT8);
-    destroyBuffer(session.dev.device, zeroPointBufferINT8);
-    destroyBuffer(session.dev.device, scaleBufferINT4);
-    destroyBuffer(session.dev.device, zeroPointBufferINT4);
+    // destroyBuffer(session.dev.device, inputBuffer);
+    // destroyBuffer(session.dev.device, gammaBuffer);
+    // destroyBuffer(session.dev.device, weightBuffer);
+    // destroyBuffer(session.dev.device, outputBuffer);
+    // destroyBuffer(session.dev.device, gateBuffer);
+    // destroyBuffer(session.dev.device, weightBufferFP16);
+    // destroyBuffer(session.dev.device, weightBufferINT8);
+    // destroyBuffer(session.dev.device, weightBufferINT4);
+    // destroyBuffer(session.dev.device, scaleBufferINT8);
+    // destroyBuffer(session.dev.device, zeroPointBufferINT8);
+    // destroyBuffer(session.dev.device, scaleBufferINT4);
+    // destroyBuffer(session.dev.device, zeroPointBufferINT4);
+    float output_val[256];
+    validate_softmax_v(softmax_x, softmax_v, output_val, softmax_n);
+    printf("Output from softmax: %f %f\n", outputValSoftmax[0], output_val[0]);
 
-    free(outputVal);
+    for (int i = 0; i < bufferCount; i++) {
+        destroyBuffer(session.dev.device, buffers[i]);
+    }
+
+    // free(outputVal);
     free(input);
     free(gamma);
     free(weight);
@@ -318,5 +376,9 @@ double compute() {
     free(weightFP16);
     free_quantized_data(weightINT8);
     free_quantized_data(weightINT4);
+    free(softmax_x);
+    free(softmax_v);
+    free(softmax_o);
+    free(outputValSoftmax);
     return 0;
 }

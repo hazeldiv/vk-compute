@@ -1,0 +1,118 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Buffers
+layout(std430, set = 0, binding = 0) readonly buffer InputX {
+    float x[]; // Dimension: 1 x N
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer InputV {
+    float v[]; // Dimension: N x 256 (row-major: v[row * 256 + col])
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer OutputY {
+    float y[]; // Dimension: 1 x 256
+};
+
+layout(std430, set = 0, binding = 3) writeonly buffer OutputDebug {
+    float debug[]; // Dimension: 1 x 256
+};
+
+// Push Constants for dynamic parameters
+layout(push_constant) uniform PushConstants {
+    uint N; // Length N (e.g., tens of thousands)
+} pc;
+
+// Shared memory for subgroup/workgroup reductions across the 256 threads
+shared float s_max_scratch[256];
+shared float s_sum_scratch[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x; // Thread ID (0..255)
+    
+    // Online Softmax tracking state
+    float max_val = -3.402823466e+38; // -FLT_MAX
+    float sum_val = 0.0;
+    float acc_v   = 0.0;             // Accumulator for column `tid` of output Y
+
+    // Loop through N in tiles of 256
+    for (uint k = 0; k < pc.N; k += 256) {
+        uint idx = k + tid;
+        
+        // 1. Load element x[k + tid] (handle boundary padding if N is not a multiple of 256)
+        if (k + tid >= pc.N) {
+            s_max_scratch[tid] = -3.402823466e+38;
+            s_sum_scratch[tid] = 0.0;
+            continue;
+        }
+        float x_elem = x[idx];
+        
+        // 2. Intra-tile tree reduction for local max and sum
+        s_max_scratch[tid] = x_elem;
+        barrier();
+
+        // Finding max value in loaded x tile
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_max_scratch[tid] = max(s_max_scratch[tid], s_max_scratch[tid + stride]);
+            }
+            barrier();
+        }
+        float tile_max = s_max_scratch[0]; // Broadcast tile max
+
+        // Compute local unnormalized exponent
+        float exp_val = exp(x_elem - tile_max);
+
+        s_sum_scratch[tid] = exp_val;
+        barrier();
+
+        // Workgroup reduction for tile sum
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_sum_scratch[tid] += s_sum_scratch[tid + stride];
+            }
+            barrier();
+        }
+        float tile_sum = s_sum_scratch[0]; // Broadcast tile sum
+
+        // 3. Online Softmax update step
+        if (tile_sum > 0.0) {
+            float new_max = max(max_val, tile_max);
+            
+            // Rescale factors to correct previous unnormalized states
+            float scale_prev = (sum_val == 0.0) ? 0.0 : exp(max_val - new_max);
+            float scale_tile = exp(tile_max - new_max);
+
+            // Update running sum
+            sum_val = sum_val * scale_prev + tile_sum * scale_tile;
+
+            // Load V element corresponding to row (k + i) and column tid
+            // We need to accumulate sum_i ( exp(x_i - tile_max) * V[i, tid] )
+            // Since all threads need x_elem exponents, we reuse s_sum_scratch as an exponent cache
+            s_sum_scratch[tid] = exp_val; 
+            barrier();
+
+            // Compute inner product of local tile exp(x) vector with V column `tid`
+            float tile_acc = 0.0;
+            uint current_tile_size = min(256u, pc.N - k);
+            for (uint i = 0; i < 256; ++i) {
+                float v_val = v[(k + i) * 256 + tid];
+                tile_acc += s_sum_scratch[i] * v_val;
+            }
+
+            // Rescale previous accumulated result and add new tile contribution
+            acc_v = acc_v * scale_prev + tile_acc * scale_tile;
+            max_val = new_max;
+        }
+        barrier();
+    }
+    barrier();
+
+    // Final normalization
+    if (sum_val > 0.0) {
+        y[tid] = acc_v / sum_val;
+    } else {
+        y[tid] = 0.0;
+    }
+}

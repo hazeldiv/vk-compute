@@ -20,7 +20,7 @@ float* getData(int seed, int M, int N) {
 
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
-            A[i * N + j] = get_pseudo_random(i, j, seed);
+            A[i * N + j] = get_pseudo_random(i, j, seed) * 15;
         }
     }
 
