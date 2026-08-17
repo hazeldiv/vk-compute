@@ -39,15 +39,15 @@ void main() {
     // Loop through N in tiles of 256
     for (uint k = 0; k < pc.N; k += 256) {
         uint idx = k + tid;
-        
+
         // 1. Load element x[k + tid] (handle boundary padding if N is not a multiple of 256)
-        if (k + tid >= pc.N) {
-            s_max_scratch[tid] = -3.402823466e+38;
-            s_sum_scratch[tid] = 0.0;
-            continue;
+        float x_elem;
+        if (idx >= pc.N) {
+            x_elem = -3.402823466e+38;
+        } else {
+            x_elem = x[idx];
         }
-        float x_elem = x[idx];
-        
+
         // 2. Intra-tile tree reduction for local max and sum
         s_max_scratch[tid] = x_elem;
         barrier();
@@ -96,7 +96,7 @@ void main() {
             // Compute inner product of local tile exp(x) vector with V column `tid`
             float tile_acc = 0.0;
             uint current_tile_size = min(256u, pc.N - k);
-            for (uint i = 0; i < 256; ++i) {
+            for (uint i = 0; i < current_tile_size; ++i) {
                 float v_val = v[(k + i) * 256 + tid];
                 tile_acc += s_sum_scratch[i] * v_val;
             }

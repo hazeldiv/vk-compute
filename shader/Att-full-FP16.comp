@@ -10,9 +10,6 @@
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Dimensions {
-    uint M;
-    uint N;
-    uint K;
     uint context_length;
 } param;
 
@@ -56,12 +53,13 @@ void main() {
     uint num_tiles = (param.context_length + TS - 1) / TS;
 
     // Loop over number of tiles based on context length / tile size (256)
-    for (uint t = 0; t < num_tiles; t++) {
-        uint tile_row = t * TS + col;
-        // If the tile row exceeds the context length, skip this iteration
-        if (tile_row >= param.context_length) {
-            barrier();
-            continue;
+    for (uint k = 0; k < pc.N; k += 256) {
+        uint idx = k + tid;
+        float x_elem;
+        if (idx >= pc.N) {
+            x_elem = -3.402823466e+38;
+        } else {
+            x_elem = x[idx];
         }
 
         // Load K and V into shared memory

@@ -12,26 +12,48 @@
 float fp16_to_float(uint16_t h);
 uint16_t float_to_fp16(float f);
 
+// Mirrors the shader's tiled online-softmax algorithm (tiles of 256, running
+// max/sum rescale) instead of a single global pass, for validating that path.
 void validate_softmax_v(const float *x, const float *v, float *o, int n) {
     float max_val = -FLT_MAX;
-    for (int i = 0; i < n; i++) {
-        if (x[i] > max_val) {
-            max_val = x[i];
-        }
-    }
+    float sum_val = 0.0f;
+    float acc[256] = {0};
 
-    float sum_exp = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum_exp += expf(x[i] - max_val);
+    for (int k = 0; k < n; k += 256) {
+        int tile_size = (n - k < 256) ? (n - k) : 256;
+
+        float tile_max = -FLT_MAX;
+        for (int i = 0; i < tile_size; i++) {
+            if (x[k + i] > tile_max) tile_max = x[k + i];
+        }
+
+        float exp_vals[256];
+        float tile_sum = 0.0f;
+        for (int i = 0; i < tile_size; i++) {
+            exp_vals[i] = expf(x[k + i] - tile_max);
+            tile_sum += exp_vals[i];
+        }
+
+        if (tile_sum > 0.0f) {
+            float new_max = fmaxf(max_val, tile_max);
+            float scale_prev = (sum_val == 0.0f) ? 0.0f : expf(max_val - new_max);
+            float scale_tile = expf(tile_max - new_max);
+
+            sum_val = sum_val * scale_prev + tile_sum * scale_tile;
+
+            for (int col = 0; col < 256; col++) {
+                float tile_acc = 0.0f;
+                for (int i = 0; i < tile_size; i++) {
+                    tile_acc += exp_vals[i] * v[(k + i) * 256 + col];
+                }
+                acc[col] = acc[col] * scale_prev + tile_acc * scale_tile;
+            }
+            max_val = new_max;
+        }
     }
 
     for (int col = 0; col < 256; col++) {
-        float acc = 0.0f;
-        for (int row = 0; row < n; row++) {
-            float exp_x = expf(x[row] - max_val);
-            acc += (exp_x / sum_exp) * v[row * 256 + col];
-        }
-        o[col] = acc;
+        o[col] = (sum_val > 0.0f) ? acc[col] / sum_val : 0.0f;
     }
 }
 
@@ -358,7 +380,7 @@ double compute() {
     // destroyBuffer(session.dev.device, zeroPointBufferINT4);
     float output_val[256];
     validate_softmax_v(softmax_x, softmax_v, output_val, softmax_n);
-    printf("Output from softmax: %f %f\n", outputValSoftmax[0], output_val[0]);
+    printf("Output from softmax: shader= %f validation= %f\n", outputValSoftmax[40], output_val[40]);
 
     for (int i = 0; i < bufferCount; i++) {
         destroyBuffer(session.dev.device, buffers[i]);
