@@ -1,0 +1,147 @@
+#version 450
+
+#define TS 256
+#define HEAD_DIM 256
+#define KV_HEADS 4
+#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
+#define NEG_INF -1e30
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint context_length;
+} param;
+
+layout(set = 0, binding = 0) readonly buffer keyBuffer { uvec4 key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uvec4 value[]; };
+layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
+layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
+layout(set = 0, binding = 4) readonly buffer kScaleBuffer { float kscale[]; };
+layout(set = 0, binding = 5) readonly buffer kZeroBuffer { float kzero[]; };
+layout(set = 0, binding = 6) readonly buffer vScaleBuffer { float vscale[]; };
+layout(set = 0, binding = 7) readonly buffer vZeroBuffer { float vzero[]; };
+
+shared float q_shared[HEAD_DIM];
+shared float s_max[TS];
+shared float s_exp[TS];
+
+vec4 unpackInt4Hi(uint word) {
+    return vec4(uvec4(word) >> uvec4(4, 12, 20, 28) & uvec4(0xF));
+}
+
+vec4 unpackInt4Lo(uint word) {
+    return vec4(uvec4(word) >> uvec4(0, 8, 16, 24) & uvec4(0xF));
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint q_head_id = gl_WorkGroupID.x;
+    uint kv_block_id = q_head_id / KV_HEADS;
+    uint kv_row_base = kv_block_id * HEAD_DIM;
+    uint seq32 = param.context_length / 32;
+
+    if (tid < HEAD_DIM / 4) {
+        vec4 qv = query[q_head_id * (HEAD_DIM / 4) + tid];
+        q_shared[tid * 4 + 0] = qv.x;
+        q_shared[tid * 4 + 1] = qv.y;
+        q_shared[tid * 4 + 2] = qv.z;
+        q_shared[tid * 4 + 3] = qv.w;
+    }
+    barrier();
+
+    float m_prev = NEG_INF;
+    float d_prev = 0.0;
+    float acc = 0.0;
+
+    uint num_tiles = (param.context_length + TS - 1) / TS;
+    for (uint k = 0; k < num_tiles; k++) {
+        uint s = k * TS + tid;
+
+        float score = NEG_INF;
+        if (s < param.context_length) {
+            uint sel = s & 31u;
+            uint s32 = s / 32;
+            score = 0.0;
+            for (uint d = 0; d < HEAD_DIM; d++) {
+                uvec4 k_raw = key[(kv_row_base + d) * seq32 + s32];
+                uint word = (sel < 8u) ? k_raw.x
+                           : (sel < 16u) ? k_raw.y
+                           : (sel < 24u) ? k_raw.z
+                                         : k_raw.w;
+                uint shift = ((sel & 7u) >> 1u) * 8u + (((sel & 1u) ^ 1u) * 4u);
+                uint nibble = (word >> shift) & 0xFu;
+                uint row = kv_row_base + d;
+                float k_val = float(nibble) * kscale[k * KV_TOTAL_ROWS + row] - kzero[k * KV_TOTAL_ROWS + row];
+                score += q_shared[d] * k_val;
+            }
+        }
+
+        s_max[tid] = score;
+        barrier();
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_max[tid] = max(s_max[tid], s_max[tid + stride]);
+            }
+            barrier();
+        }
+        float tile_max = s_max[0];
+
+        float exp_val = exp(score - tile_max);
+        s_exp[tid] = exp_val;
+        barrier();
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_exp[tid] += s_exp[tid + stride];
+            }
+            barrier();
+        }
+        float tile_sum = s_exp[0];
+
+        if (tile_sum > 0.0) {
+            float m_next = max(m_prev, tile_max);
+            float alpha = exp(m_prev - m_next);
+            float beta = exp(tile_max - m_next);
+            d_prev = alpha * d_prev + beta * tile_sum;
+
+            s_exp[tid] = exp_val;
+            barrier();
+
+            float vs = vscale[k * KV_TOTAL_ROWS + kv_row_base + tid];
+            float vz = vzero[k * KV_TOTAL_ROWS + kv_row_base + tid];
+
+            float tile_acc = 0.0;
+            uint tile_start = k * TS;
+            uint tile_size = param.context_length - tile_start;
+            if (tile_size > TS) tile_size = TS;
+            for (uint i = 0; i < tile_size; i += 32) {
+                uvec4 v_raw = value[(kv_row_base + tid) * seq32 + (tile_start + i) / 32];
+                vec4 h0 = unpackInt4Hi(v_raw.x) * vs - vz;
+                vec4 l0 = unpackInt4Lo(v_raw.x) * vs - vz;
+                vec4 h1 = unpackInt4Hi(v_raw.y) * vs - vz;
+                vec4 l1 = unpackInt4Lo(v_raw.y) * vs - vz;
+                vec4 h2 = unpackInt4Hi(v_raw.z) * vs - vz;
+                vec4 l2 = unpackInt4Lo(v_raw.z) * vs - vz;
+                vec4 h3 = unpackInt4Hi(v_raw.w) * vs - vz;
+                vec4 l3 = unpackInt4Lo(v_raw.w) * vs - vz;
+                tile_acc += dot(vec4(s_exp[i], s_exp[i + 2], s_exp[i + 4], s_exp[i + 6]), h0);
+                tile_acc += dot(vec4(s_exp[i + 1], s_exp[i + 3], s_exp[i + 5], s_exp[i + 7]), l0);
+                tile_acc += dot(vec4(s_exp[i + 8], s_exp[i + 10], s_exp[i + 12], s_exp[i + 14]), h1);
+                tile_acc += dot(vec4(s_exp[i + 9], s_exp[i + 11], s_exp[i + 13], s_exp[i + 15]), l1);
+                tile_acc += dot(vec4(s_exp[i + 16], s_exp[i + 18], s_exp[i + 20], s_exp[i + 22]), h2);
+                tile_acc += dot(vec4(s_exp[i + 17], s_exp[i + 19], s_exp[i + 21], s_exp[i + 23]), l2);
+                tile_acc += dot(vec4(s_exp[i + 24], s_exp[i + 26], s_exp[i + 28], s_exp[i + 30]), h3);
+                tile_acc += dot(vec4(s_exp[i + 25], s_exp[i + 27], s_exp[i + 29], s_exp[i + 31]), l3);
+            }
+
+            acc = acc * alpha + tile_acc * beta;
+            m_prev = m_next;
+        }
+        barrier();
+    }
+
+    if (d_prev > 0.0) {
+        y[q_head_id * HEAD_DIM + tid] = acc / d_prev;
+    } else {
+        y[q_head_id * HEAD_DIM + tid] = 0.0;
+    }
+}

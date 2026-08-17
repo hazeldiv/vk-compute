@@ -18,17 +18,20 @@ void execute(session s, operation ops[], int opCount) {
     vkCmdResetQueryPool(s.buffer, s.qpool, 0, TIMESTAMP_QUERY_COUNT);
     vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 0);
 
+    descriptor descs[opCount];
+    pipeline pipes[opCount];
+
     for (int i = 0; i < opCount; i++) {
         operation* op = &ops[i];
 
-        descriptor desc = createDescriptor(s.dev.device, op->bufferCount, op->buffers);
-        pipeline pipe = createPipeline(s.dev.device, desc.layout, op->shader, sizeof(int) * op->pushConstantCount);
+        descs[i] = createDescriptor(s.dev.device, op->bufferCount, op->buffers);
+        pipes[i] = createPipeline(s.dev.device, descs[i].layout, op->shader, sizeof(int) * op->pushConstantCount);
 
-        vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline);
-        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.layout, 0, 1, &desc.set, 0, NULL);
+        vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].pipeline);
+        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].layout, 0, 1, &descs[i].set, 0, NULL);
 
         if (op->pushConstantCount > 0) {
-            vkCmdPushConstants(s.buffer, pipe.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+            vkCmdPushConstants(s.buffer, pipes[i].layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(int) * op->pushConstantCount, op->pushConstants);
         }
         if (i > 0) {
@@ -43,9 +46,6 @@ void execute(session s, operation ops[], int opCount) {
                 0, 1, &barrier, 0, NULL, 0, NULL);
         }
         vkCmdDispatch(s.buffer, (uint32_t)op->dispatchX, (uint32_t)op->dispatchY, (uint32_t)op->dispatchZ);
-
-        destroyPipeline(s.dev.device, pipe);
-        destroyDescriptor(s.dev.device, desc);
     }
 
     vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 1);
@@ -58,6 +58,11 @@ void execute(session s, operation ops[], int opCount) {
 
     vkQueueSubmit(s.dev.queue, 1, &submitInfo, s.fence);
     vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+
+    for (int i = 0; i < opCount; i++) {
+        destroyPipeline(s.dev.device, pipes[i]);
+        destroyDescriptor(s.dev.device, descs[i]);
+    }
 }
 
 double getExecutionTime(session s) {

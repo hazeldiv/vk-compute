@@ -200,24 +200,69 @@ double compute() {
     int att_kv_heads = 4;
     int att_dim = 256;
 
-    uint16_t* att_q = getDataFP16(7777, 1, att_heads * att_dim);
+    float* att_q = getData(7777, 1, att_heads * att_dim);
     uint16_t* att_k_t = getDataFP16(8100, att_kv_heads * att_dim, att_seq);
     uint16_t* att_v_t = getDataFP16(9100, att_kv_heads * att_dim, att_seq);
 
-    float* att_q_f32 = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    QuantizedData att_k_i8 = getDataINT8(8101, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_v_i8 = getDataINT8(9101, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_k_i4 = getDataINT4(8102, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_v_i4 = getDataINT4(9102, att_kv_heads * att_dim, att_seq);
+
+    int att_rows = att_kv_heads * att_dim;
+    int att_blocks = att_seq / 256;
+
     float* att_k_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
     float* att_v_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
-    for (int i = 0; i < att_heads * att_dim; i++) att_q_f32[i] = fp16_to_float(att_q[i]);
     for (int i = 0; i < att_kv_heads * att_dim * att_seq; i++) att_k_f32[i] = fp16_to_float(att_k_t[i]);
     for (int i = 0; i < att_kv_heads * att_dim * att_seq; i++) att_v_f32[i] = fp16_to_float(att_v_t[i]);
 
+    float* att_k_i8_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    float* att_v_i8_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    float* att_k_i4_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    float* att_v_i4_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    for (int i = 0; i < att_kv_heads * att_dim * att_seq; i++) {
+        int row = i / att_seq;
+        int tok = i % att_seq;
+        int blk = tok / 256;
+        int s_idx = blk * att_rows + row;
+        att_k_i8_f32[i] = att_k_i8.data[i] * att_k_i8.scale[s_idx] - att_k_i8.z[s_idx];
+        att_v_i8_f32[i] = att_v_i8.data[i] * att_v_i8.scale[s_idx] - att_v_i8.z[s_idx];
+        uint8_t kb = att_k_i4.data[i / 2];
+        uint8_t vb = att_v_i4.data[i / 2];
+        int kn = (i & 1) ? (kb & 0x0F) : (kb >> 4);
+        int vn = (i & 1) ? (vb & 0x0F) : (vb >> 4);
+        att_k_i4_f32[i] = kn * att_k_i4.scale[s_idx] - att_k_i4.z[s_idx];
+        att_v_i4_f32[i] = vn * att_v_i4.scale[s_idx] - att_v_i4.z[s_idx];
+    }
+
     float* att_out = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    float* att_out_i8 = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    float* att_out_i4 = (float*)malloc(sizeof(float) * att_heads * att_dim);
     memset(att_out, 0, sizeof(float) * att_heads * att_dim);
+    memset(att_out_i8, 0, sizeof(float) * att_heads * att_dim);
+    memset(att_out_i4, 0, sizeof(float) * att_heads * att_dim);
 
     buffer attKeyBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_t, sizeof(uint16_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
     buffer attValueBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_t, sizeof(uint16_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
-    buffer attQueryBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_q, sizeof(uint16_t) * att_heads * att_dim, MEMORY_RAM);
+    buffer attQueryBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_q, sizeof(float) * att_heads * att_dim, MEMORY_RAM);
     buffer attOutBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_out, sizeof(float) * att_heads * att_dim, MEMORY_RAM);
+
+    buffer attKeyBufferI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i8.data, sizeof(uint8_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
+    buffer attValueBufferI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i8.data, sizeof(uint8_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
+    buffer attKScaleI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i8.scale, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attKZeroI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i8.z, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attVScaleI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i8.scale, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attVZeroI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i8.z, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attOutBufferI8 = createBuffer(session.dev.device, session.dev.physicalDevice, att_out_i8, sizeof(float) * att_heads * att_dim, MEMORY_RAM);
+
+    buffer attKeyBufferI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i4.data, sizeof(uint8_t) * att_kv_heads * att_dim * att_seq / 2, MEMORY_RAM);
+    buffer attValueBufferI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i4.data, sizeof(uint8_t) * att_kv_heads * att_dim * att_seq / 2, MEMORY_RAM);
+    buffer attKScaleI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i4.scale, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attKZeroI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_i4.z, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attVScaleI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i4.scale, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attVZeroI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_i4.z, sizeof(float) * att_rows * att_blocks, MEMORY_RAM);
+    buffer attOutBufferI4 = createBuffer(session.dev.device, session.dev.physicalDevice, att_out_i4, sizeof(float) * att_heads * att_dim, MEMORY_RAM);
 
     operation ops[] = {
         // {
@@ -350,8 +395,28 @@ double compute() {
             .dispatchY = 1,
             .dispatchZ = 1
         },
+        {
+            .shader = "Att-full-INT8.spv",
+            .buffers = {attKeyBufferI8, attValueBufferI8, attQueryBuffer, attOutBufferI8, attKScaleI8, attKZeroI8, attVScaleI8, attVZeroI8},
+            .bufferCount = 8,
+            .pushConstants = {att_seq},
+            .pushConstantCount = 1,
+            .dispatchX = att_heads,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
+        {
+            .shader = "Att-full-INT4.spv",
+            .buffers = {attKeyBufferI4, attValueBufferI4, attQueryBuffer, attOutBufferI4, attKScaleI4, attKZeroI4, attVScaleI4, attVZeroI4},
+            .bufferCount = 8,
+            .pushConstants = {att_seq},
+            .pushConstantCount = 1,
+            .dispatchX = att_heads,
+            .dispatchY = 1,
+            .dispatchZ = 1
+        },
     };
-    execute(session, ops, 1);
+    execute(session, ops, 3);
     double elapsedMs = getExecutionTime(session);
     printf("Shader execution time: %.3f ms\n", elapsedMs);
     float* outputValSoftmax = (float*)malloc(sizeof(float) * 256);
@@ -363,7 +428,7 @@ double compute() {
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, softmax_oBuffer, outputValSoftmax);
     
-    int idx = 10;
+    int idx = 0;
     float result = 0.0f;
 
     //gemv
@@ -464,16 +529,35 @@ double compute() {
     // printf("Output from softmax: shader= %f validation= %f\n", outputValSoftmax[40], output_val[40]);
 
     readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, attOutBuffer, att_out);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, attOutBufferI8, att_out_i8);
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, attOutBufferI4, att_out_i4);
 
     float* att_ref = (float*)malloc(sizeof(float) * att_heads * att_dim);
-    validate_attention(att_q_f32, att_k_f32, att_v_f32, att_ref, att_seq, att_heads, att_kv_heads, att_dim);
+    float* att_ref_i8 = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    float* att_ref_i4 = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    validate_attention(att_q, att_k_f32, att_v_f32, att_ref, att_seq, att_heads, att_kv_heads, att_dim);
+    validate_attention(att_q, att_k_i8_f32, att_v_i8_f32, att_ref_i8, att_seq, att_heads, att_kv_heads, att_dim);
+    validate_attention(att_q, att_k_i4_f32, att_v_i4_f32, att_ref_i4, att_seq, att_heads, att_kv_heads, att_dim);
 
     float att_max_err = 0.0f;
     for (int i = 0; i < att_heads * att_dim; i++) {
         float e = fabsf(att_out[i] - att_ref[i]);
         if (e > att_max_err) att_max_err = e;
     }
-    printf("Attention: shader[0]= %f ref[0]= %f max_err= %f\n", att_out[0], att_ref[0], att_max_err);
+    float att_max_err_i8 = 0.0f;
+    for (int i = 0; i < att_heads * att_dim; i++) {
+        float e = fabsf(att_out_i8[i] - att_ref_i8[i]);
+        if (e > att_max_err_i8) att_max_err_i8 = e;
+    }
+    float att_max_err_i4 = 0.0f;
+    for (int i = 0; i < att_heads * att_dim; i++) {
+        float e = fabsf(att_out_i4[i] - att_ref_i4[i]);
+        if (e > att_max_err_i4) att_max_err_i4 = e;
+    }
+
+    printf("Attention FP16: shader[%d]= %f ref[%d]= %f max_err= %f\n", idx, att_out[idx], idx, att_ref[idx], att_max_err);
+    printf("Attention INT8: shader[%d]= %f ref[%d]= %f max_err= %f\n", idx, att_out_i8[idx], idx, att_ref_i8[idx], att_max_err_i8);
+    printf("Attention INT4: shader[%d]= %f ref[%d]= %f max_err= %f\n", idx, att_out_i4[idx], idx, att_ref_i4[idx], att_max_err_i4);
 
     for (int i = 0; i < bufferCount; i++) {
         destroyBuffer(session.dev.device, buffers[i]);
@@ -483,6 +567,20 @@ double compute() {
     destroyBuffer(session.dev.device, attValueBuffer);
     destroyBuffer(session.dev.device, attQueryBuffer);
     destroyBuffer(session.dev.device, attOutBuffer);
+    destroyBuffer(session.dev.device, attKeyBufferI8);
+    destroyBuffer(session.dev.device, attValueBufferI8);
+    destroyBuffer(session.dev.device, attKScaleI8);
+    destroyBuffer(session.dev.device, attKZeroI8);
+    destroyBuffer(session.dev.device, attVScaleI8);
+    destroyBuffer(session.dev.device, attVZeroI8);
+    destroyBuffer(session.dev.device, attOutBufferI8);
+    destroyBuffer(session.dev.device, attKeyBufferI4);
+    destroyBuffer(session.dev.device, attValueBufferI4);
+    destroyBuffer(session.dev.device, attKScaleI4);
+    destroyBuffer(session.dev.device, attKZeroI4);
+    destroyBuffer(session.dev.device, attVScaleI4);
+    destroyBuffer(session.dev.device, attVZeroI4);
+    destroyBuffer(session.dev.device, attOutBufferI4);
 
     // free(outputVal);
     free(input);
@@ -503,10 +601,21 @@ double compute() {
     free(att_q);
     free(att_k_t);
     free(att_v_t);
-    free(att_q_f32);
+    free_quantized_data(att_k_i8);
+    free_quantized_data(att_v_i8);
+    free_quantized_data(att_k_i4);
+    free_quantized_data(att_v_i4);
     free(att_k_f32);
     free(att_v_f32);
+    free(att_k_i8_f32);
+    free(att_v_i8_f32);
+    free(att_k_i4_f32);
+    free(att_v_i4_f32);
     free(att_out);
+    free(att_out_i8);
+    free(att_out_i4);
     free(att_ref);
+    free(att_ref_i8);
+    free(att_ref_i4);
     return 0;
 }
