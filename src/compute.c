@@ -204,10 +204,10 @@ double compute() {
     uint16_t* att_k_t = getDataFP16(8100, att_kv_heads * att_dim, att_seq);
     uint16_t* att_v_t = getDataFP16(9100, att_kv_heads * att_dim, att_seq);
 
-    QuantizedData att_k_i8 = getDataINT8(8101, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_v_i8 = getDataINT8(9101, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_k_i4 = getDataINT4(8102, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_v_i4 = getDataINT4(9102, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_k_i8 = getDataINT8(8100, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_v_i8 = getDataINT8(9100, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_k_i4 = getDataINT4(8100, att_kv_heads * att_dim, att_seq);
+    QuantizedData att_v_i4 = getDataINT4(9100, att_kv_heads * att_dim, att_seq);
 
     int att_rows = att_kv_heads * att_dim;
     int att_blocks = att_seq / 256;
@@ -428,7 +428,7 @@ double compute() {
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, softmax_oBuffer, outputValSoftmax);
     
-    int idx = 0;
+    int idx = 10;
     float result = 0.0f;
 
     //gemv
