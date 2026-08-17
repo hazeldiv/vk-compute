@@ -26,6 +26,8 @@ QuantizedData getDataINT4(int seed, int M, int N);
 
 float* getData(int seed, int M, int N);
 uint16_t* getDataFP16(int seed, int M, int N);
+float fp16_to_float(uint16_t h);
+uint16_t float_to_fp16(float f);
 void transpose(const float* src, float* dest, int m, int n);
 void transpose_block16(const uint8_t *input, uint8_t *output, int M, int N, int data_type);
 void free_quantized_data(QuantizedData q);
