@@ -1,11 +1,9 @@
 #version 450
-#extension GL_KHR_shader_subgroup_arithmetic : enable
-#extension GL_KHR_shader_subgroup_basic : enable
-#extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
 #define TS 256
-#define vec 4
-#define head_dim 256
+#define HEAD_DIM 256
+#define NEG_INF -1e30
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -13,118 +11,110 @@ layout(push_constant) uniform Dimensions {
     uint context_length;
 } param;
 
-const float NEG_INF = -1e30;
-
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uvec4 key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uvec4 value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { uvec4 query[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
 
-shared vec4 cache[head_dim/vec];
-shared vec4 shared_K[TS];
-shared vec4 shared_V[TS];
+shared float q_shared[HEAD_DIM];
+shared float s_max[TS];
+shared float s_exp[TS];
 
 void main() {
-    uint col = gl_LocalInvocationID.x;
-    uint globalCol = gl_WorkGroupID.x*TS + col;
-    if (globalCol >= param.N) return;
-
-    // 16 head, 4 kv, 256 head_dim
+    uint tid = gl_LocalInvocationID.x;
     uint q_head_id = gl_WorkGroupID.x;
     uint kv_block_id = q_head_id / 4;
-    uint kv_offset = kv_block_id * head_dim;
-    uint kv_offset_vec = kv_offset / 8;
-    uint q_base = q_head_id * 32;
+    uint kv_row_base = kv_block_id * HEAD_DIM;
+    uint seq8 = param.context_length / 8;
 
-    // Query is 64 vec4 (32 * 4) therefore only 64 threads are needed
-    if (col < head_dim/vec) {
-        cache[col] = query[q_base + col];
+    if (tid < HEAD_DIM / 8) {
+        uvec4 q_raw = query[q_head_id * (HEAD_DIM / 8) + tid];
+        vec4 lo = vec4(unpackHalf2x16(q_raw.x), unpackHalf2x16(q_raw.y));
+        vec4 hi = vec4(unpackHalf2x16(q_raw.z), unpackHalf2x16(q_raw.w));
+        q_shared[tid * 8 + 0] = lo.x;
+        q_shared[tid * 8 + 1] = lo.y;
+        q_shared[tid * 8 + 2] = lo.z;
+        q_shared[tid * 8 + 3] = lo.w;
+        q_shared[tid * 8 + 4] = hi.x;
+        q_shared[tid * 8 + 5] = hi.y;
+        q_shared[tid * 8 + 6] = hi.z;
+        q_shared[tid * 8 + 7] = hi.w;
     }
-
     barrier();
 
     float m_prev = NEG_INF;
-    float d_prev = 0.0; 
-    float r_O[32];
-    for (uint i = 0; i < 32; i++) {
-        r_O[i] = 0.0;
-    }
+    float d_prev = 0.0;
+    float acc = 0.0;
 
     uint num_tiles = (param.context_length + TS - 1) / TS;
+    for (uint k = 0; k < num_tiles; k++) {
+        uint s = k * TS + tid;
 
-    // Loop over number of tiles based on context length / tile size (256)
-    for (uint k = 0; k < pc.N; k += 256) {
-        uint idx = k + tid;
-        float x_elem;
-        if (idx >= pc.N) {
-            x_elem = -3.402823466e+38;
-        } else {
-            x_elem = x[idx];
-        }
-
-        // Load K and V into shared memory
-        uint k_base = tile_row + kv_offset_vec;
-        uint v_base = kv_offset_vec * param.context_length + tile_row;
-
-        shared_K[col] = key[k_base];
-        shared_V[col] = value[v_base];
-
-        barrier();
-
-        float r_S[TS];
-        for (uint i = 0; i < TS; i++) {
-            if (tile_row + i >= param.context_length) break;
-            float score = 0.0;
-            uvec4 k_raw = shared_K[i];
-            vec4 k0 = vec4(unpackHalf2x16(k_raw.x), unpackHalf2x16(k_raw.y));
-            vec4 k1 = vec4(unpackHalf2x16(k_raw.z), unpackHalf2x16(k_raw.w));
-            for (uint k = 0; k < 32; k++) {
-                score += dot(cache[k], k0);
-                score += dot(cache[k + 32], k1);
+        float score = NEG_INF;
+        if (s < param.context_length) {
+            uint sel = s & 7u;
+            uint s8 = s / 8;
+            score = 0.0;
+            for (uint d = 0; d < HEAD_DIM; d++) {
+                uvec4 k_raw = key[(kv_row_base + d) * seq8 + s8];
+                vec4 k0 = vec4(unpackHalf2x16(k_raw.x), unpackHalf2x16(k_raw.y));
+                vec4 k1 = vec4(unpackHalf2x16(k_raw.z), unpackHalf2x16(k_raw.w));
+                float k_val = (sel < 4u) ? k0[sel] : k1[sel - 4u];
+                score += q_shared[d] * k_val;
             }
-            r_S[i] = score;
         }
 
-        float m_local = NEG_INF;
-        for (uint i = 0; i < TS; i++) {
-            if (tile_row + i >= param.context_length) break;
-            m_local = max(m_local, r_S[i]);
+        s_max[tid] = score;
+        barrier();
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_max[tid] = max(s_max[tid], s_max[tid + stride]);
+            }
+            barrier();
         }
+        float tile_max = s_max[0];
 
-        float d_local = 0.0;
-        float r_P[TS];
-        for (uint i = 0; i < TS; i++) {
-            if (tile_row + i >= param.context_length) break;
-            r_P[i] = exp(r_S[i] - m_local);
-            d_local += r_P[i];
+        float exp_val = exp(score - tile_max);
+        s_exp[tid] = exp_val;
+        barrier();
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) {
+                s_exp[tid] += s_exp[tid + stride];
+            }
+            barrier();
         }
+        float tile_sum = s_exp[0];
 
-        float m_next = max(m_prev, m_local);
-        float alpha = exp(m_prev - m_next);
-        float beta = exp(m_local - m_next);
-        float d_next = alpha * d_prev + beta * d_local;
+        if (tile_sum > 0.0) {
+            float m_next = max(m_prev, tile_max);
+            float alpha = exp(m_prev - m_next);
+            float beta = exp(tile_max - m_next);
+            d_prev = alpha * d_prev + beta * tile_sum;
 
-        for (uint d = 0; d < 32; d++) {
-            float v_sum = 0.0;
-            for (uint i = 0; i < TS; i++) {
-                if (tile_row + i >= param.context_length) break;
-                uvec4 v_raw = shared_V[i];
+            s_exp[tid] = exp_val;
+            barrier();
+
+            float tile_acc = 0.0;
+            uint tile_start = k * TS;
+            uint tile_size = param.context_length - tile_start;
+            if (tile_size > TS) tile_size = TS;
+            for (uint i = 0; i < tile_size; i += 8) {
+                uvec4 v_raw = value[(kv_row_base + tid) * seq8 + (tile_start + i) / 8];
                 vec4 v0 = vec4(unpackHalf2x16(v_raw.x), unpackHalf2x16(v_raw.y));
                 vec4 v1 = vec4(unpackHalf2x16(v_raw.z), unpackHalf2x16(v_raw.w));
-                v_sum += r_P[i] * ((d < 16) ? v0[d] : v1[d - 16]);
+                tile_acc += dot(vec4(s_exp[i], s_exp[i + 1], s_exp[i + 2], s_exp[i + 3]), v0);
+                tile_acc += dot(vec4(s_exp[i + 4], s_exp[i + 5], s_exp[i + 6], s_exp[i + 7]), v1);
             }
-            r_O[d] = (alpha * d_prev * r_O[d] + beta * v_sum) / d_next;
+
+            acc = acc * alpha + tile_acc * beta;
+            m_prev = m_next;
         }
-
-        m_prev = m_next;
-        d_prev = d_next;
-
-        memoryBarrierShared();
         barrier();
     }
 
-    if (col < TS) {
-        uint out_idx = q_head_id * head_dim + col;
-        y[out_idx] = r_O[col];
+    if (d_prev > 0.0) {
+        y[q_head_id * HEAD_DIM + tid] = acc / d_prev;
+    } else {
+        y[q_head_id * HEAD_DIM + tid] = 0.0;
     }
 }

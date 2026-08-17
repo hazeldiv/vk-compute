@@ -57,6 +57,53 @@ void validate_softmax_v(const float *x, const float *v, float *o, int n) {
     }
 }
 
+void validate_attention(const float* q, const float* k, const float* v, float* o, int seq, int heads, int kv_heads, int dim) {
+    for (int h = 0; h < heads; h++) {
+        int kv = h / (heads / kv_heads);
+        const float* qh = q + h * dim;
+        const float* kh = k + kv * dim * seq;
+        const float* vh = v + kv * dim * seq;
+
+        float max_val = -FLT_MAX;
+        float sum_val = 0.0f;
+        float acc[256] = {0};
+
+        for (int t = 0; t < seq; t += 256) {
+            int tile = (seq - t < 256) ? (seq - t) : 256;
+
+            float scores[256];
+            float tile_max = -FLT_MAX;
+            for (int i = 0; i < tile; i++) {
+                float sc = 0.0f;
+                for (int d = 0; d < dim; d++) sc += qh[d] * kh[d * seq + (t + i)];
+                scores[i] = sc;
+                if (sc > tile_max) tile_max = sc;
+            }
+
+            float expv[256];
+            float tile_sum = 0.0f;
+            for (int i = 0; i < tile; i++) {
+                expv[i] = expf(scores[i] - tile_max);
+                tile_sum += expv[i];
+            }
+
+            float new_max = fmaxf(max_val, tile_max);
+            float scale_prev = (sum_val == 0.0f) ? 0.0f : expf(max_val - new_max);
+            float scale_tile = expf(tile_max - new_max);
+            sum_val = sum_val * scale_prev + tile_sum * scale_tile;
+
+            for (int d = 0; d < dim; d++) {
+                float tile_acc = 0.0f;
+                for (int i = 0; i < tile; i++) tile_acc += expv[i] * vh[d * seq + (t + i)];
+                acc[d] = acc[d] * scale_prev + tile_acc * scale_tile;
+            }
+            max_val = new_max;
+        }
+
+        for (int d = 0; d < dim; d++) o[h * dim + d] = (sum_val > 0.0f) ? acc[d] / sum_val : 0.0f;
+    }
+}
+
 double compute() {
     int M = 1;
     int N = 1024 * 12;
@@ -147,6 +194,30 @@ double compute() {
         softmax_vBuffer,
         softmax_oBuffer};
     createTransferAndCopy(session.dev.device, session.dev.queue, buffers, bufferCount);
+
+    int att_seq = 2048;
+    int att_heads = 16;
+    int att_kv_heads = 4;
+    int att_dim = 256;
+
+    uint16_t* att_q = getDataFP16(7777, 1, att_heads * att_dim);
+    uint16_t* att_k_t = getDataFP16(8100, att_kv_heads * att_dim, att_seq);
+    uint16_t* att_v_t = getDataFP16(9100, att_kv_heads * att_dim, att_seq);
+
+    float* att_q_f32 = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    float* att_k_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    float* att_v_f32 = (float*)malloc(sizeof(float) * att_kv_heads * att_dim * att_seq);
+    for (int i = 0; i < att_heads * att_dim; i++) att_q_f32[i] = fp16_to_float(att_q[i]);
+    for (int i = 0; i < att_kv_heads * att_dim * att_seq; i++) att_k_f32[i] = fp16_to_float(att_k_t[i]);
+    for (int i = 0; i < att_kv_heads * att_dim * att_seq; i++) att_v_f32[i] = fp16_to_float(att_v_t[i]);
+
+    float* att_out = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    memset(att_out, 0, sizeof(float) * att_heads * att_dim);
+
+    buffer attKeyBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_k_t, sizeof(uint16_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
+    buffer attValueBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_v_t, sizeof(uint16_t) * att_kv_heads * att_dim * att_seq, MEMORY_RAM);
+    buffer attQueryBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_q, sizeof(uint16_t) * att_heads * att_dim, MEMORY_RAM);
+    buffer attOutBuffer = createBuffer(session.dev.device, session.dev.physicalDevice, att_out, sizeof(float) * att_heads * att_dim, MEMORY_RAM);
 
     operation ops[] = {
         // {
@@ -259,13 +330,23 @@ double compute() {
         //     .dispatchY = 1,
         //     .dispatchZ = 1
         // },
+        // {
+        //     .shader = "online-softmax.spv",
+        //     .buffers = {softmax_xBuffer, softmax_vBuffer, softmax_oBuffer},
+        //     .bufferCount = 3,
+        //     .pushConstants = {softmax_n},
+        //     .pushConstantCount = 1,
+        //     .dispatchX = 1,
+        //     .dispatchY = 1,
+        //     .dispatchZ = 1
+        // },
         {
-            .shader = "online-softmax.spv",
-            .buffers = {softmax_xBuffer, softmax_vBuffer, softmax_oBuffer},
-            .bufferCount = 3,
-            .pushConstants = {softmax_n},
+            .shader = "Att-full-FP16.spv",
+            .buffers = {attKeyBuffer, attValueBuffer, attQueryBuffer, attOutBuffer},
+            .bufferCount = 4,
+            .pushConstants = {att_seq},
             .pushConstantCount = 1,
-            .dispatchX = 1,
+            .dispatchX = att_heads,
             .dispatchY = 1,
             .dispatchZ = 1
         },
@@ -280,7 +361,7 @@ double compute() {
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, outputBuffer, outputVal);
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, gateBuffer, outputVal_1);
     // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, upBuffer, outputVal_2);
-    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, softmax_oBuffer, outputValSoftmax);
+    // readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, softmax_oBuffer, outputValSoftmax);
     
     int idx = 10;
     float result = 0.0f;
@@ -378,13 +459,30 @@ double compute() {
     // destroyBuffer(session.dev.device, zeroPointBufferINT8);
     // destroyBuffer(session.dev.device, scaleBufferINT4);
     // destroyBuffer(session.dev.device, zeroPointBufferINT4);
-    float output_val[256];
-    validate_softmax_v(softmax_x, softmax_v, output_val, softmax_n);
-    printf("Output from softmax: shader= %f validation= %f\n", outputValSoftmax[40], output_val[40]);
+    // float output_val[256];
+    // validate_softmax_v(softmax_x, softmax_v, output_val, softmax_n);
+    // printf("Output from softmax: shader= %f validation= %f\n", outputValSoftmax[40], output_val[40]);
+
+    readBuffer(session.dev.device, session.dev.physicalDevice, session.dev.queue, attOutBuffer, att_out);
+
+    float* att_ref = (float*)malloc(sizeof(float) * att_heads * att_dim);
+    validate_attention(att_q_f32, att_k_f32, att_v_f32, att_ref, att_seq, att_heads, att_kv_heads, att_dim);
+
+    float att_max_err = 0.0f;
+    for (int i = 0; i < att_heads * att_dim; i++) {
+        float e = fabsf(att_out[i] - att_ref[i]);
+        if (e > att_max_err) att_max_err = e;
+    }
+    printf("Attention: shader[0]= %f ref[0]= %f max_err= %f\n", att_out[0], att_ref[0], att_max_err);
 
     for (int i = 0; i < bufferCount; i++) {
         destroyBuffer(session.dev.device, buffers[i]);
     }
+
+    destroyBuffer(session.dev.device, attKeyBuffer);
+    destroyBuffer(session.dev.device, attValueBuffer);
+    destroyBuffer(session.dev.device, attQueryBuffer);
+    destroyBuffer(session.dev.device, attOutBuffer);
 
     // free(outputVal);
     free(input);
@@ -402,5 +500,13 @@ double compute() {
     free(softmax_v);
     free(softmax_o);
     free(outputValSoftmax);
+    free(att_q);
+    free(att_k_t);
+    free(att_v_t);
+    free(att_q_f32);
+    free(att_k_f32);
+    free(att_v_f32);
+    free(att_out);
+    free(att_ref);
     return 0;
 }
