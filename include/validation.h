@@ -11,6 +11,9 @@ void validateGEMVINT4(session s, int M, int N, int K, float* input, QuantizedDat
 void validateRmsNormGEMVFP16(session s, int M, int N, int K, float* input, float* gamma, uint16_t* weightFP16);
 void validateRmsNormGEMVINT8(session s, int M, int N, int K, float* input, float* gamma, QuantizedData weightINT8);
 void validateRmsNormGEMVINT4(session s, int M, int N, int K, float* input, float* gamma, QuantizedData weightINT4);
+void validateGemvAddFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16);
+void validateGemvAddINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8);
+void validateGemvAddINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4);
 void validateRmsNormSwigluFfn(session s, int M, int N, int K, float* input, float* gamma, float* weight);
 void validateRmsNormSwigluFfnFP16(session s, int M, int N, int K, float* input, float* gamma, uint16_t* weightFP16, uint16_t* weight2FP16);
 void validateRmsNormSwigluFfnINT8(session s, int M, int N, int K, float* input, float* gamma, QuantizedData weightINT8, QuantizedData weight2INT8);

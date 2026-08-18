@@ -485,6 +485,103 @@ void validateRmsNormGEMVINT4(session s, int M, int N, int K, float* input, float
     free(xn);
 }
 
+void validateGemvAddFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+
+    uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
+    transpose_block16((uint8_t*)weightFP16, (uint8_t*)transposed, K, N, QUANT_FP16);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * K * N, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, outBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-ADD-FP16.spv", .buffers = {inputBuffer, weightBuffer, outBuffer, residualBuffer}, .bufferCount = 4,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 1);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_fp16(input, weightFP16, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV-ADD FP16", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 4);
+    free(out);
+    free(ref);
+}
+
+void validateGemvAddINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N);
+    transpose_block16(weightINT8.data, transposed, K, N, QUANT_INT8);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.scale, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.z, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 6);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-ADD-INT8.spv", .buffers = {inputBuffer, weightBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer}, .bufferCount = 6,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 1);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_int8(input, &weightINT8, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV-ADD INT8", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 6);
+    free(out);
+    free(ref);
+}
+
+void validateGemvAddINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
+    transpose_block16(weightINT4.data, transposed, K, N, QUANT_INT4);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N / 2, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.scale, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.z, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 6);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-ADD-INT4.spv", .buffers = {inputBuffer, weightBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer}, .bufferCount = 6,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 1);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_int4(input, &weightINT4, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV-ADD INT4", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 6);
+    free(out);
+    free(ref);
+}
+
 void validateRmsNormSwigluFfn(session s, int M, int N, int K, float* input, float* gamma, float* weight) {
     float* out = (float*)calloc(M * N, sizeof(float));
 

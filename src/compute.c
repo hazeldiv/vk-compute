@@ -66,6 +66,9 @@ double compute() {
     validateRmsNormGEMVFP16(s, M, N, K, input, gamma, weightFP16);
     validateRmsNormGEMVINT8(s, M, N, K, input, gamma, weightINT8);
     validateRmsNormGEMVINT4(s, M, N, K, input, gamma, weightINT4);
+    validateGemvAddFP16(s, M, wo_n, K, input2, input, woFP16);
+    validateGemvAddINT8(s, M, wo_n, K, input2, input, woINT8);
+    validateGemvAddINT4(s, M, wo_n, K, input2, input, woINT4);
     validateRmsNormSwigluFfn(s, M, N, K, input, gamma, weight);
     validateRmsNormSwigluFfnFP16(s, M, N, K, input, gamma, weightFP16, weight2FP16);
     validateRmsNormSwigluFfnINT8(s, M, N, K, input, gamma, weightINT8, weight2INT8);
