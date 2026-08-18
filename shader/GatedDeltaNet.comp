@@ -1,0 +1,73 @@
+#version 450
+#define TS 128
+#define HEAD_DIM 128
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint v_heads;
+    uint qk_heads;
+    uint head_dim;
+} param;
+
+layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
+layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
+layout(set = 0, binding = 2) readonly buffer VBuffer { float V[]; };
+layout(set = 0, binding = 3) readonly buffer GBuffer { float G[]; };
+layout(set = 0, binding = 4) readonly buffer ARawBuffer { float aRaw[]; };
+layout(set = 0, binding = 5) readonly buffer BRawBuffer { float bRaw[]; };
+layout(set = 0, binding = 6) buffer StateBuffer { float S[]; };
+layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
+
+shared float k_shared[HEAD_DIM];
+shared float q_shared[HEAD_DIM];
+shared float kq_dot;
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    uint h = gl_WorkGroupID.x;
+    uint qk = h >> 1;
+
+    float kv = K[qk * param.head_dim + i];
+    float qv = Q[qk * param.head_dim + i];
+    float vv = V[h * param.head_dim + i];
+    float gv = G[h * param.head_dim + i];
+    float a_raw = aRaw[qk];
+    float b_raw = bRaw[qk];
+
+    k_shared[i] = kv;
+    q_shared[i] = qv;
+    barrier();
+
+    float alpha = exp(-log(1.0 + exp(a_raw)));
+    float beta = 1.0 / (1.0 + exp(-b_raw));
+
+    uint base = h * param.head_dim * param.head_dim + i * param.head_dim;
+
+    float vhat = 0.0;
+    for (uint j = 0; j < param.head_dim; j++) {
+        vhat += S[base + j] * k_shared[j];
+    }
+    float delta = vv - vhat;
+
+    if (i == 0) {
+        float kq = 0.0;
+        for (uint j = 0; j < param.head_dim; j++) {
+            kq += k_shared[j] * q_shared[j];
+        }
+        kq_dot = kq;
+    }
+    barrier();
+
+    float y0 = 0.0;
+    for (uint j = 0; j < param.head_dim; j++) {
+        y0 += S[base + j] * q_shared[j];
+    }
+    float y = alpha * y0 + beta * delta * kq_dot;
+
+    yGated[h * param.head_dim + i] = y * (gv / (1.0 + exp(-gv)));
+
+    for (uint j = 0; j < param.head_dim; j++) {
+        S[base + j] = alpha * S[base + j] + beta * delta * k_shared[j];
+    }
+}

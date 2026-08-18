@@ -99,7 +99,7 @@ QuantizedData getDataINT8(int seed, int M, int N) {
     q.group_size = 256;
     q.type       = QUANT_INT8;
 
-    int blocks_per_row = N / q.group_size;
+    int blocks_per_row = (N + q.group_size - 1) / q.group_size;
     int blocks_count   = M * blocks_per_row;
 
     q.data   = (uint8_t*)malloc(sizeof(int8_t) * M * N);
@@ -143,7 +143,7 @@ QuantizedData getDataINT4(int seed, int M, int N) {
     q.group_size = 256;
     q.type       = QUANT_INT4;
 
-    int blocks_per_row = N / q.group_size;
+    int blocks_per_row = (N + q.group_size - 1) / q.group_size;
     int blocks_count   = M * blocks_per_row;
 
     q.data   = (uint8_t*)malloc(sizeof(uint8_t) * M * N / 2);
