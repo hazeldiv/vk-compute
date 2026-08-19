@@ -1,8 +1,11 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 
 #define TS 256
 #define HEAD_DIM 256
+#define KV_HEADS 4
+#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
 #define NEG_INF -1e30
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
@@ -11,8 +14,8 @@ layout(push_constant) uniform Dimensions {
     uint context_length;
 } param;
 
-layout(set = 0, binding = 0) readonly buffer keyBuffer { uvec4 key[]; };
-layout(set = 0, binding = 1) readonly buffer valueBuffer { uvec4 value[]; };
+layout(set = 0, binding = 0) readonly buffer keyBuffer { uint16_t key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
 
@@ -23,9 +26,8 @@ shared float s_exp[TS];
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint q_head_id = gl_WorkGroupID.x;
-    uint kv_block_id = q_head_id / 4;
+    uint kv_block_id = q_head_id / KV_HEADS;
     uint kv_row_base = kv_block_id * HEAD_DIM;
-    uint seq8 = param.context_length / 8;
 
     if (tid < HEAD_DIM / 4) {
         vec4 qv = query[q_head_id * (HEAD_DIM / 4) + tid];
@@ -46,14 +48,9 @@ void main() {
 
         float score = NEG_INF;
         if (s < param.context_length) {
-            uint sel = s & 7u;
-            uint s8 = s / 8;
             score = 0.0;
             for (uint d = 0; d < HEAD_DIM; d++) {
-                uvec4 k_raw = key[(kv_row_base + d) * seq8 + s8];
-                vec4 k0 = vec4(unpackHalf2x16(k_raw.x), unpackHalf2x16(k_raw.y));
-                vec4 k1 = vec4(unpackHalf2x16(k_raw.z), unpackHalf2x16(k_raw.w));
-                float k_val = (sel < 4u) ? k0[sel] : k1[sel - 4u];
+                float k_val = unpackHalf2x16(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])).x;
                 score += q_shared[d] * k_val;
             }
         }
@@ -92,12 +89,10 @@ void main() {
             uint tile_start = k * TS;
             uint tile_size = param.context_length - tile_start;
             if (tile_size > TS) tile_size = TS;
-            for (uint i = 0; i < tile_size; i += 8) {
-                uvec4 v_raw = value[(kv_row_base + tid) * seq8 + (tile_start + i) / 8];
-                vec4 v0 = vec4(unpackHalf2x16(v_raw.x), unpackHalf2x16(v_raw.y));
-                vec4 v1 = vec4(unpackHalf2x16(v_raw.z), unpackHalf2x16(v_raw.w));
-                tile_acc += dot(vec4(s_exp[i], s_exp[i + 1], s_exp[i + 2], s_exp[i + 3]), v0);
-                tile_acc += dot(vec4(s_exp[i + 4], s_exp[i + 5], s_exp[i + 6], s_exp[i + 7]), v1);
+            for (uint i = 0; i < tile_size; i++) {
+                uint t = tile_start + i;
+                float v = unpackHalf2x16(uint(value[t * KV_TOTAL_ROWS + (kv_row_base + tid)])).x;
+                tile_acc += s_exp[i] * v;
             }
 
             acc = acc * alpha + tile_acc * beta;

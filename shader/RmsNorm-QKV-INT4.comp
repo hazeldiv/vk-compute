@@ -3,12 +3,12 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_8bit_storage : require
 #define TS 256
 #define vec 4
 #define d_model 4096
 #define HEAD_DIM 256
 #define HALF 128
-#define MAX_SEQ 2048
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -31,8 +31,12 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 layout(set = 0, binding = 5) readonly buffer thetaBuffer { float theta[]; };
 layout(set = 0, binding = 6) buffer qOutBuffer { float qOut[]; };
-layout(set = 0, binding = 7) buffer kCacheBuffer { float kCache[]; };
-layout(set = 0, binding = 8) buffer vCacheBuffer { float vCache[]; };
+layout(set = 0, binding = 7) buffer kCacheBuffer { uint8_t kCache[]; };
+layout(set = 0, binding = 8) buffer vCacheBuffer { uint8_t vCache[]; };
+layout(set = 0, binding = 9) buffer kScaleBuffer { float kScale[]; };
+layout(set = 0, binding = 10) buffer kZeroBuffer { float kZero[]; };
+layout(set = 0, binding = 11) buffer vScaleBuffer { float vScale[]; };
+layout(set = 0, binding = 12) buffer vZeroBuffer { float vZero[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -42,12 +46,41 @@ shared float sub_sums[TS / 64];
 shared float acc_shared[TS];
 shared float rope_shared[TS];
 shared float shared_sum2;
+shared float val_shared[TS];
+shared float qscale_sh;
+shared float qzero_sh;
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
 const uvec4 highShifts = uvec4(16, 20, 24, 28);
 
 vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
     return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+}
+
+void quantizeParams(float v) {
+    uint i = gl_LocalInvocationID.x;
+    val_shared[i] = v;
+    barrier();
+    if (i == 0) {
+        float mn = val_shared[0];
+        float mx = val_shared[0];
+        for (uint j = 1; j < TS; j++) {
+            mn = min(mn, val_shared[j]);
+            mx = max(mx, val_shared[j]);
+        }
+        qscale_sh = (mx - mn) / 255.0;
+        if (qscale_sh == 0.0) qscale_sh = 1.0;
+        qzero_sh = -mn;
+    }
+    barrier();
+}
+
+uint quantize(float v) {
+    float q = (v + qzero_sh) / qscale_sh;
+    int qi = int(round(q));
+    if (qi < 0) qi = 0;
+    if (qi > 255) qi = 255;
+    return uint(qi);
 }
 
 void main() {
@@ -109,9 +142,17 @@ void main() {
         baseRow += param.N;
     }
 
+    uint cacheSlot = (param.context_length - 1u) * (param.vOffset - param.kOffset);
+
     if (globalCol >= param.vOffset) {
         uint row = globalCol - param.vOffset;
-        vCache[row * MAX_SEQ + param.context_length] = acc;
+        uint kvHead = gl_WorkGroupID.x - param.vOffset / TS;
+        quantizeParams(acc);
+        vCache[cacheSlot + row] = uint8_t(quantize(acc));
+        if (gl_LocalInvocationID.x == 0) {
+            vScale[kvHead * param.context_length + param.context_length - 1u] = qscale_sh;
+            vZero[kvHead * param.context_length + param.context_length - 1u] = qzero_sh;
+        }
         return;
     }
 
@@ -145,6 +186,12 @@ void main() {
         qOut[globalCol] = acc;
     } else {
         uint row = globalCol - param.kOffset;
-        kCache[row * MAX_SEQ + param.context_length] = acc;
+        uint kvHead = gl_WorkGroupID.x - param.kOffset / TS;
+        quantizeParams(acc);
+        kCache[cacheSlot + row] = uint8_t(quantize(acc));
+        if (gl_LocalInvocationID.x == 0) {
+            kScale[kvHead * param.context_length + param.context_length - 1u] = qscale_sh;
+            kZero[kvHead * param.context_length + param.context_length - 1u] = qzero_sh;
+        }
     }
 }

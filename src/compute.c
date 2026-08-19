@@ -32,10 +32,6 @@ double compute() {
     float* att_q = getData(7777, 1, att_heads * att_dim);
     uint16_t* att_k = getDataFP16(8100, att_kv_heads * att_dim, att_seq);
     uint16_t* att_v = getDataFP16(9100, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_k_i8 = getDataINT8(8100, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_v_i8 = getDataINT8(9100, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_k_i4 = getDataINT4(8100, att_kv_heads * att_dim, att_seq);
-    QuantizedData att_v_i4 = getDataINT4(9100, att_kv_heads * att_dim, att_seq);
 
     int qkv_heads = 16;
     int qkv_kv_heads = 4;
@@ -75,8 +71,8 @@ double compute() {
     validateRmsNormSwigluFfnINT4(s, M, N, K, input, gamma, weightINT4, weight2INT4);
     validateOnlineSoftmax(s, softmax_n, softmax_x, softmax_v);
     validateAttentionFP16(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
-    validateAttentionINT8(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k_i8, att_v_i8);
-    validateAttentionINT4(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k_i4, att_v_i4);
+    validateAttentionINT8(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
+    validateAttentionINT4(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
     validateQkvRopeFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightFP16, qkv_theta);
     validateQkvRopeINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT8, qkv_theta);
     validateQkvRopeINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT4, qkv_theta);
@@ -99,10 +95,6 @@ double compute() {
     free(att_q);
     free(att_k);
     free(att_v);
-    free_quantized_data(att_k_i8);
-    free_quantized_data(att_v_i8);
-    free_quantized_data(att_k_i4);
-    free_quantized_data(att_v_i4);
     free(qkv_weight);
     free(qkv_weightFP16);
     free_quantized_data(qkv_weightINT8);

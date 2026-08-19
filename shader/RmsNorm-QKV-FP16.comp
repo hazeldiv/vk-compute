@@ -3,12 +3,12 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
 #define TS 256
 #define vec 4
 #define d_model 4096
 #define HEAD_DIM 256
 #define HALF 128
-#define MAX_SEQ 2048
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -29,8 +29,8 @@ layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };
 layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
 layout(set = 0, binding = 3) readonly buffer thetaBuffer { float theta[]; };
 layout(set = 0, binding = 4) buffer qOutBuffer { float qOut[]; };
-layout(set = 0, binding = 5) buffer kCacheBuffer { float kCache[]; };
-layout(set = 0, binding = 6) buffer vCacheBuffer { float vCache[]; };
+layout(set = 0, binding = 5) buffer kCacheBuffer { uint16_t kCache[]; };
+layout(set = 0, binding = 6) buffer vCacheBuffer { uint16_t vCache[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -83,9 +83,11 @@ void main() {
         baseRow += param.N;
     }
 
+    uint cacheSlot = (param.context_length - 1u) * (param.vOffset - param.kOffset);
+
     if (globalCol >= param.vOffset) {
         uint row = globalCol - param.vOffset;
-        vCache[row * MAX_SEQ + param.context_length] = acc;
+        vCache[cacheSlot + row] = uint16_t(packHalf2x16(vec2(acc)));
         return;
     }
 
@@ -119,6 +121,6 @@ void main() {
         qOut[globalCol] = acc;
     } else {
         uint row = globalCol - param.kOffset;
-        kCache[row * MAX_SEQ + param.context_length] = acc;
+        kCache[cacheSlot + row] = uint16_t(packHalf2x16(vec2(acc)));
     }
 }
