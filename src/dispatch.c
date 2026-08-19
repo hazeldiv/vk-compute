@@ -25,7 +25,9 @@ void execute(session s, operation ops[], int opCount) {
         operation* op = &ops[i];
 
         descs[i] = createDescriptor(s.dev.device, op->bufferCount, op->buffers);
-        pipes[i] = createPipeline(s.dev.device, descs[i].layout, op->shader, sizeof(int) * op->pushConstantCount);
+        char shaderPath[160];
+        snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
+        pipes[i] = createPipeline(s.dev.device, descs[i].layout, shaderPath, sizeof(int) * op->pushConstantCount);
 
         vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].pipeline);
         vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].layout, 0, 1, &descs[i].set, 0, NULL);
