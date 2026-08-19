@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TS];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nGlobal = gl_WorkGroupID.x * TS + col;
+    float acc = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            Asub[kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
+        }
+        if (tid < 32) {
+            uint block = tid / TS;
+            uint n = tid % TS;
+            uvec4 raw = B[(t * 2 + block) * dims.N + (gl_WorkGroupID.x * TS + n)];
+            Bsub[block * 2][n]     = vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y));
+            Bsub[block * 2 + 1][n] = vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) acc += dot(Asub[kv][row], Bsub[kv][col]);
+        barrier();
+    }
+    C[mGlobal * dims.N + nGlobal] = acc;
+}

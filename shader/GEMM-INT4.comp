@@ -1,0 +1,60 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TS];
+
+const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
+const uvec4 highShifts = uvec4(16, 20, 24, 28);
+
+vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
+    return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nGlobal = gl_WorkGroupID.x * TS + col;
+    float acc = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            Asub[kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
+        }
+        if (tid < 16) {
+            uint n = tid;
+            uint nGlobal = gl_WorkGroupID.x * TS + n;
+            uint g = nGlobal / 256;
+            uvec4 raw = B[(t / 2) * dims.N + nGlobal];
+            bool hi = ((t & 1) == 1);
+            uint c0 = hi ? raw.z : raw.x;
+            uint c1 = hi ? raw.w : raw.y;
+            Bsub[0][n] = unpackInt4x4(c0, lowShifts) * scale[g*(dims.K/vec)+t*4+0] - zeroPoint[g*(dims.K/vec)+t*4+0];
+            Bsub[1][n] = unpackInt4x4(c0, highShifts)* scale[g*(dims.K/vec)+t*4+1] - zeroPoint[g*(dims.K/vec)+t*4+1];
+            Bsub[2][n] = unpackInt4x4(c1, lowShifts) * scale[g*(dims.K/vec)+t*4+2] - zeroPoint[g*(dims.K/vec)+t*4+2];
+            Bsub[3][n] = unpackInt4x4(c1, highShifts)* scale[g*(dims.K/vec)+t*4+3] - zeroPoint[g*(dims.K/vec)+t*4+3];
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) acc += dot(Asub[kv][row], Bsub[kv][col]);
+        barrier();
+    }
+    C[mGlobal * dims.N + nGlobal] = acc;
+}

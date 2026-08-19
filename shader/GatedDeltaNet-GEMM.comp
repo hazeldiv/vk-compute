@@ -1,0 +1,131 @@
+#version 450
+#define TS 16
+#define DIM 128
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; } param;
+
+layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
+layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
+layout(set = 0, binding = 2) readonly buffer VBuffer { float V[]; };
+layout(set = 0, binding = 3) readonly buffer GBuffer { float G[]; };
+layout(set = 0, binding = 4) readonly buffer ARawBuffer { float aRaw[]; };
+layout(set = 0, binding = 5) readonly buffer BRawBuffer { float bRaw[]; };
+layout(set = 0, binding = 6) buffer StateBuffer { float S[]; };
+layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
+
+shared float Ks[TS][DIM];
+shared float Dk[TS][TS];
+shared float Dq[TS][TS];
+shared float delta[TS][DIM];
+shared float alpha_sh[TS];
+shared float beta_sh[TS];
+shared float alpha_P[TS + 1];
+shared float w_sh[TS];
+shared float skv[DIM];
+shared float sqv[DIM];
+
+void main() {
+    uint r = gl_LocalInvocationID.y;
+    uint c = gl_LocalInvocationID.x;
+    uint tid = r * TS + c;
+    uint h = gl_WorkGroupID.x;
+    uint qk = h >> 1;
+
+    uint numChunks = param.M / TS;
+
+    for (uint ch = 0; ch < numChunks; ch++) {
+        uint mBase = ch * TS;
+
+        if (tid == 0) {
+            for (uint m = 0; m < TS; m++) {
+                float a = aRaw[(mBase + m) * 16 + qk];
+                float b = bRaw[(mBase + m) * 16 + qk];
+                alpha_sh[m] = 1.0 / (1.0 + exp(a));
+                beta_sh[m] = 1.0 / (1.0 + exp(-b));
+            }
+            alpha_P[0] = 1.0;
+            for (uint m = 0; m < TS; m++) alpha_P[m + 1] = alpha_P[m] * alpha_sh[m];
+            for (uint m = 0; m < TS; m++) w_sh[m] = beta_sh[m] / alpha_P[m + 1];
+        }
+        barrier();
+
+        for (uint i = tid; i < TS * DIM; i += TS * TS) {
+            uint m = i / DIM;
+            uint d = i % DIM;
+            Ks[m][d] = K[(mBase + m) * (16 * DIM) + qk * DIM + d];
+        }
+        barrier();
+
+        {
+            float dk = 0.0;
+            float dq = 0.0;
+            uint qoff = (mBase + c) * (16 * DIM) + qk * DIM;
+            for (uint d = 0; d < DIM; d += 4) {
+                vec4 kj = vec4(Ks[r][d], Ks[r][d + 1], Ks[r][d + 2], Ks[r][d + 3]);
+                vec4 km = vec4(Ks[c][d], Ks[c][d + 1], Ks[c][d + 2], Ks[c][d + 3]);
+                dk += dot(kj, km);
+                vec4 qm = vec4(Q[qoff + d], Q[qoff + d + 1], Q[qoff + d + 2], Q[qoff + d + 3]);
+                dq += dot(kj, qm);
+            }
+            Dk[r][c] = dk;
+            Dq[r][c] = dq;
+        }
+        barrier();
+
+        for (uint m = 0; m < TS; m++) {
+            if (tid < DIM) {
+                uint i = tid;
+                float sk = 0.0;
+                float sq = 0.0;
+                uint qoff = (mBase + m) * (16 * DIM) + qk * DIM;
+                for (uint d = 0; d < DIM; d += 4) {
+                    vec4 sv = vec4(S[h * (DIM * DIM) + i * DIM + d],
+                                   S[h * (DIM * DIM) + i * DIM + d + 1],
+                                   S[h * (DIM * DIM) + i * DIM + d + 2],
+                                   S[h * (DIM * DIM) + i * DIM + d + 3]);
+                    vec4 km = vec4(Ks[m][d], Ks[m][d + 1], Ks[m][d + 2], Ks[m][d + 3]);
+                    sk += dot(sv, km);
+                    vec4 qm = vec4(Q[qoff + d], Q[qoff + d + 1], Q[qoff + d + 2], Q[qoff + d + 3]);
+                    sq += dot(sv, qm);
+                }
+                skv[i] = sk;
+                sqv[i] = sq;
+            }
+            barrier();
+
+            if (tid < DIM) {
+                uint i = tid;
+                float p = 0.0;
+                float qc = 0.0;
+                for (uint j = 0; j < m; j++) {
+                    float wj = w_sh[j];
+                    float dj = delta[j][i];
+                    p += wj * Dk[j][m] * dj;
+                    qc += wj * Dq[j][m] * dj;
+                }
+                float vm = V[(mBase + m) * (32 * DIM) + h * DIM + i];
+                float dv = vm - alpha_P[m] * skv[i] - alpha_P[m] * p;
+                delta[m][i] = dv;
+
+                float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];
+                float gm = G[(mBase + m) * (32 * DIM) + h * DIM + i];
+                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym * (gm / (1.0 + exp(-gm)));
+            }
+            barrier();
+        }
+
+        for (uint idx = tid; idx < DIM * DIM; idx += TS * TS) {
+            uint i = idx / DIM;
+            uint d = idx % DIM;
+            float acc = 0.0;
+            for (uint m = 0; m < TS; m++) {
+                acc += w_sh[m] * delta[m][i] * Ks[m][d];
+            }
+            float s_old = S[h * (DIM * DIM) + i * DIM + d];
+            S[h * (DIM * DIM) + i * DIM + d] = alpha_P[TS] * (s_old + acc);
+        }
+        barrier();
+    }
+}

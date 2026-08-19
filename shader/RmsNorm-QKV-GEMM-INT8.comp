@@ -1,0 +1,157 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_atomic_float : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define vec 4
+#define HEAD_DIM 256
+#define HALF 128
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M; uint N; uint K; uint tokenIdx; uint kOffset; uint vOffset; uint context_length;
+} param;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) buffer DataBuffer { vec4 x[]; };
+layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+layout(set = 0, binding = 5) readonly buffer thetaBuffer { float theta[]; };
+layout(set = 0, binding = 6) buffer qOutBuffer { float qOut[]; };
+layout(set = 0, binding = 7) buffer kCacheBuffer { uint16_t kCache[]; };
+layout(set = 0, binding = 8) buffer vCacheBuffer { uint16_t vCache[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][HEAD_DIM];
+shared float row_sums[TS][TS];
+shared float inv_rms_sh[TS];
+shared float acc_sh[TS][HEAD_DIM];
+shared float norm_sh[TS][HEAD_DIM];
+shared float inv_rms2_sh[TS];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes);
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint head = gl_WorkGroupID.x;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nBase = head * HEAD_DIM;
+    uint cacheRows = param.vOffset - param.kOffset;
+
+    float sum_sq = 0.0;
+    for (uint i = 0; i < param.K / (TS * vec); i++) {
+        vec4 v = x[mGlobal * (param.K / vec) + col * (param.K / (TS * vec)) + i];
+        sum_sq += dot(v, v);
+    }
+    row_sums[row][col] = sum_sq;
+    barrier();
+    for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+        if (col < stride) row_sums[row][col] += row_sums[row][col + stride];
+        barrier();
+    }
+    if (col == 0) inv_rms_sh[row] = inversesqrt(row_sums[row][0] / float(param.K) + EPSILON);
+    barrier();
+
+    float acc[16];
+    #pragma unroll
+    for (uint j = 0; j < 16; j++) acc[j] = 0.0;
+
+    for (uint t = 0; t < param.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (param.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * inv_rms_sh[m];
+        }
+        if (tid < HEAD_DIM) {
+            uint n = tid;
+            uint g = (nBase + n) / 256;
+            uvec4 raw = w[t * param.N + (nBase + n)];
+            #pragma unroll
+            for (uint kv = 0; kv < 4; kv++) {
+                vec4 s = scale[g * (param.K / vec) + t * 4 + kv];
+                vec4 z = zeroPoint[g * (param.K / vec) + t * 4 + kv];
+                Bsub[kv][n] = unpackUint8x4(raw[kv]) * s - z;
+            }
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            #pragma unroll
+            for (uint j = 0; j < 16; j++) acc[j] += dot(a, Bsub[kv][col * 16 + j]);
+        }
+        barrier();
+    }
+
+    #pragma unroll
+    for (uint j = 0; j < 16; j++) acc_sh[row][col * 16 + j] = acc[j];
+    barrier();
+
+    if (nBase >= param.vOffset) {
+        uint kvHead = head - param.vOffset / HEAD_DIM;
+        #pragma unroll
+        for (uint j = 0; j < 16; j++) {
+            uint d = col * 16 + j;
+            vCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(acc_sh[row][d])));
+        }
+        return;
+    }
+
+    float ss = 0.0;
+    #pragma unroll
+    for (uint j = 0; j < 16; j++) {
+        float v2 = acc_sh[row][col * 16 + j];
+        ss += v2 * v2;
+    }
+    row_sums[row][col] = ss;
+    barrier();
+    for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+        if (col < stride) row_sums[row][col] += row_sums[row][col + stride];
+        barrier();
+    }
+    if (col == 0) inv_rms2_sh[row] = inversesqrt(row_sums[row][0] / float(HEAD_DIM) + EPSILON);
+    barrier();
+
+    float token = float(param.tokenIdx + mGlobal);
+    #pragma unroll
+    for (uint j = 0; j < 16; j++) {
+        uint d = col * 16 + j;
+        float angle = token * theta[d & (HALF - 1u)];
+        float cs = cos(angle);
+        float sn = sin(angle);
+        float v;
+        if (d < HALF)
+            v = acc_sh[row][d] * cs - acc_sh[row][d + HALF] * sn;
+        else
+            v = acc_sh[row][d - HALF] * sn + acc_sh[row][d] * cs;
+        norm_sh[row][d] = v * inv_rms2_sh[row];
+    }
+    barrier();
+
+    if (nBase < param.kOffset) {
+        #pragma unroll
+        for (uint j = 0; j < 16; j++) {
+            uint d = col * 16 + j;
+            qOut[mGlobal * param.kOffset + nBase + d] = norm_sh[row][d];
+        }
+    } else {
+        uint kvHead = head - param.kOffset / HEAD_DIM;
+        #pragma unroll
+        for (uint j = 0; j < 16; j++) {
+            uint d = col * 16 + j;
+            kCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(norm_sh[row][d])));
+        }
+    }
+}

@@ -1,0 +1,82 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define vec 4
+#define K_OFF 2048
+#define V_OFF 4096
+#define G_OFF 8192
+#define A_OFF 12288
+#define B_OFF 12304
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 w[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer MatrixD { float qOut[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float kOut[]; };
+layout(set = 0, binding = 5) writeonly restrict buffer MatrixF { float vOut[]; };
+layout(set = 0, binding = 6) writeonly restrict buffer MatrixG { float gOut[]; };
+layout(set = 0, binding = 7) writeonly restrict buffer MatrixH { float aOut[]; };
+layout(set = 0, binding = 8) writeonly restrict buffer MatrixI { float bOut[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TS];
+shared float row_sums[TS][TS];
+shared float inv_rms_sh[TS];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nGlobal = gl_WorkGroupID.x * TS + col;
+
+    float sum_sq = 0.0;
+    for (uint i = 0; i < dims.K / (TS * vec); i++) {
+        vec4 v = x[mGlobal * (dims.K / vec) + col * (dims.K / (TS * vec)) + i];
+        sum_sq += dot(v, v);
+    }
+    row_sums[row][col] = sum_sq;
+    barrier();
+    for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+        if (col < stride) row_sums[row][col] += row_sums[row][col + stride];
+        barrier();
+    }
+    if (col == 0) inv_rms_sh[row] = inversesqrt(row_sums[row][0] / float(dims.K) + EPSILON);
+    barrier();
+
+    float acc = 0.0;
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * inv_rms_sh[m];
+        }
+        if (tid < 32) {
+            uint block = tid / TS;
+            uint n = tid % TS;
+            uint ng = gl_WorkGroupID.x * TS + n;
+            uvec4 raw = w[(t * 2 + block) * dims.N + ng];
+            Bsub[block * 2][n]     = vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y));
+            Bsub[block * 2 + 1][n] = vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) acc += dot(Asub[kv][row], Bsub[kv][col]);
+        barrier();
+    }
+
+    if (nGlobal < K_OFF)         qOut[mGlobal * 2048 + nGlobal] = acc;
+    else if (nGlobal < V_OFF)    kOut[mGlobal * 2048 + (nGlobal - K_OFF)] = acc;
+    else if (nGlobal < G_OFF)    vOut[mGlobal * 4096 + (nGlobal - V_OFF)] = acc;
+    else if (nGlobal < A_OFF)    gOut[mGlobal * 4096 + (nGlobal - G_OFF)] = acc;
+    else if (nGlobal < B_OFF)    aOut[mGlobal * 16 + (nGlobal - A_OFF)] = acc;
+    else                         bOut[mGlobal * 16 + (nGlobal - B_OFF)] = acc;
+}

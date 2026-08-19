@@ -59,6 +59,39 @@ double compute() {
     validateGEMVFP16(s, M, N, K, input, weightFP16);
     validateGEMVINT8(s, M, N, K, input, weightINT8);
     validateGEMVINT4(s, M, N, K, input, weightINT4);
+    int Mg = 64;
+    float* inputM = getData(4321, Mg, K);
+    validateGEMMFP16(s, Mg, N, K, inputM, weightFP16);
+    validateGEMMINT8(s, Mg, N, K, inputM, weightINT8);
+    validateGEMMINT4(s, Mg, N, K, inputM, weightINT4);
+
+    float* residualM = getData(5555, Mg, wo_n);
+    validateGemmAddFP16(s, Mg, wo_n, K, inputM, residualM, woFP16);
+    validateGemmAddINT8(s, Mg, wo_n, K, inputM, residualM, woINT8);
+    validateGemmAddINT4(s, Mg, wo_n, K, inputM, residualM, woINT4);
+    free(residualM);
+
+    validateRmsNormSwigluFfnGEMMFP16(s, Mg, N, K, inputM, gamma, weightFP16, weight2FP16);
+    validateRmsNormSwigluFfnGEMMINT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
+    validateRmsNormSwigluFfnGEMMINT4(s, Mg, N, K, inputM, gamma, weightINT4, weight2INT4);
+
+    validateRmsNormLinearProjGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16);
+    validateRmsNormLinearProjGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8);
+    validateRmsNormLinearProjGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4);
+
+    validateQkvRopeGEMMFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightFP16, qkv_theta, Mg);
+    validateQkvRopeGEMMINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightINT8, qkv_theta, Mg);
+    validateQkvRopeGEMMINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightINT4, qkv_theta, Mg);
+
+    validateAttentionGEMMFP16(s, Mg, 16, 4, 256);
+    validateAttentionGEMMINT8(s, Mg, 16, 4, 256);
+    validateAttentionGEMMINT4(s, Mg, 16, 4, 256);
+
+    validateGatedDeltaNetGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16, woFP16);
+    validateGatedDeltaNetGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8, woINT8);
+    validateGatedDeltaNetGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4, woINT4);
+
+    free(inputM);
     validateRmsNormGEMVFP16(s, M, N, K, input, gamma, weightFP16);
     validateRmsNormGEMVINT8(s, M, N, K, input, gamma, weightINT8);
     validateRmsNormGEMVINT4(s, M, N, K, input, gamma, weightINT4);

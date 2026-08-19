@@ -1,0 +1,121 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define HEAD_DIM 256
+#define KV_HEADS 4
+#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
+#define Q_DIM (16 * HEAD_DIM)
+#define NEG_INF -1e30
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint context_length; } param;
+
+layout(set = 0, binding = 0) readonly buffer keyBuffer   { uint16_t key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
+layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
+layout(set = 0, binding = 3) writeonly buffer outBuffer  { float y[]; };
+
+shared vec4    Qs[HEAD_DIM / 4][TS];
+shared f16vec4 KVs[HEAD_DIM / 4][TS];
+shared float s_max[TS][TS];
+shared float s_exp[TS][TS];
+shared float s_p[TS][TS];
+
+vec4 loadHalf4(uint b0, uint b1, uint b2, uint b3) {
+    return vec4(unpackHalf2x16(b0 | (b1 << 16)),
+                unpackHalf2x16(b2 | (b3 << 16)));
+}
+
+void main() {
+    uint r = gl_LocalInvocationID.y;
+    uint c = gl_LocalInvocationID.x;
+    uint tid = r * TS + c;
+    uint h = gl_WorkGroupID.x;
+    uint kvh = h / KV_HEADS;
+    uint mBase = gl_WorkGroupID.y * TS;
+    uint mTok = mBase + r;
+
+    for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
+        uint dv = i / TS;
+        uint tok = i % TS;
+        Qs[dv][tok] = query[(mBase + tok) * 1024 + h * (HEAD_DIM / 4) + dv];
+    }
+    barrier();
+
+    float m_prev = NEG_INF;
+    float l_prev = 0.0;
+    vec4 oacc[4];
+    #pragma unroll
+    for (uint j = 0; j < 4; j++) oacc[j] = vec4(0.0);
+
+    uint numTiles = (param.context_length + TS - 1) / TS;
+    for (uint t = 0; t < numTiles; t++) {
+        uint kvTok = t * TS + c;
+
+        for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
+            uint dv = i / TS;
+            uint tok = i % TS;
+            uint base = (t * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
+            KVs[dv][tok] = f16vec4(loadHalf4(uint(key[base]), uint(key[base + 1]), uint(key[base + 2]), uint(key[base + 3])));
+        }
+        barrier();
+
+        float score = NEG_INF;
+        if (kvTok < param.context_length && kvTok <= mTok) {
+            score = 0.0;
+            for (uint dv = 0; dv < HEAD_DIM / 4; dv++)
+                score += dot(Qs[dv][r], vec4(KVs[dv][c]));
+        }
+        s_max[r][c] = score;
+        barrier();
+        for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+            if (c < stride) s_max[r][c] = max(s_max[r][c], s_max[r][c + stride]);
+            barrier();
+        }
+        float tile_max = s_max[r][0];
+        float m_next = max(m_prev, tile_max);
+        float alpha = (m_prev == NEG_INF) ? 0.0 : exp(m_prev - m_next);
+        float beta = exp(tile_max - m_next);
+        l_prev = alpha * l_prev;
+
+        float e = (score == NEG_INF) ? 0.0 : exp(score - tile_max);
+        s_p[r][c] = e;
+        s_exp[r][c] = e;
+        barrier();
+        for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+            if (c < stride) s_exp[r][c] += s_exp[r][c + stride];
+            barrier();
+        }
+        l_prev += beta * s_exp[r][0];
+        #pragma unroll
+        for (uint j = 0; j < 4; j++) oacc[j] *= alpha;
+
+        for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
+            uint dv = i / TS;
+            uint tok = i % TS;
+            uint base = (t * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
+            KVs[dv][tok] = f16vec4(loadHalf4(uint(value[base]), uint(value[base + 1]), uint(value[base + 2]), uint(value[base + 3])));
+        }
+        barrier();
+
+        for (uint kk = 0; kk < TS; kk++) {
+            float p = s_p[r][kk] * beta;
+            #pragma unroll
+            for (uint j = 0; j < 4; j++) oacc[j] += p * vec4(KVs[c * 4 + j][kk]);
+        }
+        m_prev = m_next;
+        barrier();
+    }
+
+    #pragma unroll
+    for (uint j = 0; j < 4; j++) {
+        uint base = mTok * Q_DIM + h * HEAD_DIM + c * 16 + j * 4;
+        vec4 o = (l_prev > 0.0) ? (oacc[j] / l_prev) : vec4(0.0);
+        y[base + 0] = o.x;
+        y[base + 1] = o.y;
+        y[base + 2] = o.z;
+        y[base + 3] = o.w;
+    }
+}

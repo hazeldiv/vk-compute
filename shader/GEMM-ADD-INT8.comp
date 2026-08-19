@@ -1,0 +1,59 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
+layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
+layout(set = 0, binding = 5) readonly restrict buffer MatrixR { float R[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TS];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes);
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nGlobal = gl_WorkGroupID.x * TS + col;
+    float acc = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            Asub[kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
+        }
+        if (tid < 16) {
+            uint n = tid;
+            uint nGlobal = gl_WorkGroupID.x * TS + n;
+            uint g = nGlobal / 256;
+            uvec4 raw = B[t * dims.N + nGlobal];
+            #pragma unroll
+            for (uint kv = 0; kv < 4; kv++) {
+                vec4 s = scale[g * (dims.K / vec) + t * 4 + kv];
+                vec4 z = zeroPoint[g * (dims.K / vec) + t * 4 + kv];
+                vec4 q = unpackUint8x4(raw[kv]);
+                Bsub[kv][n] = q * s - z;
+            }
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) acc += dot(Asub[kv][row], Bsub[kv][col]);
+        barrier();
+    }
+    C[mGlobal * dims.N + nGlobal] = acc + R[mGlobal * dims.N + nGlobal];
+}
