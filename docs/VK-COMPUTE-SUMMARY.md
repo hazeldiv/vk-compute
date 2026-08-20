@@ -25,6 +25,7 @@ A Vulkan-based GPU compute engine for running LLM inference (target: **Qwen3.5 9
 | `n_qk`, `n_v`, `dim` | 16 / 32 / 128 | gated delta-net geometry |
 | `proj_n` | 12320 | delta-net input projection (Q,K,V,G,A,B) |
 | `M` (prefill) | 64 | prompt tokens processed by GEMM shaders |
+| `vocab_size` | 81920 | pruned lm-head vocab (= 320 × 256 full workgroups) |
 
 ---
 
@@ -46,6 +47,8 @@ vk-compute/
 └── shader/
     ├── Utility/                # shared matmul primitives
     │   ├── FP16/ INT8/ INT4/   # GEMV-*, GEMV-ADD-*, GEMM-*, GEMM-ADD-*, RmsNorm-GEMV-*
+    │   ├── FP16/               # LMHead-GEMV-ArgMax-FP16.comp
+    │   └── ArgMax-Reduce.comp  # final argmax over per-workgroup maxes (precision-agnostic, at root)
     ├── Full-Attention/         # QKV projection + RoPE + full attention
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-*, Att-full-* (GEMV + GEMM variants)
     ├── Linear-Attention/       # gated delta-net
@@ -145,6 +148,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - Generic GEMM/GEMV/FFN/LinearProj: `{M, N, K}`.
 - QKV: `{M, N, K, tokenIdx, kOffset, vOffset, context_length}` (7 ints, ≤ MAX_PUSH_CONSTANTS = 8).
 - Attention: `{context_length}`. GatedDeltaNet: `{M}`.
+- LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize}` for ArgMax-Reduce.
 
 ### 4.6 Dispatch geometry
 
@@ -153,6 +157,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - QKV GEMM: `dispatchX = 24` (heads), `dispatchY = M/16` (head-wide 16×256 tile).
 - Attention: `dispatchX = heads`, `dispatchY = seq/16`.
 - GatedDeltaNet GEMM: `dispatchX = n_v = 32`, one workgroup per v-head.
+- LMHead-GEMV-ArgMax: `dispatchX = (vocab+255)/256`; ArgMax-Reduce: single workgroup.
 
 ---
 
@@ -209,8 +214,9 @@ Key CPU references:
 - `qkv_rope_ref` — per-head RMSNorm → RoPE with `angle = token * theta[col%128]`.
 - `validate_attention` / `validate_attention_multi` — online-softmax attention, causal masked (`t <= m`) in the multi-token version.
 - `deltanet_ref` — the sequential gated delta-net recurrence (see §7.3).
+- `lmhead_argmax_ref_fp16` — streams one logit column at a time (no full logits array), tracks the running max with smallest-index tie-break.
 
-`compute()` (src/compute.c) wires everything: it keeps the original M=1 GEMV validations and adds M=64 (`Mg = 64`) GEMM validations with an M-token input `inputM = getData(4321, Mg, K)`.
+`compute()` (src/compute.c) wires everything: it keeps the original M=1 GEMV validations and adds M=64 (`Mg = 64`) GEMM validations with an M-token input `inputM = getData(4321, Mg, K)`, plus the FP16 lm-head argmax validation over `vocab_size = 81920` (weights `lmHeadFP16 = getDataFP16(15001, K, vocab_size)`, ~640 MB).
 
 ---
 
@@ -353,6 +359,144 @@ Generic GEMM + residual: `C[mGlobal*dims.N + nGlobal] = acc + R[mGlobal*dims.N +
 #### `RmsNorm-GEMV-*`
 
 Fused RMSNorm + GEMV for decode: stage `x * gamma` into shared while computing `sum(x²)` via subgroup add → `inv_rms`, then the GEMV loop with `cache[k] * inv_rms`.
+
+#### `LMHead-GEMV-ArgMax-FP16` (decode, output token selection)
+
+FP16 GEMV over the lm-head weight `[K][vocab]` fused with a workgroup-wide argmax reduction — one dispatch pass, no full logits buffer (the largest intermediate is 320 × 4 B per output buffer). Workgroup = 256 threads, one output column each, `dispatchX = (vocab+255)/256`. Bindings: `0 = x (vec4[])`, `1 = w (uvec4[])`, `2 = maxValue (float[], fp32)`, `3 = maxIndex (uint[])`; push constants `{M, N, K}`. Full source:
+
+```glsl
+#version 450
+#define TS 256
+#define vec 4
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MaxValueBuffer { float maxValue[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
+
+shared vec4 Asub[2][TS];
+shared float redValue[TS];
+shared uint redIndex[TS];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+
+    float acc = 0.0;
+    if (globalCol < dims.N) {
+        Asub[0][col] = A[col];
+    }
+    barrier();
+    uint baseRow = 0;
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (globalCol < dims.N) {
+            if (t+1 < numTiles) {
+                Asub[nxt][col] = A[(t+1)*TS + col];
+            }
+
+            #pragma unroll
+            for (uint k=0;k<TS; k+=2) {
+                uvec4 rawInput = B[baseRow + globalCol];
+                vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+                vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+                acc += dot(Asub[cur][k], outVectorA);
+                acc += dot(Asub[cur][k+1], outVectorB);
+                baseRow += dims.N;
+            }
+        }
+        barrier();
+    }
+    if (globalCol >= dims.N) {
+        acc = uintBitsToFloat(0xFF800000u);
+    }
+
+    redValue[col] = acc;
+    redIndex[col] = globalCol;
+    barrier();
+    for (uint stride = TS/2; stride > 0; stride >>= 1) {
+        if (col < stride) {
+            float otherValue = redValue[col + stride];
+            uint otherIndex = redIndex[col + stride];
+            if (otherValue > redValue[col] || (otherValue == redValue[col] && otherIndex < redIndex[col])) {
+                redValue[col] = otherValue;
+                redIndex[col] = otherIndex;
+            }
+        }
+        barrier();
+    }
+    if (col == 0) {
+        maxValue[gl_WorkGroupID.x] = redValue[0];
+        maxIndex[gl_WorkGroupID.x] = redIndex[0];
+    }
+}
+```
+
+**How it works:** the GEMV loop is identical to `GEMV-FP16` (ping-pong `Asub`, 2 vec4 k-rows per `uvec4` weight load). Out-of-range threads (`globalCol >= N`, partial last workgroup) skip the compute but still execute every barrier, and carry `-inf` (`uintBitsToFloat(0xFF800000u)`) so they can never win the reduction. Then a shared tree reduction over 256 threads finds the max logit and its column; ties resolve to the **smaller index** for determinism. Thread 0 writes the workgroup's winner to `maxValue[wgID]` / `maxIndex[wgID]` (fp32 value + global column index).
+
+#### `ArgMax-Reduce.comp` (second stage, precision-agnostic)
+
+One workgroup of 256 threads reduces the per-workgroup winners from the first pass to a single token id. Bindings: `0 = maxValue (float[])`, `1 = maxIndex (uint[])`, `2 = result (uint[])`; push constant `{vocabSize}`; `dispatchX = 1`. Full source:
+
+```glsl
+#version 450
+#define TS 256
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params { uint vocabSize; } params;
+
+layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
+
+shared float redValue[TS];
+shared uint redIndex[TS];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint numGroups = (params.vocabSize + TS - 1) / TS;
+
+    float bestValue = uintBitsToFloat(0xFF800000u);
+    uint bestIndex = 0;
+
+    for (uint i = tid; i < numGroups; i += TS) {
+        float v = maxValue[i];
+        uint idx = maxIndex[i];
+        if (v > bestValue || (v == bestValue && idx < bestIndex)) {
+            bestValue = v;
+            bestIndex = idx;
+        }
+    }
+
+    redValue[tid] = bestValue;
+    redIndex[tid] = bestIndex;
+    barrier();
+    for (uint stride = TS/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            float otherValue = redValue[tid + stride];
+            uint otherIndex = redIndex[tid + stride];
+            if (otherValue > redValue[tid] || (otherValue == redValue[tid] && otherIndex < redIndex[tid])) {
+                redValue[tid] = otherValue;
+                redIndex[tid] = otherIndex;
+            }
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        result[0] = redIndex[0];
+    }
+}
+```
+
+**How it works:** `numGroups = ceil(vocabSize/256)` (= 320 for vocab 81920); each thread strided-loads `maxValue[i]`/`maxIndex[i]` in chunks of 256 (`i += TS` loop), keeping the running best with the same smallest-index tie-break, then one shared tree reduction; thread 0 writes the final token id to `result[0]`. Both shaders are chained as two `operation`s in one `execute()` call (the dispatch harness inserts a write→read barrier between ops).
 
 ---
 
@@ -875,6 +1019,7 @@ GEMV version: 256 threads, one output column each, ping-pong shared buffers for 
 4. **GatedDeltaNet is numerically unstable** with the harness's random weights (`−beta·k·kᵀ` has a large eigenvalue, so the state overflows within ~16 tokens). The `validateGatedDeltaNetGEMM*` functions scale the projection weights by 1/64 (exact in fp16 — exponent shift) so the recurrence stays stable over M=64 and the chunked-vs-sequential comparison is meaningful.
 5. **Windows make quirks:** recipes run through `cmd.exe` — `mkdir`/`if exist` paths must use backslashes (`/` is treated as a switch prefix), and shader folder names must not contain spaces (make word-splits `$(wildcard)` output).
 6. **KV cache layout is `[token][row]`** (transposed relative to the host `[row][seq]`), so attention shaders index `cache[token*rows + row]`.
+7. **Workgroup-wide barriers need every thread present.** For GEMV shaders with a partial last workgroup (N not divisible by 256), out-of-range threads must not early-return — they still run the loop/barriers and carry a `-inf` (`uintBitsToFloat(0xFF800000u)`) accumulator so they can never win the argmax reduction.
 
 ---
 
@@ -893,6 +1038,7 @@ GEMV version: 256 threads, one output column each, ping-pong shared buffers for 
 | GatedDeltaNet-GEMM FP16 (out / state S) | 0.000065 / 0.000005 | ~57 ms |
 | GatedDeltaNet-GEMM INT8 | 0.000061 / 0.000005 | ~64 ms |
 | GatedDeltaNet-GEMM INT4 | 0.000103 / 0.000006 | ~67 ms |
+| LMHead-ArgMax FP16 (token index) | exact match | ~117 ms (4096 × 81920 GEMV + reductions) |
 
 The larger k/v-cache errors are fp16/int4 cache quantization, matching the existing GEMV baselines. Note the CPU references are single-threaded and dominate total runtime (`make run` takes several minutes); the GPU shader times above are per-shader query-pool timestamps.
 

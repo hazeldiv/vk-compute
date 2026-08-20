@@ -1,0 +1,76 @@
+#version 450
+#define TS 256
+#define vec 4
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer MaxValueBuffer { float maxValue[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
+
+shared vec4 Asub[2][TS];
+shared float redValue[TS];
+shared uint redIndex[TS];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+
+    float acc = 0.0;
+    if (globalCol < dims.N) {
+        Asub[0][col] = A[col];
+    }
+    barrier();
+    uint baseRow = 0;
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (globalCol < dims.N) {
+            if (t+1 < numTiles) {
+                Asub[nxt][col] = A[(t+1)*TS + col];
+            }
+
+            #pragma unroll
+            for (uint k=0;k<TS; k+=2) {
+                uvec4 rawInput = B[baseRow + globalCol];
+                vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+                vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+                acc += dot(Asub[cur][k], outVectorA);
+                acc += dot(Asub[cur][k+1], outVectorB);
+                baseRow += dims.N;
+            }
+        }
+        barrier();
+    }
+    if (globalCol >= dims.N) {
+        acc = uintBitsToFloat(0xFF800000u);
+    }
+
+    redValue[col] = acc;
+    redIndex[col] = globalCol;
+    barrier();
+    for (uint stride = TS/2; stride > 0; stride >>= 1) {
+        if (col < stride) {
+            float otherValue = redValue[col + stride];
+            uint otherIndex = redIndex[col + stride];
+            if (otherValue > redValue[col] || (otherValue == redValue[col] && otherIndex < redIndex[col])) {
+                redValue[col] = otherValue;
+                redIndex[col] = otherIndex;
+            }
+        }
+        barrier();
+    }
+    if (col == 0) {
+        maxValue[gl_WorkGroupID.x] = redValue[0];
+        maxIndex[gl_WorkGroupID.x] = redIndex[0];
+    }
+}

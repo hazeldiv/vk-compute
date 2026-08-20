@@ -1,0 +1,50 @@
+#version 450
+#define TS 256
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params {
+    uint vocabSize;
+} params;
+
+layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
+
+shared float redValue[TS];
+shared uint redIndex[TS];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint numGroups = (params.vocabSize + TS - 1) / TS;
+
+    float bestValue = uintBitsToFloat(0xFF800000u);
+    uint bestIndex = 0;
+
+    for (uint i = tid; i < numGroups; i += TS) {
+        float v = maxValue[i];
+        uint idx = maxIndex[i];
+        if (v > bestValue || (v == bestValue && idx < bestIndex)) {
+            bestValue = v;
+            bestIndex = idx;
+        }
+    }
+
+    redValue[tid] = bestValue;
+    redIndex[tid] = bestIndex;
+    barrier();
+    for (uint stride = TS/2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            float otherValue = redValue[tid + stride];
+            uint otherIndex = redIndex[tid + stride];
+            if (otherValue > redValue[tid] || (otherValue == redValue[tid] && otherIndex < redIndex[tid])) {
+                redValue[tid] = otherValue;
+                redIndex[tid] = otherIndex;
+            }
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        result[0] = redIndex[0];
+    }
+}

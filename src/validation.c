@@ -2857,3 +2857,56 @@ void validateQkvRopeGEMMINT4(session s, int K, int qkv_heads, int qkv_kv_heads, 
     free(kScale); free(kZero); free(vScale); free(vZero);
     free(kstored); free(vstored);
 }
+
+static int lmhead_argmax_ref_fp16(const float* x, const uint16_t* w, int n, int k) {
+    float best = -FLT_MAX;
+    int bestIdx = 0;
+    for (int j = 0; j < n; j++) {
+        float acc = 0.0f;
+        for (int i = 0; i < k; i++) acc += x[i] * fp16_to_float(w[i * n + j]);
+        if (acc > best) {
+            best = acc;
+            bestIdx = j;
+        }
+    }
+    return bestIdx;
+}
+
+void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uint16_t* lmHeadFP16) {
+    int numGroups = (vocabSize + 255) / 256;
+    float* maxValues = (float*)calloc(numGroups, sizeof(float));
+    uint32_t* maxIndices = (uint32_t*)calloc(numGroups, sizeof(uint32_t));
+    uint32_t* result = (uint32_t*)calloc(1, sizeof(uint32_t));
+
+    uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * vocabSize);
+    transpose_block16((uint8_t*)lmHeadFP16, (uint8_t*)transposed, K, vocabSize, QUANT_FP16);
+
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * K * vocabSize, MEMORY_RAM);
+    buffer maxValueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxValues, sizeof(float) * numGroups, MEMORY_VRAM);
+    buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxIndices, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
+    buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, result, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer}, .bufferCount = 4,
+         .pushConstants = {1, vocabSize, K}, .pushConstantCount = 3,
+         .dispatchX = numGroups, .dispatchY = 1, .dispatchZ = 1},
+        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer}, .bufferCount = 3,
+         .pushConstants = {vocabSize}, .pushConstantCount = 1,
+         .dispatchX = 1, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    int ref = lmhead_argmax_ref_fp16(input, lmHeadFP16, vocabSize, K);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, resultBuffer, result);
+    printf("LMHead-ArgMax FP16: shader[0]= %u ref= %d\n", result[0], ref);
+    printf("LMHead-ArgMax FP16 time: %.3f ms\n", ms);
+
+    destroy_buffers(s, bufs, 5);
+    free(maxValues);
+    free(maxIndices);
+    free(result);
+}

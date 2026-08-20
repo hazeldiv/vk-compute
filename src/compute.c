@@ -59,6 +59,12 @@ double compute() {
     validateGEMVFP16(s, M, N, K, input, weightFP16);
     validateGEMVINT8(s, M, N, K, input, weightINT8);
     validateGEMVINT4(s, M, N, K, input, weightINT4);
+
+    int vocab_size = 81920;
+    uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
+    validateLmHeadArgMaxFP16(s, vocab_size, K, input, lmHeadFP16);
+    free(lmHeadFP16);
+
     int Mg = 64;
     float* inputM = getData(4321, Mg, K);
     validateGEMMFP16(s, Mg, N, K, inputM, weightFP16);
