@@ -63,9 +63,15 @@ double compute() {
     int vocab_size = 81920;
     uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
     validateLmHeadArgMaxFP16(s, vocab_size, K, input, lmHeadFP16);
-    free(lmHeadFP16);
 
     int Mg = 64;
+    uint32_t token = 12345 % vocab_size;
+    validateEmbedRmsNormLinearProjFP16(s, vocab_size, K, token, gamma, lmHeadFP16, w_inFP16);
+    uint32_t tokensM[64];
+    for (int i = 0; i < Mg; i++) tokensM[i] = (uint32_t)((i * 1237 + 555) % vocab_size);
+    validateEmbedRmsNormLinearProjGEMMFP16(s, Mg, vocab_size, K, tokensM, gamma, lmHeadFP16, w_inFP16);
+    free(lmHeadFP16);
+
     float* inputM = getData(4321, Mg, K);
     validateGEMMFP16(s, Mg, N, K, inputM, weightFP16);
     validateGEMMINT8(s, Mg, N, K, inputM, weightINT8);

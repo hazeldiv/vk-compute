@@ -52,7 +52,7 @@ vk-compute/
     ├── Full-Attention/         # QKV projection + RoPE + full attention
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-*, Att-full-* (GEMV + GEMM variants)
     ├── Linear-Attention/       # gated delta-net
-    │   ├── FP16/ INT8/ INT4/   # RmsNorm-LinearProj-*
+    │   ├── FP16/ INT8/ INT4/   # RmsNorm-LinearProj-* + Embed-RmsNorm-LinearProj-* (FP16 only)
     │   ├── GatedDeltaNet.comp  GatedDeltaNet-GEMM.comp   (precision-agnostic, at root)
     ├── FFN/                    # swiglu feed-forward
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-swiglu-ffn-*
@@ -149,6 +149,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - QKV: `{M, N, K, tokenIdx, kOffset, vOffset, context_length}` (7 ints, ≤ MAX_PUSH_CONSTANTS = 8).
 - Attention: `{context_length}`. GatedDeltaNet: `{M}`.
 - LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize}` for ArgMax-Reduce.
+- Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
 
 ### 4.6 Dispatch geometry
 
@@ -815,6 +816,17 @@ void main() {
 
 RMSNorm + single GEMM over `N = 12320`, output routed by column with per-token strides: `q[2048]` (cols < 2048), `k[2048]` (< 4096), `v[4096]` (< 8192), `g[4096]` (< 12288), `a[16]` (< 12304), `b[16]` (else).
 
+#### `Embed-RmsNorm-LinearProj-*` (token-embedding fused variant, FP16 only)
+
+Replaces the `x` input with a token-id lookup: the token id(s) (a `uint` buffer, GEMV: 1 element, GEMM: `M` elements) index into the **tied lm-head buffer** — the same block-transposed FP16 `uvec4[]` layout as `LMHead-GEMV-ArgMax-FP16.comp` binding 1 — to fetch the 4096-dim embedding row, then RMSNorm + LinearProj proceed exactly as `RmsNorm-LinearProj-*`. This shader is meant to run right after the LM-head argmax (token selection) so the next decode step can start from the selected token's embedding without CPU readback.
+
+- **Bindings (GEMV and GEMM):** `0 = tokenIds (uint[])`, `1 = lm (uvec4[], transposed lm head [K][vocab])`, `2 = gamma (vec4[])`, `3 = w (uvec4[], transposed w_in [K][12320])`, `4..9 = q/k/v/g/a/b out (float[])`. Push constants `{M, N, K, V}`.
+- **Embedding fetch:** vec4 index `i` (0..1023) reads `lm[(i/2)*V + tok]`; even `i` takes `unpackHalf2x16(raw.x), unpackHalf2x16(raw.y)`, odd `i` takes `.z,.w` (each `uvec4` = 2 vec4 k-rows of a column).
+- **GEMV (`Embed-RmsNorm-LinearProj-FP16.comp`):** 256 threads/col, subgroup RMSNorm sum identical to `RmsNorm-LinearProj-FP16`; `dispatchX = (12320+255)/256 = 49`.
+- **GEMM (`Embed-RmsNorm-LinearProj-GEMM-FP16.comp`):** 16×16 tiled clone of `RmsNorm-LinearProj-GEMM-FP16`; per-token embedding fetched by `tokenIds[mGlobal]` in both the sum-sq pass and the A-tile staging; `dispatchX = 12320/16 = 770`, `dispatchY = M/16`.
+
+Note the lm-head column fetch is strided by `V` uvec4s (column-major access into a 640 MB buffer), so the GEMM variant is slower than the plain `x`-input GEMM (~150 ms vs ~45 ms at M=64) — a layout artifact of tied embeddings, not a correctness issue.
+
 #### `GatedDeltaNet.comp` (decode, one token)
 
 Workgroup = one v-head; state `S` is a 128×128 matrix per head in VRAM. Per token:
@@ -1039,6 +1051,8 @@ GEMV version: 256 threads, one output column each, ping-pong shared buffers for 
 | GatedDeltaNet-GEMM INT8 | 0.000061 / 0.000005 | ~64 ms |
 | GatedDeltaNet-GEMM INT4 | 0.000103 / 0.000006 | ~67 ms |
 | LMHead-ArgMax FP16 (token index) | exact match | ~117 ms (4096 × 81920 GEMV + reductions) |
+| Embed-RmsNorm-LinearProj FP16 (q / k / v / g / a / b) | 0.000164 / 0.000145 / 0.000168 / 0.000175 / 0.000088 / 0.000084 | ~2.6 ms |
+| Embed-RmsNorm-LinearProj-GEMM FP16 (q / k / v / g / a / b) | 0.000381 / 0.000313 / 0.000290 / 0.000381 / 0.000198 / 0.000252 | ~155 ms |
 
 The larger k/v-cache errors are fp16/int4 cache quantization, matching the existing GEMV baselines. Note the CPU references are single-threaded and dominate total runtime (`make run` takes several minutes); the GPU shader times above are per-shader query-pool timestamps.
 
