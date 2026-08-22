@@ -1,9 +1,17 @@
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include "weights.h"
 
-static tensor createTensor(session s, int seed, int rows, int cols, QuantType q, float wscale) {
+static int64_t weightBytes = 0;
+
+static void countBuffer(const char* name, int layer, buffer b) {
+    weightBytes += b.size;
+    printf("%s[%d]: %lld bytes (%.2f MB) | Total: %lld bytes (%.2f MB)\n", name, layer, (long long)b.size, (double)b.size / (1024.0 * 1024.0), (long long)weightBytes, (double)weightBytes / (1024.0 * 1024.0));
+}
+
+static tensor createTensor(session s, const char* name, int layer, int seed, int rows, int cols, QuantType q, float wscale) {
     tensor t = {0};
     t.q = q;
     t.rows = rows;
@@ -18,6 +26,7 @@ static tensor createTensor(session s, int seed, int rows, int cols, QuantType q,
         uint16_t* tw = (uint16_t*)malloc(sizeof(uint16_t) * rows * cols);
         transpose_block16((uint8_t*)w, (uint8_t*)tw, rows, cols, QUANT_FP16);
         t.data = createBuffer(s.dev.device, s.dev.physicalDevice, tw, sizeof(uint16_t) * rows * cols, MEMORY_VRAM);
+        countBuffer(name, layer, t.data);
         free(tw);
         free(w);
     } else if (q == QUANT_INT8) {
@@ -31,8 +40,14 @@ static tensor createTensor(session s, int seed, int rows, int cols, QuantType q,
         uint8_t* tw = (uint8_t*)malloc(rows * cols);
         transpose_block16(qd.data, tw, rows, cols, QUANT_INT8);
         t.data = createBuffer(s.dev.device, s.dev.physicalDevice, tw, rows * cols, MEMORY_VRAM);
+        countBuffer(name, layer, t.data);
+        char label[64];
+        snprintf(label, sizeof(label), "%s-scale", name);
         t.scale = createBuffer(s.dev.device, s.dev.physicalDevice, qd.scale, sizeof(float) * rows * blocks, MEMORY_VRAM);
+        countBuffer(label, layer, t.scale);
+        snprintf(label, sizeof(label), "%s-zero", name);
         t.zero = createBuffer(s.dev.device, s.dev.physicalDevice, qd.z, sizeof(float) * rows * blocks, MEMORY_VRAM);
+        countBuffer(label, layer, t.zero);
         free(tw);
         free_quantized_data(qd);
     } else {
@@ -46,8 +61,14 @@ static tensor createTensor(session s, int seed, int rows, int cols, QuantType q,
         uint8_t* tw = (uint8_t*)malloc(rows * cols / 2);
         transpose_block16(qd.data, tw, rows, cols, QUANT_INT4);
         t.data = createBuffer(s.dev.device, s.dev.physicalDevice, tw, rows * cols / 2, MEMORY_VRAM);
+        countBuffer(name, layer, t.data);
+        char label[64];
+        snprintf(label, sizeof(label), "%s-scale", name);
         t.scale = createBuffer(s.dev.device, s.dev.physicalDevice, qd.scale, sizeof(float) * rows * blocks, MEMORY_VRAM);
+        countBuffer(label, layer, t.scale);
+        snprintf(label, sizeof(label), "%s-zero", name);
         t.zero = createBuffer(s.dev.device, s.dev.physicalDevice, qd.z, sizeof(float) * rows * blocks, MEMORY_VRAM);
+        countBuffer(label, layer, t.zero);
         free(tw);
         free_quantized_data(qd);
     }
@@ -63,22 +84,26 @@ static void destroyTensor(session s, tensor* t) {
 
 model_weights createWeights(session s, const model_config* spec) {
     model_weights w = {0};
+    weightBytes = 0;
 
     float* theta = (float*)malloc(sizeof(float) * (MODEL_HEAD_DIM / 2));
     for (int i = 0; i < MODEL_HEAD_DIM / 2; i++) {
         theta[i] = (float)pow(1e6, -((double)i) / (MODEL_HEAD_DIM / 2));
     }
-    w.theta = createBuffer(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_HEAD_DIM / 2), MEMORY_RAM);
+    w.theta = createBuffer(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_HEAD_DIM / 2), MEMORY_VRAM);
+    countBuffer("theta", -1, w.theta);
     free(theta);
 
     float* gammaFinal = getData(77771, 1, MODEL_K);
     w.gammaFinal = createBuffer(s.dev.device, s.dev.physicalDevice, gammaFinal, sizeof(float) * MODEL_K, MEMORY_VRAM);
+    countBuffer("gammaFinal", -1, w.gammaFinal);
     free(gammaFinal);
 
     uint16_t* lm = getDataFP16(15001, MODEL_K, MODEL_VOCAB);
     uint16_t* tlm = (uint16_t*)malloc(sizeof(uint16_t) * MODEL_K * MODEL_VOCAB);
     transpose_block16((uint8_t*)lm, (uint8_t*)tlm, MODEL_K, MODEL_VOCAB, QUANT_FP16);
     w.lmHead = createBuffer(s.dev.device, s.dev.physicalDevice, tlm, sizeof(uint16_t) * MODEL_K * MODEL_VOCAB, MEMORY_VRAM);
+    countBuffer("lmHead", -1, w.lmHead);
     w.embed = w.lmHead;
     free(tlm);
     free(lm);
@@ -91,24 +116,31 @@ model_weights createWeights(session s, const model_config* spec) {
         float* gIn = getData(80001 + L, 1, MODEL_K);
         float* gF = getData(81001 + L, 1, MODEL_K);
         w.gammaIn[L] = createBuffer(s.dev.device, s.dev.physicalDevice, gIn, sizeof(float) * MODEL_K, MEMORY_VRAM);
+        countBuffer("gammaIn", L, w.gammaIn[L]);
         w.gammaF[L] = createBuffer(s.dev.device, s.dev.physicalDevice, gF, sizeof(float) * MODEL_K, MEMORY_VRAM);
+        countBuffer("gammaF", L, w.gammaF[L]);
         free(gIn);
         free(gF);
 
         if (ly->attn.type == ATTENTION_FULL) {
-            w.proj[L] = createTensor(s, 82001 + L * 10, MODEL_K, MODEL_QKV_N, q, 1.0f);
-            w.out[L] = createTensor(s, 83001 + L * 10, MODEL_K, MODEL_K, q, 1.0f);
+            w.proj[L] = createTensor(s, "proj", L, 82001 + L * 10, MODEL_K, MODEL_QKV_N, q, 1.0f);
+            w.out[L] = createTensor(s, "out", L, 83001 + L * 10, MODEL_K, MODEL_K, q, 1.0f);
         } else if (ly->attn.type == ATTENTION_DELTA) {
-            w.proj[L] = createTensor(s, 82001 + L * 10, MODEL_K, MODEL_PROJ_N, q, 1.0f / 64.0f);
-            w.out[L] = createTensor(s, 83001 + L * 10, MODEL_K, MODEL_K, q, 1.0f);
+            w.proj[L] = createTensor(s, "proj", L, 82001 + L * 10, MODEL_K, MODEL_PROJ_N, q, 1.0f / 64.0f);
+            w.out[L] = createTensor(s, "out", L, 83001 + L * 10, MODEL_K, MODEL_K, q, 1.0f);
         }
 
         if (ly->ffn.type == FFN_SWIGLU) {
-            w.gate[L] = createTensor(s, 84001 + L * 10, MODEL_K, MODEL_FFN_N, f, 1.0f);
-            w.up[L] = createTensor(s, 85001 + L * 10, MODEL_K, MODEL_FFN_N, f, 1.0f);
-            w.down[L] = createTensor(s, 86001 + L * 10, MODEL_FFN_N, MODEL_K, f, 1.0f);
+            w.gate[L] = createTensor(s, "gate", L, 84001 + L * 10, MODEL_K, MODEL_FFN_N, f, 1.0f);
+            w.up[L] = createTensor(s, "up", L, 85001 + L * 10, MODEL_K, MODEL_FFN_N, f, 1.0f);
+            w.down[L] = createTensor(s, "down", L, 86001 + L * 10, MODEL_FFN_N, MODEL_K, f, 1.0f);
         }
     }
+
+    printf("total weights: %lld bytes (%.2f MB, %.2f GB)\n",
+           (long long)weightBytes,
+           (double)weightBytes / (1024.0 * 1024.0),
+           (double)weightBytes / (1024.0 * 1024.0 * 1024.0));
 
     return w;
 }

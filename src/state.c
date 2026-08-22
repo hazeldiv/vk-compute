@@ -31,6 +31,7 @@ model_state createState(session s, const model_config* spec, int maxM) {
         const layer* ly = &spec->layers[L];
         if (ly->attn.type == ATTENTION_FULL) {
             int64_t cacheBytes = (int64_t)MODEL_KV_ROWS * MODEL_MAX_CTX;
+            
             if (ly->attn.q == QUANT_INT4) {
                 st.kCache[L] = createZeroed(s, cacheBytes);
                 st.vCache[L] = createZeroed(s, cacheBytes);
@@ -38,7 +39,9 @@ model_state createState(session s, const model_config* spec, int maxM) {
                 st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
                 st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
                 st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
+                printf("Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
             } else {
+                printf("Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
                 st.kCache[L] = createZeroed(s, cacheBytes * 2);
                 st.vCache[L] = createZeroed(s, cacheBytes * 2);
             }
