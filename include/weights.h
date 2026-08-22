@@ -17,6 +17,7 @@ typedef struct tensor {
 
 typedef struct model_weights {
     buffer theta;
+    buffer embed;
     buffer lmHead;
     buffer gammaFinal;
     buffer gammaIn[MODEL_LAYERS];
@@ -28,7 +29,7 @@ typedef struct model_weights {
     tensor down[MODEL_LAYERS];
 } model_weights;
 
-model_weights createWeights(session s);
+model_weights createWeights(session s, const model_config* spec);
 void destroyWeights(session s, model_weights* w);
 
 #endif

@@ -53,4 +53,6 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
 void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_t token, float* gamma, uint16_t* lmHeadFP16, uint16_t* w_inFP16);
 void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int K, uint32_t* tokens, float* gamma, uint16_t* lmHeadFP16, uint16_t* w_inFP16);
 
+void validation(void);
+
 #endif

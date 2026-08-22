@@ -4,12 +4,12 @@
 
 static buffer createZeroed(session s, int64_t size) {
     uint8_t* zeros = (uint8_t*)calloc(1, (size_t)size);
-    buffer b = createBuffer(s.dev.device, s.dev.physicalDevice, zeros, size, MEMORY_RAM);
+    buffer b = createBuffer(s.dev.device, s.dev.physicalDevice, zeros, size, MEMORY_VRAM);
     free(zeros);
     return b;
 }
 
-model_state createState(session s, int maxM) {
+model_state createState(session s, const model_config* spec, int maxM) {
     model_state st = {0};
     st.maxM = maxM;
     int mn = maxM * MODEL_K;
@@ -27,10 +27,11 @@ model_state createState(session s, int maxM) {
     st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_QK);
     st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_QK);
 
-    for (int L = 0; L < MODEL_LAYERS; L++) {
-        if (model_attn_layer[L]) {
+    for (int L = 0; L < spec->layerCount; L++) {
+        const layer* ly = &spec->layers[L];
+        if (ly->attn.type == ATTENTION_FULL) {
             int64_t cacheBytes = (int64_t)MODEL_KV_ROWS * MODEL_MAX_CTX;
-            if (model_layer_q[L] == QUANT_INT4) {
+            if (ly->attn.q == QUANT_INT4) {
                 st.kCache[L] = createZeroed(s, cacheBytes);
                 st.vCache[L] = createZeroed(s, cacheBytes);
                 st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
@@ -41,7 +42,7 @@ model_state createState(session s, int maxM) {
                 st.kCache[L] = createZeroed(s, cacheBytes * 2);
                 st.vCache[L] = createZeroed(s, cacheBytes * 2);
             }
-        } else {
+        } else if (ly->attn.type == ATTENTION_DELTA) {
             st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_N_V * MODEL_DIM * MODEL_DIM);
         }
     }
