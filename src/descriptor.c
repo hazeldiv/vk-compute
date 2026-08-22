@@ -7,8 +7,14 @@
 
 descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[]) {
     descriptor descriptor = {0};
+    descriptor.layout = createDescriptorSetLayout(device, bufferCount);
+    descriptor = createDescriptorSetFromLayout(device, descriptor.layout, bufferCount, buffer);
+    return descriptor;
+}
+
+VkDescriptorSetLayout createDescriptorSetLayout(VkDevice device, int bufferCount) {
     VkDescriptorSetLayoutBinding bindings[bufferCount];
-    
+
     for (int i = 0; i < bufferCount; i++) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -22,10 +28,17 @@ descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[]) {
     layoutInfo.bindingCount = bufferCount;
     layoutInfo.pBindings = bindings;
 
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, NULL, &descriptor.layout) != VK_SUCCESS) {
+    VkDescriptorSetLayout layout;
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, NULL, &layout) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to create descriptor set layout!\n");
         exit(EXIT_FAILURE);
     }
+    return layout;
+}
+
+descriptor createDescriptorSetFromLayout(VkDevice device, VkDescriptorSetLayout layout, int bufferCount, buffer buffer[]) {
+    descriptor descriptor = {0};
+    descriptor.layout = layout;
 
     VkDescriptorPoolSize poolSize = {0};
     poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -46,7 +59,7 @@ descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[]) {
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptor.pool;
     allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &descriptor.layout;
+    allocInfo.pSetLayouts = &layout;
 
     if (vkAllocateDescriptorSets(device, &allocInfo, &descriptor.set) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to allocate descriptor set!\n");
@@ -79,6 +92,10 @@ descriptor createDescriptor(VkDevice device, int bufferCount, buffer buffer[]) {
 }
 
 void destroyDescriptor(VkDevice device, descriptor desc) {
-    vkDestroyDescriptorPool(device, desc.pool, NULL);
+    destroyDescriptorSet(device, desc);
     vkDestroyDescriptorSetLayout(device, desc.layout, NULL);
+}
+
+void destroyDescriptorSet(VkDevice device, descriptor desc) {
+    vkDestroyDescriptorPool(device, desc.pool, NULL);
 }

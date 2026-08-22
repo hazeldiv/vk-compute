@@ -33,6 +33,7 @@ layout(set = 0, binding = 6) buffer vOutBuffer { float vOut[]; };
 layout(set = 0, binding = 7) buffer gOutBuffer { float gOut[]; };
 layout(set = 0, binding = 8) buffer aOutBuffer { float aOut[]; };
 layout(set = 0, binding = 9) buffer bOutBuffer { float bOut[]; };
+layout(set = 0, binding = 10) buffer embOutBuffer { float embOut[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -52,6 +53,10 @@ void main() {
             ? vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y))
             : vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
         cache[idx] = val * gamma[idx];
+        embOut[idx * 4u + 0u] = val.x;
+        embOut[idx * 4u + 1u] = val.y;
+        embOut[idx * 4u + 2u] = val.z;
+        embOut[idx * 4u + 3u] = val.w;
         sum_sq += dot(val, val);
     }
 

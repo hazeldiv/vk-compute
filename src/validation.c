@@ -2908,7 +2908,7 @@ static int lmhead_argmax_ref_fp16(const float* x, const uint16_t* w, int n, int 
     return bestIdx;
 }
 
-void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uint16_t* lmHeadFP16) {
+void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, float* gamma, uint16_t* lmHeadFP16) {
     int numGroups = (vocabSize + 255) / 256;
     float* maxValues = (float*)calloc(numGroups, sizeof(float));
     uint32_t* maxIndices = (uint32_t*)calloc(numGroups, sizeof(uint32_t));
@@ -2919,17 +2919,18 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uin
     transpose_block16((uint8_t*)lmHeadFP16, (uint8_t*)transposed, K, vocabSize, QUANT_FP16);
 
     buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * K, MEMORY_RAM);
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * K * vocabSize, MEMORY_RAM);
     buffer maxValueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxValues, sizeof(float) * numGroups, MEMORY_VRAM);
     buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxIndices, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
     buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, result, sizeof(uint32_t), MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 6);
+    buffer bufs[] = {inputBuffer, gammaBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer}, .bufferCount = 4,
+        {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, gammaBuffer}, .bufferCount = 5,
          .pushConstants = {1, vocabSize, K}, .pushConstantCount = 3,
          .dispatchX = numGroups, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer}, .bufferCount = 4,
@@ -2938,7 +2939,9 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uin
     };
     double ms = run_ops(s, ops, 2);
 
-    int ref = lmhead_argmax_ref_fp16(input, lmHeadFP16, vocabSize, K);
+    float* xn = (float*)malloc(sizeof(float) * K);
+    rms_norm_apply(input, gamma, xn, K);
+    int ref = lmhead_argmax_ref_fp16(xn, lmHeadFP16, vocabSize, K);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, resultBuffer, result);
     uint32_t posRead = 0;
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
@@ -2946,10 +2949,11 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uin
     printf("LMHead-ArgMax-pos FP16: shader[0]= %u ref= %d\n", posRead, posVal + 1);
     printf("LMHead-ArgMax FP16 time: %.3f ms\n", ms);
 
-    destroy_buffers(s, bufs, 6);
+    destroy_buffers(s, bufs, 7);
     free(maxValues);
     free(maxIndices);
     free(result);
+    free(xn);
 }
 
 void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_t token, float* gamma, uint16_t* lmHeadFP16, uint16_t* w_inFP16) {
@@ -2980,6 +2984,7 @@ void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_
     float* gOut = (float*)calloc(4096, sizeof(float));
     float* aOut = (float*)calloc(16, sizeof(float));
     float* bOut = (float*)calloc(16, sizeof(float));
+    float* embOut = (float*)calloc(K, sizeof(float));
 
     uint16_t* twIn = (uint16_t*)malloc(sizeof(uint16_t) * K * proj_n);
     transpose_block16((uint8_t*)w_inFP16, (uint8_t*)twIn, K, proj_n, QUANT_FP16);
@@ -2996,13 +3001,14 @@ void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_
     buffer gOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gOut, sizeof(float) * 4096, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * 16, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * 16, MEMORY_VRAM);
-    buffer bufs[] = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
+    buffer embOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, embOut, sizeof(float) * K, MEMORY_VRAM);
+    buffer bufs[] = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 11);
     free(twIn);
     free(tlm);
 
     operation ops[] = {
-        {.shader = "Embed-RmsNorm-LinearProj-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "Embed-RmsNorm-LinearProj-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K, vocabSize}, .pushConstantCount = 4,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
     };
@@ -3014,19 +3020,22 @@ void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gOutBuffer, gOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aOutBuffer, aOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bOutBuffer, bOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, embOutBuffer, embOut);
     report("Embed-RmsNorm-LinearProj FP16", 100, qOut, qref, 2048, ms);
     report("Embed-RmsNorm-LinearProj-k FP16", 100, kOut, kref, 2048, ms);
     report("Embed-RmsNorm-LinearProj-v FP16", 100, vOut, vref, 4096, ms);
     report("Embed-RmsNorm-LinearProj-g FP16", 100, gOut, gref, 4096, ms);
     report("Embed-RmsNorm-LinearProj-a FP16", 0, aOut, aref, 16, ms);
     report("Embed-RmsNorm-LinearProj-b FP16", 0, bOut, bref, 16, ms);
+    report("Embed-RmsNorm-LinearProj-emb FP16", 100, embOut, emb, K, ms);
 
-    destroy_buffers(s, bufs, 10);
+    destroy_buffers(s, bufs, 11);
     free(emb);
     free(xn);
     free(proj);
     free(qref); free(kref); free(vref); free(gref); free(aref); free(bref);
     free(qOut); free(kOut); free(vOut); free(gOut); free(aOut); free(bOut);
+    free(embOut);
 }
 
 void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int K, uint32_t* tokens, float* gamma, uint16_t* lmHeadFP16, uint16_t* w_inFP16) {
@@ -3037,9 +3046,13 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
     float* gref = (float*)malloc(sizeof(float) * M * 4096);
     float* aref = (float*)malloc(sizeof(float) * M * 16);
     float* bref = (float*)malloc(sizeof(float) * M * 16);
+    float* embRef = (float*)malloc(sizeof(float) * M * K);
     for (int m = 0; m < M; m++) {
         float* emb = (float*)malloc(sizeof(float) * K);
-        for (int i = 0; i < K; i++) emb[i] = fp16_to_float(lmHeadFP16[i * vocabSize + tokens[m]]);
+        for (int i = 0; i < K; i++) {
+            emb[i] = fp16_to_float(lmHeadFP16[i * vocabSize + tokens[m]]);
+            embRef[m * K + i] = emb[i];
+        }
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(emb, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
@@ -3061,6 +3074,7 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
     float* gOut = (float*)calloc(M * 4096, sizeof(float));
     float* aOut = (float*)calloc(M * 16, sizeof(float));
     float* bOut = (float*)calloc(M * 16, sizeof(float));
+    float* embOut = (float*)calloc(M * K, sizeof(float));
 
     uint16_t* twIn = (uint16_t*)malloc(sizeof(uint16_t) * K * proj_n);
     transpose_block16((uint8_t*)w_inFP16, (uint8_t*)twIn, K, proj_n, QUANT_FP16);
@@ -3077,13 +3091,14 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
     buffer gOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gOut, sizeof(float) * M * 4096, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * M * 16, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * M * 16, MEMORY_VRAM);
-    buffer bufs[] = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
+    buffer embOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, embOut, sizeof(float) * M * K, MEMORY_VRAM);
+    buffer bufs[] = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 11);
     free(twIn);
     free(tlm);
 
     operation ops[] = {
-        {.shader = "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, gOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer}, .bufferCount = 11,
          .pushConstants = {M, proj_n, K, vocabSize}, .pushConstantCount = 4,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1}
     };
@@ -3095,14 +3110,18 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gOutBuffer, gOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aOutBuffer, aOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bOutBuffer, bOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, embOutBuffer, embOut);
     report("Embed-RmsNorm-LinearProj-GEMM FP16", 100, qOut, qref, M * 2048, ms);
     report("Embed-RmsNorm-LinearProj-GEMM-k FP16", 100, kOut, kref, M * 2048, ms);
     report("Embed-RmsNorm-LinearProj-GEMM-v FP16", 100, vOut, vref, M * 4096, ms);
     report("Embed-RmsNorm-LinearProj-GEMM-g FP16", 100, gOut, gref, M * 4096, ms);
     report("Embed-RmsNorm-LinearProj-GEMM-a FP16", 0, aOut, aref, M * 16, ms);
     report("Embed-RmsNorm-LinearProj-GEMM-b FP16", 0, bOut, bref, M * 16, ms);
+    report("Embed-RmsNorm-LinearProj-GEMM-emb FP16", 100, embOut, embRef, M * K, ms);
 
-    destroy_buffers(s, bufs, 10);
+    destroy_buffers(s, bufs, 11);
     free(qref); free(kref); free(vref); free(gref); free(aref); free(bref);
+    free(embRef);
     free(qOut); free(kOut); free(vOut); free(gOut); free(aOut); free(bOut);
+    free(embOut);
 }

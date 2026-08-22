@@ -25,6 +25,7 @@ layout(set = 0, binding = 6) writeonly restrict buffer MatrixF { float vOut[]; }
 layout(set = 0, binding = 7) writeonly restrict buffer MatrixG { float gOut[]; };
 layout(set = 0, binding = 8) writeonly restrict buffer MatrixH { float aOut[]; };
 layout(set = 0, binding = 9) writeonly restrict buffer MatrixI { float bOut[]; };
+layout(set = 0, binding = 10) writeonly restrict buffer MatrixJ { float embOut[]; };
 
 shared vec4 Asub[4][TS];
 shared vec4 Bsub[4][TS];
@@ -46,6 +47,10 @@ void main() {
         vec4 v = ((idx & 1u) == 0u)
             ? vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y))
             : vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
+        embOut[mGlobal * dims.K + idx * 4u + 0u] = v.x;
+        embOut[mGlobal * dims.K + idx * 4u + 1u] = v.y;
+        embOut[mGlobal * dims.K + idx * 4u + 2u] = v.z;
+        embOut[mGlobal * dims.K + idx * 4u + 3u] = v.w;
         sum_sq += dot(v, v);
     }
     row_sums[row][col] = sum_sq;

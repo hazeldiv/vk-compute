@@ -1,7 +1,6 @@
 #version 450
 #define TS 256
 #define vec 4
-#define d_model 4096
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
@@ -17,30 +16,39 @@ layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
 layout(set = 0, binding = 3) readonly restrict buffer MatrixR { float R[]; };
 
-shared vec4 cache[d_model/vec];
+shared vec4 Asub[2][TS];
 
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
-    if (globalCol >= dims.N) return;
-
-    for (uint t = 0; t < dims.K/vec; t+=TS) {
-        uint idx = t + col;
-        cache[idx] = A[idx];
-    }
-    barrier();
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
 
     float acc = 0.0;
-    uint baseRow = 0;
-    #pragma unroll
-    for (uint k=0;k<dims.K/vec; k+=2) {
-        uvec4 rawInput = B[baseRow + globalCol];
-        vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
-        vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
-        acc += dot(cache[k], outVectorA);
-        acc += dot(cache[k+1], outVectorB);
-        baseRow += dims.N;
+    if (globalCol < dims.N) {
+        Asub[0][col] = A[col];
     }
+    barrier();
+    uint baseRow = 0;
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1, nxt = (t+1) & 1;
+        if (globalCol < dims.N) {
+            if (t+1 < numTiles) {
+                Asub[nxt][col] = A[(t+1)*TS + col];
+            }
 
+            #pragma unroll
+            for (uint k=0;k<TS; k+=2) {
+                uvec4 rawInput = B[baseRow + globalCol];
+                vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+                vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+                acc += dot(Asub[cur][k], outVectorA);
+                acc += dot(Asub[cur][k+1], outVectorB);
+                baseRow += dims.N;
+            }
+        }
+        barrier();
+    }
+    if (globalCol >= dims.N) return;
     C[globalCol] = acc + R[globalCol];
 }

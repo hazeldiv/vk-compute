@@ -1,7 +1,10 @@
 #version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #define TS 256
 #define vec 4
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define d_model 4096
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -11,45 +14,63 @@ layout(push_constant) uniform Dimensions {
     uint K;
 } dims;
 
+const float EPSILON = 1e-5;
+
 layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MaxValueBuffer { float maxValue[]; };
 layout(set = 0, binding = 3) writeonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
+layout(set = 0, binding = 4) readonly restrict buffer GammaBuffer { vec4 gamma[]; };
 
-shared vec4 Asub[2][TS];
+shared vec4 cache[d_model/vec];
+shared float sub_sums[TS / 64];
+shared float shared_sum;
 shared float redValue[TS];
 shared uint redIndex[TS];
 
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
-    uint numTiles = (dims.K + TS - 1) / TS / vec;
 
-    float acc = 0.0;
-    if (globalCol < dims.N) {
-        Asub[0][col] = A[col];
+    float sum_sq = 0.0;
+    for (uint t = 0; t < dims.K/vec; t += TS) {
+        uint idx = t + col;
+        vec4 val = A[idx];
+        cache[idx] = val * gamma[idx];
+        sum_sq += dot(val, val);
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+    if (subgroupElect()) {
+        sub_sums[gl_SubgroupID] = sum_sq;
     }
     barrier();
-    uint baseRow = 0;
-    for (uint t = 0; t < numTiles; t++) {
-        uint cur = t & 1, nxt = (t+1) & 1;
-        if (globalCol < dims.N) {
-            if (t+1 < numTiles) {
-                Asub[nxt][col] = A[(t+1)*TS + col];
-            }
 
-            #pragma unroll
-            for (uint k=0;k<TS; k+=2) {
-                uvec4 rawInput = B[baseRow + globalCol];
-                vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
-                vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
-
-                acc += dot(Asub[cur][k], outVectorA);
-                acc += dot(Asub[cur][k+1], outVectorB);
-                baseRow += dims.N;
-            }
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
         }
-        barrier();
+        shared_sum = final_sum;
+    }
+    barrier();
+    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
+    float inv_rms = 1.0 / rms;
+
+    float acc = 0.0;
+    uint baseRow = 0;
+    if (globalCol < dims.N) {
+        #pragma unroll
+        for (uint k=0;k<dims.K/vec; k+=2) {
+            uvec4 rawInput = B[baseRow + globalCol];
+            vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+            vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+            acc += dot(cache[k] * inv_rms, outVectorA);
+            acc += dot(cache[k+1] * inv_rms, outVectorB);
+            baseRow += dims.N;
+        }
     }
     if (globalCol >= dims.N) {
         acc = uintBitsToFloat(0xFF800000u);

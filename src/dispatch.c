@@ -4,6 +4,46 @@
 #include "pipeline.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#define PIPE_CACHE_MAX 64
+
+typedef struct pipe_entry {
+    char shader[128];
+    int pushSize;
+    int bufCount;
+    VkPipeline pipeline;
+    VkPipelineLayout layout;
+    VkDescriptorSetLayout setLayout;
+} pipe_entry;
+
+static pipe_entry pipeCache[PIPE_CACHE_MAX];
+static int pipeCacheCount = 0;
+
+static pipe_entry* getPipeEntry(session s, const operation* op) {
+    int pushSize = sizeof(int) * op->pushConstantCount;
+    for (int i = 0; i < pipeCacheCount; i++) {
+        if (pipeCache[i].pushSize == pushSize &&
+            pipeCache[i].bufCount == op->bufferCount &&
+            strcmp(pipeCache[i].shader, op->shader) == 0) {
+            return &pipeCache[i];
+        }
+    }
+    if (pipeCacheCount >= PIPE_CACHE_MAX) return NULL;
+
+    pipe_entry* e = &pipeCache[pipeCacheCount++];
+    snprintf(e->shader, sizeof(e->shader), "%s", op->shader);
+    e->pushSize = pushSize;
+    e->bufCount = op->bufferCount;
+    e->setLayout = createDescriptorSetLayout(s.dev.device, op->bufferCount);
+
+    char shaderPath[160];
+    snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
+    pipeline p = createPipeline(s.dev.device, e->setLayout, shaderPath, (uint32_t)pushSize);
+    e->pipeline = p.pipeline;
+    e->layout = p.layout;
+    return e;
+}
 
 void execute(session s, operation ops[], int opCount) {
     vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
@@ -19,21 +59,39 @@ void execute(session s, operation ops[], int opCount) {
     vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 0);
 
     descriptor descs[opCount];
-    pipeline pipes[opCount];
+    pipeline freshPipes[opCount];
+    VkDescriptorSetLayout freshLayouts[opCount];
+    int freshCount = 0;
 
     for (int i = 0; i < opCount; i++) {
         operation* op = &ops[i];
 
-        descs[i] = createDescriptor(s.dev.device, op->bufferCount, op->buffers);
-        char shaderPath[160];
-        snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
-        pipes[i] = createPipeline(s.dev.device, descs[i].layout, shaderPath, sizeof(int) * op->pushConstantCount);
+        pipe_entry* entry = getPipeEntry(s, op);
+        VkPipelineLayout layout;
+        VkPipeline pipe;
+        VkDescriptorSetLayout setLayout;
+        if (entry != NULL) {
+            layout = entry->layout;
+            pipe = entry->pipeline;
+            setLayout = entry->setLayout;
+        } else {
+            setLayout = createDescriptorSetLayout(s.dev.device, op->bufferCount);
+            char shaderPath[160];
+            snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
+            freshPipes[freshCount] = createPipeline(s.dev.device, setLayout, shaderPath, sizeof(int) * op->pushConstantCount);
+            freshLayouts[freshCount] = setLayout;
+            layout = freshPipes[freshCount].layout;
+            pipe = freshPipes[freshCount].pipeline;
+            freshCount++;
+        }
 
-        vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].pipeline);
-        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[i].layout, 0, 1, &descs[i].set, 0, NULL);
+        descs[i] = createDescriptorSetFromLayout(s.dev.device, setLayout, op->bufferCount, op->buffers);
+
+        vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descs[i].set, 0, NULL);
 
         if (op->pushConstantCount > 0) {
-            vkCmdPushConstants(s.buffer, pipes[i].layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+            vkCmdPushConstants(s.buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(int) * op->pushConstantCount, op->pushConstants);
         }
         if (i > 0) {
@@ -62,8 +120,11 @@ void execute(session s, operation ops[], int opCount) {
     vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
 
     for (int i = 0; i < opCount; i++) {
-        destroyPipeline(s.dev.device, pipes[i]);
-        destroyDescriptor(s.dev.device, descs[i]);
+        destroyDescriptorSet(s.dev.device, descs[i]);
+    }
+    for (int i = 0; i < freshCount; i++) {
+        destroyPipeline(s.dev.device, freshPipes[i]);
+        vkDestroyDescriptorSetLayout(s.dev.device, freshLayouts[i], NULL);
     }
 }
 

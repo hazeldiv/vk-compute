@@ -62,7 +62,7 @@ double compute() {
 
     int vocab_size = 81920;
     uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
-    validateLmHeadArgMaxFP16(s, vocab_size, K, input, lmHeadFP16);
+    validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
 
     int Mg = 64;
     uint32_t token = 12345 % vocab_size;
@@ -82,6 +82,28 @@ double compute() {
     validateGemmAddINT8(s, Mg, wo_n, K, inputM, residualM, woINT8);
     validateGemmAddINT4(s, Mg, wo_n, K, inputM, residualM, woINT4);
     free(residualM);
+
+    int ffn_n = 12288;
+    float* ffnDownInput = getData(9111, 1, ffn_n);
+    float* ffnDownResidual = getData(9222, 1, K);
+    uint16_t* ffnDownFP16 = getDataFP16(9333, ffn_n, K);
+    QuantizedData ffnDownINT8 = getDataINT8(9333, ffn_n, K);
+    QuantizedData ffnDownINT4 = getDataINT4(9333, ffn_n, K);
+    validateGemvAddFP16(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownFP16);
+    validateGemvAddINT8(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT8);
+    validateGemvAddINT4(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT4);
+    float* ffnDownInputM = getData(9111, Mg, ffn_n);
+    float* ffnDownResidualM = getData(9222, Mg, K);
+    validateGemmAddFP16(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownFP16);
+    validateGemmAddINT8(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT8);
+    validateGemmAddINT4(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT4);
+    free(ffnDownInput);
+    free(ffnDownResidual);
+    free(ffnDownFP16);
+    free_quantized_data(ffnDownINT8);
+    free_quantized_data(ffnDownINT4);
+    free(ffnDownInputM);
+    free(ffnDownResidualM);
 
     validateRmsNormSwigluFfnGEMMFP16(s, Mg, N, K, inputM, gamma, weightFP16, weight2FP16);
     validateRmsNormSwigluFfnGEMMINT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
