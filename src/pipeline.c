@@ -54,8 +54,8 @@ pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout,
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+    pipelineLayoutInfo.pushConstantRangeCount = (pushConstantSize > 0) ? 1 : 0;
+    pipelineLayoutInfo.pPushConstantRanges = (pushConstantSize > 0) ? &pushConstantRange : NULL;
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL, &pipeline.layout) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to create pipeline layout.\n");

@@ -12,7 +12,7 @@
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
 layout(push_constant) uniform Dimensions {
-    uint M; uint N; uint K; uint tokenIdx; uint kOffset; uint vOffset; uint context_length;
+    uint M; uint N; uint K; uint tokenIdx; uint kOffset; uint vOffset;
 } param;
 
 const float EPSILON = 1e-5;
@@ -30,6 +30,7 @@ layout(set = 0, binding = 9) buffer kScaleBuffer { float kScale[]; };
 layout(set = 0, binding = 10) buffer kZeroBuffer { float kZero[]; };
 layout(set = 0, binding = 11) buffer vScaleBuffer { float vScale[]; };
 layout(set = 0, binding = 12) buffer vZeroBuffer { float vZero[]; };
+layout(set = 0, binding = 13) buffer PositionBuffer { uint position[]; };
 
 shared vec4 Asub[4][TS];
 shared vec4 Bsub[4][HEAD_DIM];
@@ -58,6 +59,10 @@ void main() {
     uint mGlobal = gl_WorkGroupID.y * TS + row;
     uint nBase = head * HEAD_DIM;
     uint cacheRows = param.vOffset - param.kOffset;
+
+    if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u && tid == 0u) {
+        position[0] = param.tokenIdx + param.M;
+    }
 
     float sum_sq = 0.0;
     for (uint i = 0; i < param.K / (TS * vec); i++) {
@@ -143,11 +148,11 @@ void main() {
             int qi = int(round(v));
             if (qi < 0) qi = 0;
             if (qi > 255) qi = 255;
-            vCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
+            vCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
         }
         if (col == 0) {
-            vScale[kvHead * param.context_length + mGlobal] = qscale_sh[row];
-            vZero[kvHead * param.context_length + mGlobal] = qzero_sh[row];
+            vScale[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qscale_sh[row];
+            vZero[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qzero_sh[row];
         }
         return;
     }
@@ -222,11 +227,11 @@ void main() {
             int qi = int(round(v));
             if (qi < 0) qi = 0;
             if (qi > 255) qi = 255;
-            kCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
+            kCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
         }
         if (col == 0) {
-            kScale[kvHead * param.context_length + mGlobal] = qscale_sh[row];
-            kZero[kvHead * param.context_length + mGlobal] = qzero_sh[row];
+            kScale[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qscale_sh[row];
+            kZero[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qzero_sh[row];
         }
     }
 }

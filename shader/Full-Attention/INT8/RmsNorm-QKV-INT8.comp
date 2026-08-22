@@ -16,10 +16,8 @@ layout(push_constant) uniform Dimensions {
     uint M;
     uint N;
     uint K;
-    uint tokenIdx;
     uint kOffset;
     uint vOffset;
-    uint context_length;
 } param;
 
 const float EPSILON = 1e-5;
@@ -33,6 +31,7 @@ layout(set = 0, binding = 5) readonly buffer thetaBuffer { float theta[]; };
 layout(set = 0, binding = 6) buffer qOutBuffer { float qOut[]; };
 layout(set = 0, binding = 7) buffer kCacheBuffer { uint16_t kCache[]; };
 layout(set = 0, binding = 8) buffer vCacheBuffer { uint16_t vCache[]; };
+layout(set = 0, binding = 9) buffer PositionBuffer { uint position[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -51,6 +50,7 @@ vec4 unpackUint8x4(uint packedData) {
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint pos = position[0];
     if (globalCol >= param.N) return;
 
     uint scaleIdx = gl_WorkGroupID.x * param.K / vec;
@@ -99,7 +99,7 @@ void main() {
         baseRow += param.N;
     }
 
-    uint cacheSlot = (param.context_length - 1u) * (param.vOffset - param.kOffset);
+    uint cacheSlot = pos * (param.vOffset - param.kOffset);
 
     if (globalCol >= param.vOffset) {
         uint row = globalCol - param.vOffset;
@@ -124,7 +124,7 @@ void main() {
     rope_shared[col] = acc * inv_rms2;
     barrier();
 
-    float angle = param.tokenIdx * theta[col & (HALF - 1u)];
+    float angle = float(pos) * theta[col & (HALF - 1u)];
     float cos_a = cos(angle);
     float sin_a = sin(angle);
     if (col < HALF) {

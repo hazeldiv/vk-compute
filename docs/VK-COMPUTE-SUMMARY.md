@@ -146,9 +146,9 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 ### 4.5 Push constants
 
 - Generic GEMM/GEMV/FFN/LinearProj: `{M, N, K}`.
-- QKV: `{M, N, K, tokenIdx, kOffset, vOffset, context_length}` (7 ints, ≤ MAX_PUSH_CONSTANTS = 8).
-- Attention: `{context_length}`. GatedDeltaNet: `{M}`.
-- LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize}` for ArgMax-Reduce.
+- QKV GEMV: `{M, N, K, kOffset, vOffset}` — position comes from the shared position buffer. QKV GEMM: `{M, N, K, tokenIdx, kOffset, vOffset}` (tokenIdx = chunk base for RoPE; the shader writes the new context length to the position buffer).
+- Attention decode (`Att-full-*`): no push constants — context_length = position buffer + 1. Attention prefill (`Att-full-GEMM-*`): `{context_length}`. GatedDeltaNet: `{M}`.
+- LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize, doIncrement}` for ArgMax-Reduce (doIncrement=1 bumps the position buffer by 1 after a generated token).
 - Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
 
 ### 4.6 Dispatch geometry
@@ -444,7 +444,7 @@ void main() {
 
 #### `ArgMax-Reduce.comp` (second stage, precision-agnostic)
 
-One workgroup of 256 threads reduces the per-workgroup winners from the first pass to a single token id. Bindings: `0 = maxValue (float[])`, `1 = maxIndex (uint[])`, `2 = result (uint[])`; push constant `{vocabSize}`; `dispatchX = 1`. Full source:
+One workgroup of 256 threads reduces the per-workgroup winners from the first pass to a single token id. Bindings: `0 = maxValue (float[])`, `1 = maxIndex (uint[])`, `2 = result (uint[])`, `3 = position (uint[])`; push constant `{vocabSize, doIncrement}`; `dispatchX = 1`. Full source:
 
 ```glsl
 #version 450
@@ -452,11 +452,15 @@ One workgroup of 256 threads reduces the per-workgroup winners from the first pa
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Params { uint vocabSize; } params;
+layout(push_constant) uniform Params {
+    uint vocabSize;
+    uint doIncrement;
+} params;
 
 layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
+layout(set = 0, binding = 3) buffer PositionBuffer { uint position[]; };
 
 shared float redValue[TS];
 shared uint redIndex[TS];
@@ -493,11 +497,12 @@ void main() {
     }
     if (tid == 0) {
         result[0] = redIndex[0];
+        if (params.doIncrement == 1u) position[0] = position[0] + 1u;
     }
 }
 ```
 
-**How it works:** `numGroups = ceil(vocabSize/256)` (= 320 for vocab 81920); each thread strided-loads `maxValue[i]`/`maxIndex[i]` in chunks of 256 (`i += TS` loop), keeping the running best with the same smallest-index tie-break, then one shared tree reduction; thread 0 writes the final token id to `result[0]`. Both shaders are chained as two `operation`s in one `execute()` call (the dispatch harness inserts a write→read barrier between ops).
+**How it works:** `numGroups = ceil(vocabSize/256)` (= 320 for vocab 81920); each thread strided-loads `maxValue[i]`/`maxIndex[i]` in chunks of 256 (`i += TS` loop), keeping the running best with the same smallest-index tie-break, then one shared tree reduction; thread 0 writes the final token id to `result[0]` and, when `doIncrement == 1` (decode), increments the shared position buffer by exactly one — the single per-token position update, kept out of any per-layer shader so N layers can never bump it N×. Both shaders are chained as two `operation`s in one `execute()` call (the dispatch harness inserts a write→read barrier between ops).
 
 ---
 
@@ -505,11 +510,11 @@ void main() {
 
 #### `RmsNorm-QKV-*` (decode, one token)
 
-Workgroup = one head (256 columns). RMSNorm over K → project `N = 6144` columns (q 0..4095, k 4096..5119, v 5120..6143) → for q/k heads: per-head RMSNorm over 256 cols, then **RoPE**: `angle = tokenIdx * theta[col%128]`, first half `a·cos − b·sin`, second half `a·sin + b·cos` (a/b from opposite halves) → q written to `qOut`, k/v stored to the KV cache at slot `(context_length-1)`. INT4 additionally quantizes k/v per (head, token) with min/max over the 256 cols and writes scale/zero.
+Workgroup = one head (256 columns). RMSNorm over K → project `N = 6144` columns (q 0..4095, k 4096..5119, v 5120..6143) → for q/k heads: per-head RMSNorm over 256 cols, then **RoPE**: `angle = pos * theta[col%128]`, first half `a·cos − b·sin`, second half `a·sin + b·cos` (a/b from opposite halves) → q written to `qOut`, k/v stored to the KV cache at slot `pos * (vOffset − kOffset)`. INT4 additionally quantizes k/v per (head, token) with min/max over the 256 cols and writes scale/zero. **Position source:** the write slot and RoPE index come from a shared `uint[1]` position buffer (last binding) instead of push constants — the value is the current context length (how many tokens are already cached).
 
 #### `RmsNorm-QKV-GEMM-*` (prefill, head-wide tile)
 
-Workgroup = (head, 16-token block); output tile = 16 tokens × 256 columns; the 16×16 k-tiling from §7.1 inside. Full FP16 source:
+Workgroup = (head, 16-token block); output tile = 16 tokens × 256 columns; the 16×16 k-tiling from §7.1 inside. The k/v cache slot is `(tokenIdx + mGlobal) * cacheRows` and RoPE uses `tokenIdx + mGlobal` (`tokenIdx` = chunk base, kept as a push constant so layers in the same chunk stay consistent). After the projections, the first workgroup's thread 0 writes the new context length to the shared position buffer: `position[0] = tokenIdx + M` — an **absolute** write, so every layer writing the same value is idempotent (last-write-wins is harmless; `execute()` barriers serialize it). Full FP16 source:
 
 ```glsl
 #version 450
@@ -670,7 +675,7 @@ INT8 variant: B-load is 256 `uvec4`s (one per column, full 16-k tile) + scale/ze
 
 #### `Att-full-*` (decode, one query)
 
-Workgroup = one query head. Query staged in shared (256 floats). Online softmax over KV-token tiles of 256: per tile compute scores `q·k` (fp16 or dequantized int8/int4 keys), tile max via tree reduction, exp, tile sum, then rescale running accumulator with `alpha = exp(m_prev − m_next)` / `beta = exp(tile_max − m_next)` and accumulate `P·V` per output dim. Output `o = acc / l`.
+Workgroup = one query head. Query staged in shared (256 floats). Online softmax over KV-token tiles of 256: per tile compute scores `q·k` (fp16 or dequantized int8/int4 keys), tile max via tree reduction, exp, tile sum, then rescale running accumulator with `alpha = exp(m_prev − m_next)` / `beta = exp(tile_max − m_next)` and accumulate `P·V` per output dim. Output `o = acc / l`. Context length comes from the shared position buffer (`context = position[0] + 1`) — no push constants — so the decode chain is fully GPU-driven; the decode QKV shader of the same layer writes the new token's k/v at slot `position[0]` first, and the +1 makes the total context correct for attention.
 
 #### `Att-full-GEMM-*` (prefill, flash attention, causal)
 
@@ -1032,6 +1037,7 @@ GEMV version: 256 threads, one output column each, ping-pong shared buffers for 
 5. **Windows make quirks:** recipes run through `cmd.exe` — `mkdir`/`if exist` paths must use backslashes (`/` is treated as a switch prefix), and shader folder names must not contain spaces (make word-splits `$(wildcard)` output).
 6. **KV cache layout is `[token][row]`** (transposed relative to the host `[row][seq]`), so attention shaders index `cache[token*rows + row]`.
 7. **Workgroup-wide barriers need every thread present.** For GEMV shaders with a partial last workgroup (N not divisible by 256), out-of-range threads must not early-return — they still run the loop/barriers and carry a `-inf` (`uintBitsToFloat(0xFF800000u)`) accumulator so they can never win the argmax reduction.
+8. **Position buffer write rules (multi-layer safety).** The shared `uint[1]` position buffer must be updated with *absolute* values only: the QKV GEMM writes `tokenIdx + M` (identical from every layer → idempotent), and the per-token `+1` lives **only** in `ArgMax-Reduce` (single dispatch, gated by `doIncrement`). A read-modify-write `+= M` in a per-layer shader would inflate the counter N× per prefill chunk, and an unconditional `+1` in the lm-head step would corrupt the prefill→first-decode transition (the lm head runs at prefill end too, so `doIncrement=0` keeps the GEMM-written `M` intact).
 
 ---
 
@@ -1046,11 +1052,14 @@ GEMV version: 256 threads, one output column each, ping-pong shared buffers for 
 | QKV-Rope-GEMM FP16 (q / k-cache / v-cache) | 0.000014 / 0.0021 / 0.062 | ~56 ms |
 | QKV-Rope-GEMM INT8 | 0.000014 / 0.0028 / 0.062 | ~53 ms |
 | QKV-Rope-GEMM INT4 | 0.000014 / 0.014 / 0.32 | ~51 ms |
+| QKV-Rope-GEMM-pos FP16 / INT8 / INT4 (position buffer = M) | 64 / 64 / 64 exact | included above |
+| QKV-Rope-pos FP16 / INT8 / INT4 (decode read, unchanged) | 33 / 33 / 33 exact | included above |
 | Attention-GEMM FP16 / INT8 / INT4 | 0.000003 / 0.000003 / 0.0017 | ~0.7 ms |
 | GatedDeltaNet-GEMM FP16 (out / state S) | 0.000065 / 0.000005 | ~57 ms |
 | GatedDeltaNet-GEMM INT8 | 0.000061 / 0.000005 | ~64 ms |
 | GatedDeltaNet-GEMM INT4 | 0.000103 / 0.000006 | ~67 ms |
 | LMHead-ArgMax FP16 (token index) | exact match | ~117 ms (4096 × 81920 GEMV + reductions) |
+| LMHead-ArgMax-pos FP16 (position buffer, +1) | 41 → 42 exact | included above |
 | Embed-RmsNorm-LinearProj FP16 (q / k / v / g / a / b) | 0.000164 / 0.000145 / 0.000168 / 0.000175 / 0.000088 / 0.000084 | ~2.6 ms |
 | Embed-RmsNorm-LinearProj-GEMM FP16 (q / k / v / g / a / b) | 0.000381 / 0.000313 / 0.000290 / 0.000381 / 0.000198 / 0.000252 | ~155 ms |
 

@@ -16,10 +16,8 @@ layout(push_constant) uniform Dimensions {
     uint M;
     uint N;
     uint K;
-    uint tokenIdx;
     uint kOffset;
     uint vOffset;
-    uint context_length;
 } param;
 
 const float EPSILON = 1e-5;
@@ -37,6 +35,7 @@ layout(set = 0, binding = 9) buffer kScaleBuffer { float kScale[]; };
 layout(set = 0, binding = 10) buffer kZeroBuffer { float kZero[]; };
 layout(set = 0, binding = 11) buffer vScaleBuffer { float vScale[]; };
 layout(set = 0, binding = 12) buffer vZeroBuffer { float vZero[]; };
+layout(set = 0, binding = 13) buffer PositionBuffer { uint position[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -86,6 +85,7 @@ uint quantize(float v) {
 void main() {
     uint col = gl_LocalInvocationID.x;
     uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint pos = position[0];
     if (globalCol >= param.N) return;
 
     uint scaleIdx = gl_WorkGroupID.x * param.K / vec;
@@ -142,7 +142,7 @@ void main() {
         baseRow += param.N;
     }
 
-    uint cacheSlot = (param.context_length - 1u) * (param.vOffset - param.kOffset);
+    uint cacheSlot = pos * (param.vOffset - param.kOffset);
 
     if (globalCol >= param.vOffset) {
         uint row = globalCol - param.vOffset;
@@ -150,8 +150,8 @@ void main() {
         quantizeParams(acc);
         vCache[cacheSlot + row] = uint8_t(quantize(acc));
         if (gl_LocalInvocationID.x == 0) {
-            vScale[kvHead * param.context_length + param.context_length - 1u] = qscale_sh;
-            vZero[kvHead * param.context_length + param.context_length - 1u] = qzero_sh;
+            vScale[kvHead * (pos + 1u) + pos] = qscale_sh;
+            vZero[kvHead * (pos + 1u) + pos] = qzero_sh;
         }
         return;
     }
@@ -173,7 +173,7 @@ void main() {
     rope_shared[col] = acc * inv_rms2;
     barrier();
 
-    float angle = param.tokenIdx * theta[col & (HALF - 1u)];
+    float angle = float(pos) * theta[col & (HALF - 1u)];
     float cos_a = cos(angle);
     float sin_a = sin(angle);
     if (col < HALF) {
@@ -190,8 +190,8 @@ void main() {
         quantizeParams(acc);
         kCache[cacheSlot + row] = uint8_t(quantize(acc));
         if (gl_LocalInvocationID.x == 0) {
-            kScale[kvHead * param.context_length + param.context_length - 1u] = qscale_sh;
-            kZero[kvHead * param.context_length + param.context_length - 1u] = qzero_sh;
+            kScale[kvHead * (pos + 1u) + pos] = qscale_sh;
+            kZero[kvHead * (pos + 1u) + pos] = qzero_sh;
         }
     }
 }

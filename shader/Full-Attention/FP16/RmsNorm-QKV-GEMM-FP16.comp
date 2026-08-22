@@ -12,7 +12,7 @@
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
 layout(push_constant) uniform Dimensions {
-    uint M; uint N; uint K; uint tokenIdx; uint kOffset; uint vOffset; uint context_length;
+    uint M; uint N; uint K; uint tokenIdx; uint kOffset; uint vOffset;
 } param;
 
 const float EPSILON = 1e-5;
@@ -24,6 +24,7 @@ layout(set = 0, binding = 3) readonly buffer thetaBuffer { float theta[]; };
 layout(set = 0, binding = 4) buffer qOutBuffer { float qOut[]; };
 layout(set = 0, binding = 5) buffer kCacheBuffer { uint16_t kCache[]; };
 layout(set = 0, binding = 6) buffer vCacheBuffer { uint16_t vCache[]; };
+layout(set = 0, binding = 7) buffer PositionBuffer { uint position[]; };
 
 shared vec4 Asub[4][TS];
 shared vec4 Bsub[4][HEAD_DIM];
@@ -41,6 +42,10 @@ void main() {
     uint mGlobal = gl_WorkGroupID.y * TS + row;
     uint nBase = head * HEAD_DIM;
     uint cacheRows = param.vOffset - param.kOffset;
+
+    if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u && tid == 0u) {
+        position[0] = param.tokenIdx + param.M;
+    }
 
     float sum_sq = 0.0;
     for (uint i = 0; i < param.K / (TS * vec); i++) {
@@ -93,7 +98,7 @@ void main() {
         #pragma unroll
         for (uint j = 0; j < 16; j++) {
             uint d = col * 16 + j;
-            vCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(acc_sh[row][d])));
+            vCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(acc_sh[row][d])));
         }
         return;
     }
@@ -140,7 +145,7 @@ void main() {
         #pragma unroll
         for (uint j = 0; j < 16; j++) {
             uint d = col * 16 + j;
-            kCache[mGlobal * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(norm_sh[row][d])));
+            kCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(norm_sh[row][d])));
         }
     }
 }

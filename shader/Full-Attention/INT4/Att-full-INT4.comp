@@ -9,10 +9,6 @@
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions {
-    uint context_length;
-} param;
-
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uint8_t key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
@@ -21,6 +17,7 @@ layout(set = 0, binding = 4) readonly buffer kScaleBuffer { float kscale[]; };
 layout(set = 0, binding = 5) readonly buffer kZeroBuffer { float kzero[]; };
 layout(set = 0, binding = 6) readonly buffer vScaleBuffer { float vscale[]; };
 layout(set = 0, binding = 7) readonly buffer vZeroBuffer { float vzero[]; };
+layout(set = 0, binding = 8) readonly buffer PositionBuffer { uint position[]; };
 
 shared float q_shared[HEAD_DIM];
 shared float s_max[TS];
@@ -33,6 +30,7 @@ void main() {
     uint q_head_id = gl_WorkGroupID.x;
     uint kv_block_id = q_head_id / KV_HEADS;
     uint kv_row_base = kv_block_id * HEAD_DIM;
+    uint context = position[0] + 1u;
 
     if (tid < HEAD_DIM / 4) {
         vec4 qv = query[q_head_id * (HEAD_DIM / 4) + tid];
@@ -47,18 +45,18 @@ void main() {
     float d_prev = 0.0;
     float acc = 0.0;
 
-    uint num_tiles = (param.context_length + TS - 1) / TS;
+    uint num_tiles = (context + TS - 1) / TS;
     for (uint k = 0; k < num_tiles; k++) {
         uint s = k * TS + tid;
 
-        if (s < param.context_length) {
-            scale_s[tid] = kscale[kv_block_id * param.context_length + s];
-            zero_s[tid] = kzero[kv_block_id * param.context_length + s];
+        if (s < context) {
+            scale_s[tid] = kscale[kv_block_id * context + s];
+            zero_s[tid] = kzero[kv_block_id * context + s];
         }
         barrier();
 
         float score = NEG_INF;
-        if (s < param.context_length) {
+        if (s < context) {
             score = 0.0;
             for (uint d = 0; d < HEAD_DIM; d++) {
                 float k_val = float(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])) * scale_s[tid] - zero_s[tid];
@@ -98,7 +96,7 @@ void main() {
 
             float tile_acc = 0.0;
             uint tile_start = k * TS;
-            uint tile_size = param.context_length - tile_start;
+            uint tile_size = context - tile_start;
             if (tile_size > TS) tile_size = TS;
             for (uint i = 0; i < tile_size; i++) {
                 uint t = tile_start + i;

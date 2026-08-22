@@ -909,18 +909,20 @@ void validateAttentionFP16(session s, int att_seq, int att_heads, int att_kv_hea
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
 
+    uint32_t posVal = (uint32_t)(seq - 1);
     buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_k_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_v_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
     free(att_k_t);
     free(att_v_t);
 
     operation ops[] = {
-        {.shader = "Att-full-FP16.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer}, .bufferCount = 4,
-         .pushConstants = {seq}, .pushConstantCount = 1,
+        {.shader = "Att-full-FP16.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer}, .bufferCount = 5,
+         .pushConstants = {0}, .pushConstantCount = 0,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -930,7 +932,7 @@ void validateAttentionFP16(session s, int att_seq, int att_heads, int att_kv_hea
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
     report("Attention FP16", 100, out, ref, heads * dim, ms);
 
-    destroy_buffers(s, bufs, 4);
+    destroy_buffers(s, bufs, 5);
     free(kf);
     free(vf);
     free(out);
@@ -960,18 +962,20 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
 
+    uint32_t posVal = (uint32_t)(seq - 1);
     buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_k_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_v_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
     free(att_k_t);
     free(att_v_t);
 
     operation ops[] = {
-        {.shader = "Att-full-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer}, .bufferCount = 4,
-         .pushConstants = {seq}, .pushConstantCount = 1,
+        {.shader = "Att-full-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer}, .bufferCount = 5,
+         .pushConstants = {0}, .pushConstantCount = 0,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -981,7 +985,7 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
     report("Attention INT8", 100, out, ref, heads * dim, ms);
 
-    destroy_buffers(s, bufs, 4);
+    destroy_buffers(s, bufs, 5);
     free(kf);
     free(vf);
     free(out);
@@ -1056,6 +1060,7 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
 
+    uint32_t posVal = (uint32_t)(seq - 1);
     buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
@@ -1064,12 +1069,13 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
     buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
     buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
 
     operation ops[] = {
-        {.shader = "Att-full-INT4.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf}, .bufferCount = 8,
-         .pushConstants = {seq}, .pushConstantCount = 1,
+        {.shader = "Att-full-INT4.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer}, .bufferCount = 9,
+         .pushConstants = {0}, .pushConstantCount = 0,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1079,7 +1085,7 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
     report("Attention INT4", 100, out, ref, heads * dim, ms);
 
-    destroy_buffers(s, bufs, 8);
+    destroy_buffers(s, bufs, 9);
     free(kq);
     free(vq);
     free(kScale);
@@ -1337,6 +1343,7 @@ void validateQkvRopeFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     int rows = kv_heads * dim;
     int ctx = 33;
     int seq_len = ctx + 1;
+    uint32_t posVal = (uint32_t)ctx;
 
     float* xn = (float*)malloc(sizeof(float) * k);
     rms_norm_apply(input, gamma, xn, k);
@@ -1361,13 +1368,14 @@ void validateQkvRopeFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer}, .bufferCount = 7,
-         .pushConstants = {1, n_total, k, ctx, k_offset, v_offset, seq_len}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 8,
+         .pushConstants = {1, n_total, k, k_offset, v_offset}, .pushConstantCount = 5,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1391,8 +1399,11 @@ void validateQkvRopeFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     report("QKV-Rope FP16", 100, qOut, qref, heads * dim, ms);
     report("QKV-Rope-kv FP16", 100, kvOut, kvRef, 2 * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-pos FP16: shader[0]= %u ref= %d\n", posRead, ctx);
 
-    destroy_buffers(s, bufs, 7);
+    destroy_buffers(s, bufs, 8);
     free(xn);
     free(proj);
     free(qref);
@@ -1419,6 +1430,7 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     int ctx = 33;
     int seq_len = ctx + 1;
     int scaleCount = k * n_total / qkv_weightINT8.group_size;
+    uint32_t posVal = (uint32_t)ctx;
 
     float* xn = (float*)malloc(sizeof(float) * k);
     rms_norm_apply(input, gamma, xn, k);
@@ -1445,13 +1457,14 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer}, .bufferCount = 9,
-         .pushConstants = {1, n_total, k, ctx, k_offset, v_offset, seq_len}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 10,
+         .pushConstants = {1, n_total, k, k_offset, v_offset}, .pushConstantCount = 5,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1474,8 +1487,11 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     report("QKV-Rope INT8", 100, qOut, qref, heads * dim, ms);
     report("QKV-Rope-kv INT8", 100, kvOut, kvRef, 2 * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-pos INT8: shader[0]= %u ref= %d\n", posRead, ctx);
 
-    destroy_buffers(s, bufs, 9);
+    destroy_buffers(s, bufs, 10);
     free(xn);
     free(proj);
     free(qref);
@@ -1502,6 +1518,7 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     int ctx = 33;
     int seq_len = ctx + 1;
     int scaleCount = k * n_total / qkv_weightINT4.group_size;
+    uint32_t posVal = (uint32_t)ctx;
 
     float* xn = (float*)malloc(sizeof(float) * k);
     rms_norm_apply(input, gamma, xn, k);
@@ -1536,13 +1553,14 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
     buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
     buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 13);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 14);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer}, .bufferCount = 13,
-         .pushConstants = {1, n_total, k, ctx, k_offset, v_offset, seq_len}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer}, .bufferCount = 14,
+         .pushConstants = {1, n_total, k, k_offset, v_offset}, .pushConstantCount = 5,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1572,8 +1590,11 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     report("QKV-Rope INT4", 100, qOut, qref, heads * dim, ms);
     report("QKV-Rope-kv INT4", 100, kvOut, kvRef, 2 * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-pos INT4: shader[0]= %u ref= %d\n", posRead, ctx);
 
-    destroy_buffers(s, bufs, 13);
+    destroy_buffers(s, bufs, 14);
     free(xn);
     free(proj);
     free(qref);
@@ -2642,6 +2663,7 @@ void validateQkvRopeGEMMFP16(session s, int K, int qkv_heads, int qkv_kv_heads, 
     int k_offset = heads * dim;
     int v_offset = (heads + kv_heads) * dim;
     int rows = kv_heads * dim;
+    uint32_t posVal = 0;
 
     float* qref = (float*)malloc(sizeof(float) * M * heads * dim);
     float* kref = (float*)malloc(sizeof(float) * M * rows);
@@ -2671,13 +2693,14 @@ void validateQkvRopeGEMMFP16(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer}, .bufferCount = 7,
-         .pushConstants = {M, n_total, k, 0, k_offset, v_offset, M}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 8,
+         .pushConstants = {M, n_total, k, 0, k_offset, v_offset}, .pushConstantCount = 6,
          .dispatchX = heads + 2 * kv_heads, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -2693,8 +2716,11 @@ void validateQkvRopeGEMMFP16(session s, int K, int qkv_heads, int qkv_kv_heads, 
     report("QKV-Rope-GEMM FP16", 100, qOut, qref, M * heads * dim, ms);
     report("QKV-Rope-GEMM-kv FP16", 100, kstored, kref, M * rows, ms);
     report("QKV-Rope-GEMM-v FP16", 100, vstored, vref, M * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-GEMM-pos FP16: shader[0]= %u ref= %d\n", posRead, M);
 
-    destroy_buffers(s, bufs, 7);
+    destroy_buffers(s, bufs, 8);
     free(qref); free(kref); free(vref);
     free(qOut); free(kCache); free(vCache);
     free(kstored); free(vstored);
@@ -2710,6 +2736,7 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     int v_offset = (heads + kv_heads) * dim;
     int rows = kv_heads * dim;
     int scaleCount = k * n_total / qkv_weightINT8.group_size;
+    uint32_t posVal = 0;
 
     float* qref = (float*)malloc(sizeof(float) * M * heads * dim);
     float* kref = (float*)malloc(sizeof(float) * M * rows);
@@ -2741,13 +2768,14 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer}, .bufferCount = 9,
-         .pushConstants = {M, n_total, k, 0, k_offset, v_offset, M}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 10,
+         .pushConstants = {M, n_total, k, 0, k_offset, v_offset}, .pushConstantCount = 6,
          .dispatchX = heads + 2 * kv_heads, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -2763,8 +2791,11 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     report("QKV-Rope-GEMM INT8", 100, qOut, qref, M * heads * dim, ms);
     report("QKV-Rope-GEMM-kv INT8", 100, kstored, kref, M * rows, ms);
     report("QKV-Rope-GEMM-v INT8", 100, vstored, vref, M * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-GEMM-pos INT8: shader[0]= %u ref= %d\n", posRead, M);
 
-    destroy_buffers(s, bufs, 9);
+    destroy_buffers(s, bufs, 10);
     free(qref); free(kref); free(vref);
     free(qOut); free(kCache); free(vCache);
     free(kstored); free(vstored);
@@ -2780,6 +2811,7 @@ void validateQkvRopeGEMMINT4(session s, int K, int qkv_heads, int qkv_kv_heads, 
     int v_offset = (heads + kv_heads) * dim;
     int rows = kv_heads * dim;
     int scaleCount = k * n_total / qkv_weightINT4.group_size;
+    uint32_t posVal = 0;
 
     float* qref = (float*)malloc(sizeof(float) * M * heads * dim);
     float* kref = (float*)malloc(sizeof(float) * M * rows);
@@ -2819,13 +2851,14 @@ void validateQkvRopeGEMMINT4(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * M, MEMORY_VRAM);
     buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * M, MEMORY_VRAM);
     buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * M, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 13);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 14);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-GEMM-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer}, .bufferCount = 13,
-         .pushConstants = {M, n_total, k, 0, k_offset, v_offset, M}, .pushConstantCount = 7,
+        {.shader = "RmsNorm-QKV-GEMM-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer}, .bufferCount = 14,
+         .pushConstants = {M, n_total, k, 0, k_offset, v_offset}, .pushConstantCount = 6,
          .dispatchX = heads + 2 * kv_heads, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -2850,8 +2883,11 @@ void validateQkvRopeGEMMINT4(session s, int K, int qkv_heads, int qkv_kv_heads, 
     report("QKV-Rope-GEMM INT4", 100, qOut, qref, M * heads * dim, ms);
     report("QKV-Rope-GEMM-kv INT4", 100, kstored, kref, M * rows, ms);
     report("QKV-Rope-GEMM-v INT4", 100, vstored, vref, M * rows, ms);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("QKV-Rope-GEMM-pos INT4: shader[0]= %u ref= %d\n", posRead, M);
 
-    destroy_buffers(s, bufs, 13);
+    destroy_buffers(s, bufs, 14);
     free(qref); free(kref); free(vref);
     free(qOut); free(kCache); free(vCache);
     free(kScale); free(kZero); free(vScale); free(vZero);
@@ -2877,6 +2913,7 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uin
     float* maxValues = (float*)calloc(numGroups, sizeof(float));
     uint32_t* maxIndices = (uint32_t*)calloc(numGroups, sizeof(uint32_t));
     uint32_t* result = (uint32_t*)calloc(1, sizeof(uint32_t));
+    uint32_t posVal = 41;
 
     uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * vocabSize);
     transpose_block16((uint8_t*)lmHeadFP16, (uint8_t*)transposed, K, vocabSize, QUANT_FP16);
@@ -2886,26 +2923,30 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, uin
     buffer maxValueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxValues, sizeof(float) * numGroups, MEMORY_VRAM);
     buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxIndices, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
     buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, result, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 6);
     free(transposed);
 
     operation ops[] = {
         {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer}, .bufferCount = 4,
          .pushConstants = {1, vocabSize, K}, .pushConstantCount = 3,
          .dispatchX = numGroups, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer}, .bufferCount = 3,
-         .pushConstants = {vocabSize}, .pushConstantCount = 1,
+        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer}, .bufferCount = 4,
+         .pushConstants = {vocabSize, 1}, .pushConstantCount = 2,
          .dispatchX = 1, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
 
     int ref = lmhead_argmax_ref_fp16(input, lmHeadFP16, vocabSize, K);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, resultBuffer, result);
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
     printf("LMHead-ArgMax FP16: shader[0]= %u ref= %d\n", result[0], ref);
+    printf("LMHead-ArgMax-pos FP16: shader[0]= %u ref= %d\n", posRead, posVal + 1);
     printf("LMHead-ArgMax FP16 time: %.3f ms\n", ms);
 
-    destroy_buffers(s, bufs, 5);
+    destroy_buffers(s, bufs, 6);
     free(maxValues);
     free(maxIndices);
     free(result);
