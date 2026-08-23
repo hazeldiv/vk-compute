@@ -1,0 +1,23 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params {
+    uint N;
+    uint chunks;
+} prm;
+
+layout(set = 0, binding = 0) readonly restrict buffer PartialBuffer { float P[]; };
+layout(set = 0, binding = 1) readonly restrict buffer ResidualBuffer { float R[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer OutBuffer { float C[]; };
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= prm.N) return;
+
+    float acc = 0.0;
+    for (uint z = 0; z < prm.chunks; z++) {
+        acc += P[z * prm.N + g];
+    }
+    C[g] = acc + R[g];
+}

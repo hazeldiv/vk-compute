@@ -1,0 +1,135 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define TS 256
+#define vec 4
+#define d_model 4096
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+const float EPSILON = 1e-5;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 gate[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { uvec4 up[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer PartialBuffer { float PgPu[]; };
+layout(set = 0, binding = 5) readonly restrict buffer MatrixF { vec4 scaleGate[]; };
+layout(set = 0, binding = 6) readonly restrict buffer MatrixG { vec4 zeroPointGate[]; };
+layout(set = 0, binding = 7) readonly restrict buffer MatrixH { vec4 scaleUp[]; };
+layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 zeroPointUp[]; };
+
+shared float shared_sum;
+shared vec4 cache[d_model/vec];
+shared vec4 scaleSubCacheGate[2][TS];
+shared vec4 zeroSubCacheGate[2][TS];
+shared vec4 scaleSubCacheUp[2][TS];
+shared vec4 zeroSubCacheUp[2][TS];
+shared float sub_sums[TS / 64];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes);
+}
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint chunk = gl_WorkGroupID.y;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint blockIdx = gl_WorkGroupID.x * dims.K / vec + col;
+
+    float sum_sq = 0.0;
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+    for (uint t = 0; t < dims.K/vec; t+=TS) {
+        uint idx = t + col;
+        vec4 val = x[idx];
+        cache[idx] = val * gamma[idx];
+        sum_sq += dot(val, val);
+    }
+
+    sum_sq = subgroupAdd(sum_sq);
+    if (subgroupElect()) {
+        sub_sums[gl_SubgroupID] = sum_sq;
+    }
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        uint active_subgroups = (TS + gl_SubgroupSize - 1) / gl_SubgroupSize;
+        for (uint i = 0; i < active_subgroups; i++) {
+            final_sum += sub_sums[i];
+        }
+        shared_sum = final_sum;
+    }
+    barrier();
+    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
+    float inv_rms = 1.0 / rms;
+
+    if (chunk < numTiles) {
+        scaleSubCacheGate[0][col] = scaleGate[chunk*TS + blockIdx];
+        zeroSubCacheGate[0][col] = zeroPointGate[chunk*TS + blockIdx];
+        scaleSubCacheUp[0][col] = scaleUp[chunk*TS + blockIdx];
+        zeroSubCacheUp[0][col] = zeroPointUp[chunk*TS + blockIdx];
+    }
+
+    barrier();
+    uint blockCount = 0;
+    float gateResult = 0.0;
+    float upResult = 0.0;
+
+    for (uint t = chunk; t < numTiles; t += 4u) {
+        uint cur = blockCount & 1, nxt = (blockCount+1) & 1;
+        uint nextTile = t + 4u;
+        if (nextTile < numTiles) {
+            scaleSubCacheGate[nxt][col] = scaleGate[nextTile*TS + blockIdx];
+            zeroSubCacheGate[nxt][col] = zeroPointGate[nextTile*TS + blockIdx];
+            scaleSubCacheUp[nxt][col] = scaleUp[nextTile*TS + blockIdx];
+            zeroSubCacheUp[nxt][col] = zeroPointUp[nextTile*TS + blockIdx];
+        }
+        blockCount++;
+
+        uint baseRow = t * (TS / 4) * dims.N;
+        uint xOff = t * TS;
+        #pragma unroll
+        for (uint k=0;k<TS; k+=4) {
+            vec4 tempA0 = cache[xOff + k] * inv_rms;
+            vec4 tempA1 = cache[xOff + k+1] * inv_rms;
+            vec4 tempA2 = cache[xOff + k+2] * inv_rms;
+            vec4 tempA3 = cache[xOff + k+3] * inv_rms;
+
+            uvec4 rawInput = gate[baseRow + globalCol];
+            vec4 w0 = unpackUint8x4(rawInput.x) * scaleSubCacheGate[cur][k] - zeroSubCacheGate[cur][k];
+            vec4 w1 = unpackUint8x4(rawInput.y) * scaleSubCacheGate[cur][k+1] - zeroSubCacheGate[cur][k+1];
+            vec4 w2 = unpackUint8x4(rawInput.z) * scaleSubCacheGate[cur][k+2] - zeroSubCacheGate[cur][k+2];
+            vec4 w3 = unpackUint8x4(rawInput.w) * scaleSubCacheGate[cur][k+3] - zeroSubCacheGate[cur][k+3];
+            gateResult += dot(tempA0, w0);
+            gateResult += dot(tempA1, w1);
+            gateResult += dot(tempA2, w2);
+            gateResult += dot(tempA3, w3);
+
+            rawInput = up[baseRow + globalCol];
+            w0 = unpackUint8x4(rawInput.x) * scaleSubCacheUp[cur][k] - zeroSubCacheUp[cur][k];
+            w1 = unpackUint8x4(rawInput.y) * scaleSubCacheUp[cur][k+1] - zeroSubCacheUp[cur][k+1];
+            w2 = unpackUint8x4(rawInput.z) * scaleSubCacheUp[cur][k+2] - zeroSubCacheUp[cur][k+2];
+            w3 = unpackUint8x4(rawInput.w) * scaleSubCacheUp[cur][k+3] - zeroSubCacheUp[cur][k+3];
+            upResult += dot(tempA0, w0);
+            upResult += dot(tempA1, w1);
+            upResult += dot(tempA2, w2);
+            upResult += dot(tempA3, w3);
+
+            baseRow += dims.N;
+        }
+
+        barrier();
+    }
+
+    PgPu[chunk * dims.N + globalCol] = gateResult;
+    PgPu[(4u + chunk) * dims.N + globalCol] = upResult;
+}

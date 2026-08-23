@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 256
+#define HEAD_DIM 256
+#define HALF 128
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params {
+    uint N;
+    uint kOffset;
+    uint vOffset;
+} param;
+
+layout(set = 0, binding = 0) readonly buffer PartialBuffer { float P[]; };
+layout(set = 0, binding = 1) buffer qOutBuffer { float qOut[]; };
+layout(set = 0, binding = 2) buffer kCacheBuffer { uint16_t kCache[]; };
+layout(set = 0, binding = 3) buffer vCacheBuffer { uint16_t vCache[]; };
+layout(set = 0, binding = 4) readonly buffer thetaBuffer { float theta[]; };
+layout(set = 0, binding = 5) readonly buffer PositionBuffer { uint position[]; };
+
+shared float acc_shared[TS];
+shared float rope_shared[TS];
+shared float shared_sum2;
+
+const float EPSILON = 1e-5;
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint pos = position[0];
+
+    float acc = 0.0;
+    for (uint z = 0; z < 4u; z++) {
+        acc += P[z * param.N + globalCol];
+    }
+
+    uint cacheSlot = pos * (param.vOffset - param.kOffset);
+
+    if (globalCol >= param.vOffset) {
+        uint row = globalCol - param.vOffset;
+        vCache[cacheSlot + row] = uint16_t(packHalf2x16(vec2(acc)));
+        return;
+    }
+
+    acc_shared[col] = acc;
+    barrier();
+
+    if (gl_LocalInvocationID.x == 0) {
+        float final_sum = 0.0;
+        for (uint i = 0; i < TS; i++) {
+            final_sum += acc_shared[i] * acc_shared[i];
+        }
+        shared_sum2 = final_sum;
+    }
+    barrier();
+    float rms2 = sqrt((shared_sum2 / float(HEAD_DIM)) + EPSILON);
+    float inv_rms2 = 1.0 / rms2;
+
+    rope_shared[col] = acc * inv_rms2;
+    barrier();
+
+    float angle = float(pos) * theta[col & (HALF - 1u)];
+    float cos_a = cos(angle);
+    float sin_a = sin(angle);
+    if (col < HALF) {
+        acc = rope_shared[col] * cos_a - rope_shared[col + HALF] * sin_a;
+    } else {
+        acc = rope_shared[col - HALF] * sin_a + rope_shared[col] * cos_a;
+    }
+
+    if (globalCol < param.kOffset) {
+        qOut[globalCol] = acc;
+    } else {
+        uint row = globalCol - param.kOffset;
+        kCache[cacheSlot + row] = uint16_t(packHalf2x16(vec2(acc)));
+    }
+}

@@ -17,6 +17,18 @@ void validateRmsNormGEMVINT4(session s, int M, int N, int K, float* input, float
 void validateGemvAddFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16);
 void validateGemvAddINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8);
 void validateGemvAddINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4);
+void validateGemvSplitKFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16);
+void validateGemvSplitKINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8);
+void validateGemvSplitKINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4);
+void validateQkvRopeSplitKFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, uint16_t* qkv_weightFP16, float* qkv_theta);
+void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, QuantizedData qkv_weightINT8, float* qkv_theta);
+void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, QuantizedData qkv_weightINT4, float* qkv_theta);
+void validateSwigluFfnSplitKFP16(session s, int M, int N, int K, float* input, float* gamma, uint16_t* gateW, uint16_t* upW, uint16_t* downW);
+void validateSwigluFfnSplitKINT8(session s, int M, int N, int K, float* input, float* gamma, QuantizedData gateQ, QuantizedData upQ, QuantizedData downQ);
+void validateSwigluFfnSplitKINT4(session s, int M, int N, int K, float* input, float* gamma, QuantizedData gateQ, QuantizedData upQ, QuantizedData downQ);
+void validateLinearProjSplitKFP16(session s, int M, int K, float* input, float* gamma, uint16_t* w_inFP16);
+void validateLinearProjSplitKINT8(session s, int M, int K, float* input, float* gamma, QuantizedData w_inINT8);
+void validateLinearProjSplitKINT4(session s, int M, int K, float* input, float* gamma, QuantizedData w_inINT4);
 void validateGemmAddFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16);
 void validateGemmAddINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8);
 void validateGemmAddINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4);

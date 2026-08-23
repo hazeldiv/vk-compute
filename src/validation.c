@@ -719,6 +719,121 @@ void validateGemvAddINT4(session s, int M, int N, int K, float* input, float* re
     free(ref);
 }
 
+void validateGemvSplitKINT4(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT4) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+    float* partials = (float*)calloc(4 * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
+    transpose_block16(weightINT4.data, transposed, K, N, QUANT_INT4);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N / 2, MEMORY_RAM);
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, partials, sizeof(float) * 4 * N, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.scale, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.z, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, partialBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-SplitK-INT4.spv", .buffers = {inputBuffer, weightBuffer, partialBuffer, scaleBuffer, zeroBuffer}, .bufferCount = 5,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {partialBuffer, residualBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {N, 4}, .pushConstantCount = 2,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_int4(input, &weightINT4, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV SplitK INT4", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 7);
+    free(out);
+    free(ref);
+    free(partials);
+}
+
+void validateGemvSplitKINT8(session s, int M, int N, int K, float* input, float* residual, QuantizedData weightINT8) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+    float* partials = (float*)calloc(4 * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N);
+    transpose_block16(weightINT8.data, transposed, K, N, QUANT_INT8);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N, MEMORY_RAM);
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, partials, sizeof(float) * 4 * N, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.scale, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.z, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, partialBuffer, outBuffer, scaleBuffer, zeroBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-SplitK-INT8.spv", .buffers = {inputBuffer, weightBuffer, partialBuffer, scaleBuffer, zeroBuffer}, .bufferCount = 5,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {partialBuffer, residualBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {N, 4}, .pushConstantCount = 2,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_int8(input, &weightINT8, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV SplitK INT8", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 7);
+    free(out);
+    free(ref);
+    free(partials);
+}
+
+void validateGemvSplitKFP16(session s, int M, int N, int K, float* input, float* residual, uint16_t* weightFP16) {
+    float* out = (float*)calloc(M * N, sizeof(float));
+    float* partials = (float*)calloc(4 * N, sizeof(float));
+
+    uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
+    transpose_block16((uint8_t*)weightFP16, (uint8_t*)transposed, K, N, QUANT_FP16);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * K * N, MEMORY_RAM);
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, partials, sizeof(float) * 4 * N, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * N, MEMORY_RAM);
+    buffer residualBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, residual, sizeof(float) * N, MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, weightBuffer, partialBuffer, outBuffer, residualBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
+    free(transposed);
+
+    operation ops[] = {
+        {.shader = "GEMV-SplitK-FP16.spv", .buffers = {inputBuffer, weightBuffer, partialBuffer}, .bufferCount = 3,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = (N + 255) / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {partialBuffer, residualBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {N, 4}, .pushConstantCount = 2,
+         .dispatchX = (N + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    gemv_ref_fp16(input, weightFP16, ref, N, K);
+    for (int j = 0; j < N; j++) ref[j] += residual[j];
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("GEMV SplitK FP16", 100, out, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 5);
+    free(out);
+    free(ref);
+    free(partials);
+}
+
 void validateRmsNormSwigluFfn(session s, int M, int N, int K, float* input, float* gamma, float* weight) {
     float* out = (float*)calloc(M * N, sizeof(float));
 
@@ -2483,6 +2598,311 @@ void validateGemmAddINT4(session s, int M, int N, int K, float* input, float* re
     free(ref);
 }
 
+void validateQkvRopeSplitKFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, uint16_t* qkv_weightFP16, float* qkv_theta) {
+    int k = K;
+    int heads = qkv_heads;
+    int kv_heads = qkv_kv_heads;
+    int dim = qkv_dim;
+    int n_total = (heads + 2 * kv_heads) * dim;
+    int k_offset = heads * dim;
+    int v_offset = (heads + kv_heads) * dim;
+    int rows = kv_heads * dim;
+    int ctx = 33;
+    int seq_len = ctx + 1;
+    uint32_t posVal = (uint32_t)ctx;
+
+    float* xn = (float*)malloc(sizeof(float) * k);
+    rms_norm_apply(input, gamma, xn, k);
+    float* proj = (float*)malloc(sizeof(float) * n_total);
+    gemv_ref_fp16(xn, qkv_weightFP16, proj, n_total, k);
+    float* qref = (float*)malloc(sizeof(float) * heads * dim);
+    float* kref = (float*)malloc(sizeof(float) * rows);
+    float* vref = (float*)malloc(sizeof(float) * rows);
+    qkv_rope_ref(proj, qkv_theta, qref, kref, vref, n_total, k_offset, v_offset, dim, ctx);
+
+    float* qOut = (float*)calloc(heads * dim, sizeof(float));
+    uint16_t* kCache = (uint16_t*)calloc(rows * seq_len, sizeof(uint16_t));
+    uint16_t* vCache = (uint16_t*)calloc(rows * seq_len, sizeof(uint16_t));
+
+    uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * k * n_total);
+    transpose_block16((uint8_t*)qkv_weightFP16, (uint8_t*)transposed, k, n_total, QUANT_FP16);
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * k, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * k, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * k * n_total, MEMORY_RAM);
+    float* pinit = (float*)calloc(4 * n_total, sizeof(float));
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
+    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
+    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, partialBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
+    free(transposed);
+    free(pinit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-QKV-SplitK-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, partialBuffer}, .bufferCount = 4,
+         .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
+         .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-Rope-FP16.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, thetaBuffer, posBuffer}, .bufferCount = 6,
+         .pushConstants = {n_total, k_offset, v_offset}, .pushConstantCount = 3,
+         .dispatchX = heads + 2 * kv_heads, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qOutBuffer, qOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kCacheBuffer, kCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vCacheBuffer, vCache);
+    float* kstored = (float*)malloc(sizeof(float) * rows);
+    float* vstored = (float*)malloc(sizeof(float) * rows);
+    for (int r = 0; r < rows; r++) kstored[r] = fp16_to_float(kCache[(seq_len - 1) * rows + r]);
+    for (int r = 0; r < rows; r++) vstored[r] = fp16_to_float(vCache[(seq_len - 1) * rows + r]);
+    float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
+    float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
+    for (int r = 0; r < rows; r++) {
+        kvOut[r] = kstored[r];
+        kvOut[rows + r] = vstored[r];
+        kvRef[r] = kref[r];
+        kvRef[rows + r] = vref[r];
+    }
+
+    report("QKV-Split-Rope FP16", 100, qOut, qref, heads * dim, ms);
+    report("QKV-Split-Rope-kv FP16", 100, kvOut, kvRef, 2 * rows, ms);
+
+    destroy_buffers(s, bufs, 9);
+    free(xn);
+    free(proj);
+    free(qref);
+    free(kref);
+    free(vref);
+    free(qOut);
+    free(kCache);
+    free(vCache);
+    free(kstored);
+    free(vstored);
+    free(kvOut);
+    free(kvRef);
+}
+
+void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, QuantizedData qkv_weightINT8, float* qkv_theta) {
+    int k = K;
+    int heads = qkv_heads;
+    int kv_heads = qkv_kv_heads;
+    int dim = qkv_dim;
+    int n_total = (heads + 2 * kv_heads) * dim;
+    int k_offset = heads * dim;
+    int v_offset = (heads + kv_heads) * dim;
+    int rows = kv_heads * dim;
+    int ctx = 33;
+    int seq_len = ctx + 1;
+    int scaleCount = k * n_total / qkv_weightINT8.group_size;
+    uint32_t posVal = (uint32_t)ctx;
+
+    float* xn = (float*)malloc(sizeof(float) * k);
+    rms_norm_apply(input, gamma, xn, k);
+    float* proj = (float*)malloc(sizeof(float) * n_total);
+    gemv_ref_int8(xn, &qkv_weightINT8, proj, n_total, k);
+    float* qref = (float*)malloc(sizeof(float) * heads * dim);
+    float* kref = (float*)malloc(sizeof(float) * rows);
+    float* vref = (float*)malloc(sizeof(float) * rows);
+    qkv_rope_ref(proj, qkv_theta, qref, kref, vref, n_total, k_offset, v_offset, dim, ctx);
+
+    float* qOut = (float*)calloc(heads * dim, sizeof(float));
+    uint8_t* kCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    uint8_t* vCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    float* kScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total);
+    transpose_block16(qkv_weightINT8.data, transposed, k, n_total, QUANT_INT8);
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * k, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * k, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.scale, sizeof(float) * scaleCount, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
+    float* pinit = (float*)calloc(4 * n_total, sizeof(float));
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
+    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    free(transposed);
+    free(pinit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-QKV-SplitK-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer}, .bufferCount = 6,
+         .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
+         .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-Rope-INT8.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, thetaBuffer, posBuffer}, .bufferCount = 10,
+         .pushConstants = {n_total, k_offset, v_offset}, .pushConstantCount = 3,
+         .dispatchX = heads + 2 * kv_heads, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qOutBuffer, qOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kCacheBuffer, kCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vCacheBuffer, vCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kScaleBuffer, kScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kZeroBuffer, kZero);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vScaleBuffer, vScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vZeroBuffer, vZero);
+    float* kstored = (float*)malloc(sizeof(float) * rows);
+    float* vstored = (float*)malloc(sizeof(float) * rows);
+    for (int r = 0; r < rows; r++) {
+        int h = r / dim;
+        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * seq_len + seq_len - 1] - kZero[h * seq_len + seq_len - 1];
+        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * seq_len + seq_len - 1] - vZero[h * seq_len + seq_len - 1];
+    }
+    float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
+    float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
+    for (int r = 0; r < rows; r++) {
+        kvOut[r] = kstored[r];
+        kvOut[rows + r] = vstored[r];
+        kvRef[r] = kref[r];
+        kvRef[rows + r] = vref[r];
+    }
+
+    report("QKV-Split-Rope INT8", 100, qOut, qref, heads * dim, ms);
+    report("QKV-Split-Rope-kv INT8", 100, kvOut, kvRef, 2 * rows, ms);
+
+    destroy_buffers(s, bufs, 15);
+    free(xn);
+    free(proj);
+    free(qref);
+    free(kref);
+    free(vref);
+    free(qOut);
+    free(kCache);
+    free(vCache);
+    free(kScale);
+    free(kZero);
+    free(vScale);
+    free(vZero);
+    free(kstored);
+    free(vstored);
+    free(kvOut);
+    free(kvRef);
+}
+
+void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int qkv_dim, float* input, float* gamma, QuantizedData qkv_weightINT4, float* qkv_theta) {
+    int k = K;
+    int heads = qkv_heads;
+    int kv_heads = qkv_kv_heads;
+    int dim = qkv_dim;
+    int n_total = (heads + 2 * kv_heads) * dim;
+    int k_offset = heads * dim;
+    int v_offset = (heads + kv_heads) * dim;
+    int rows = kv_heads * dim;
+    int ctx = 33;
+    int seq_len = ctx + 1;
+    int scaleCount = k * n_total / qkv_weightINT4.group_size;
+    uint32_t posVal = (uint32_t)ctx;
+
+    float* xn = (float*)malloc(sizeof(float) * k);
+    rms_norm_apply(input, gamma, xn, k);
+    float* proj = (float*)malloc(sizeof(float) * n_total);
+    gemv_ref_int4(xn, &qkv_weightINT4, proj, n_total, k);
+    float* qref = (float*)malloc(sizeof(float) * heads * dim);
+    float* kref = (float*)malloc(sizeof(float) * rows);
+    float* vref = (float*)malloc(sizeof(float) * rows);
+    qkv_rope_ref(proj, qkv_theta, qref, kref, vref, n_total, k_offset, v_offset, dim, ctx);
+
+    float* qOut = (float*)calloc(heads * dim, sizeof(float));
+    uint8_t* kCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    uint8_t* vCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    float* kScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total / 2);
+    transpose_block16(qkv_weightINT4.data, transposed, k, n_total, QUANT_INT4);
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * k, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * k, MEMORY_RAM);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total / 2, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.scale, sizeof(float) * scaleCount, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.z, sizeof(float) * scaleCount, MEMORY_RAM);
+    float* pinit = (float*)calloc(4 * n_total, sizeof(float));
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
+    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    free(transposed);
+    free(pinit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-QKV-SplitK-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer}, .bufferCount = 6,
+         .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
+         .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-Rope-INT4.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, thetaBuffer, posBuffer}, .bufferCount = 10,
+         .pushConstants = {n_total, k_offset, v_offset}, .pushConstantCount = 3,
+         .dispatchX = heads + 2 * kv_heads, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qOutBuffer, qOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kCacheBuffer, kCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vCacheBuffer, vCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kScaleBuffer, kScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kZeroBuffer, kZero);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vScaleBuffer, vScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vZeroBuffer, vZero);
+    float* kstored = (float*)malloc(sizeof(float) * rows);
+    float* vstored = (float*)malloc(sizeof(float) * rows);
+    for (int r = 0; r < rows; r++) {
+        int h = r / dim;
+        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * seq_len + seq_len - 1] - kZero[h * seq_len + seq_len - 1];
+        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * seq_len + seq_len - 1] - vZero[h * seq_len + seq_len - 1];
+    }
+    float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
+    float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
+    for (int r = 0; r < rows; r++) {
+        kvOut[r] = kstored[r];
+        kvOut[rows + r] = vstored[r];
+        kvRef[r] = kref[r];
+        kvRef[rows + r] = vref[r];
+    }
+
+    report("QKV-Split-Rope INT4", 100, qOut, qref, heads * dim, ms);
+    report("QKV-Split-Rope-kv INT4", 100, kvOut, kvRef, 2 * rows, ms);
+
+    destroy_buffers(s, bufs, 15);
+    free(xn);
+    free(proj);
+    free(qref);
+    free(kref);
+    free(vref);
+    free(qOut);
+    free(kCache);
+    free(vCache);
+    free(kScale);
+    free(kZero);
+    free(vScale);
+    free(vZero);
+    free(kstored);
+    free(vstored);
+    free(kvOut);
+    free(kvRef);
+}
+
 void validateRmsNormSwigluFfnGEMMFP16(session s, int M, int N, int K, float* input, float* gamma, uint16_t* weightFP16, uint16_t* weight2FP16) {
     float* out = (float*)calloc(M * N, sizeof(float));
 
@@ -3057,6 +3477,406 @@ static int lmhead_argmax_ref_fp16(const float* x, const uint16_t* w, int n, int 
     return bestIdx;
 }
 
+void validateSwigluFfnSplitKFP16(session s, int M, int N, int K, float* input, float* gamma, uint16_t* gateW, uint16_t* upW, uint16_t* downW) {
+    float* act = (float*)malloc(sizeof(float) * M * N);
+    swiglu_ref_fp16(input, gamma, gateW, upW, act, N, K);
+    float* ref = (float*)malloc(sizeof(float) * M * K);
+    gemv_ref_fp16(act, downW, ref, K, N);
+
+    float* out = (float*)calloc(M * K, sizeof(float));
+    float* resZero = (float*)calloc(K, sizeof(float));
+
+    uint16_t* tg = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
+    uint16_t* tu = (uint16_t*)malloc(sizeof(uint16_t) * K * N);
+    uint16_t* td = (uint16_t*)malloc(sizeof(uint16_t) * N * K);
+    transpose_block16((uint8_t*)gateW, (uint8_t*)tg, K, N, QUANT_FP16);
+    transpose_block16((uint8_t*)upW, (uint8_t*)tu, K, N, QUANT_FP16);
+    transpose_block16((uint8_t*)downW, (uint8_t*)td, N, K, QUANT_FP16);
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gateBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tg, sizeof(uint16_t) * K * N, MEMORY_RAM);
+    buffer upBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tu, sizeof(uint16_t) * K * N, MEMORY_RAM);
+    float* pinit = (float*)calloc(8 * N, sizeof(float));
+    float* ginit = (float*)calloc(4 * K, sizeof(float));
+    buffer pgpuBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 8 * N, MEMORY_RAM);
+    buffer downBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, td, sizeof(uint16_t) * N * K, MEMORY_RAM);
+    buffer goutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, ginit, sizeof(float) * 4 * K, MEMORY_RAM);
+    buffer resBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, resZero, sizeof(float) * K, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * K, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer, downBuffer, goutBuffer, resBuffer, outBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
+    free(tg); free(tu); free(td); free(pinit); free(ginit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-up-ffn-SplitK-FP16.spv", .buffers = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer}, .bufferCount = 5,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = N / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "FFN-Down-SplitK-FP16.spv", .buffers = {pgpuBuffer, downBuffer, goutBuffer}, .bufferCount = 3,
+         .pushConstants = {M, K, N}, .pushConstantCount = 3,
+         .dispatchX = K / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {goutBuffer, resBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {K, 4}, .pushConstantCount = 2,
+         .dispatchX = K / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 3);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("SwiGLU-Split FP16", 100, out, ref, M * K, ms);
+
+    destroy_buffers(s, bufs, 9);
+    free(act);
+    free(ref);
+    free(out);
+    free(resZero);
+}
+
+void validateSwigluFfnSplitKINT8(session s, int M, int N, int K, float* input, float* gamma, QuantizedData gateQ, QuantizedData upQ, QuantizedData downQ) {
+    float* act = (float*)malloc(sizeof(float) * M * N);
+    swiglu_ref_int8(input, gamma, &gateQ, &upQ, act, N, K);
+    float* ref = (float*)malloc(sizeof(float) * M * K);
+    gemv_ref_int8(act, &downQ, ref, K, N);
+
+    float* out = (float*)calloc(M * K, sizeof(float));
+    float* resZero = (float*)calloc(K, sizeof(float));
+
+    uint8_t* tg = (uint8_t*)malloc(K * N);
+    uint8_t* tu = (uint8_t*)malloc(K * N);
+    uint8_t* td = (uint8_t*)malloc(N * K);
+    transpose_block16(gateQ.data, tg, K, N, QUANT_INT8);
+    transpose_block16(upQ.data, tu, K, N, QUANT_INT8);
+    transpose_block16(downQ.data, td, N, K, QUANT_INT8);
+    int gs = K * N / gateQ.group_size;
+    int ds = N * K / downQ.group_size;
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gateBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tg, K * N, MEMORY_RAM);
+    buffer upBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tu, K * N, MEMORY_RAM);
+    float* pinit = (float*)calloc(8 * N, sizeof(float));
+    float* ginit = (float*)calloc(4 * K, sizeof(float));
+    buffer pgpuBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 8 * N, MEMORY_RAM);
+    buffer gsc = createBuffer(s.dev.device, s.dev.physicalDevice, gateQ.scale, sizeof(float) * gs, MEMORY_RAM);
+    buffer gze = createBuffer(s.dev.device, s.dev.physicalDevice, gateQ.z, sizeof(float) * gs, MEMORY_RAM);
+    buffer usc = createBuffer(s.dev.device, s.dev.physicalDevice, upQ.scale, sizeof(float) * gs, MEMORY_RAM);
+    buffer uze = createBuffer(s.dev.device, s.dev.physicalDevice, upQ.z, sizeof(float) * gs, MEMORY_RAM);
+    buffer downBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, td, N * K, MEMORY_RAM);
+    buffer dsc = createBuffer(s.dev.device, s.dev.physicalDevice, downQ.scale, sizeof(float) * ds, MEMORY_RAM);
+    buffer dze = createBuffer(s.dev.device, s.dev.physicalDevice, downQ.z, sizeof(float) * ds, MEMORY_RAM);
+    buffer goutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, ginit, sizeof(float) * 4 * K, MEMORY_RAM);
+    buffer resBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, resZero, sizeof(float) * K, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * K, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer, gsc, gze, usc, uze, downBuffer, dsc, dze, goutBuffer, resBuffer, outBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    free(tg); free(tu); free(td); free(pinit); free(ginit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-up-ffn-SplitK-INT8.spv", .buffers = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer, gsc, gze, usc, uze}, .bufferCount = 9,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = N / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "FFN-Down-SplitK-INT8.spv", .buffers = {pgpuBuffer, downBuffer, goutBuffer, dsc, dze}, .bufferCount = 5,
+         .pushConstants = {M, K, N}, .pushConstantCount = 3,
+         .dispatchX = K / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {goutBuffer, resBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {K, 4}, .pushConstantCount = 2,
+         .dispatchX = K / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 3);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("SwiGLU-Split INT8", 100, out, ref, M * K, ms);
+
+    destroy_buffers(s, bufs, 15);
+    free(act);
+    free(ref);
+    free(out);
+    free(resZero);
+}
+
+void validateSwigluFfnSplitKINT4(session s, int M, int N, int K, float* input, float* gamma, QuantizedData gateQ, QuantizedData upQ, QuantizedData downQ) {
+    float* act = (float*)malloc(sizeof(float) * M * N);
+    swiglu_ref_int4(input, gamma, &gateQ, &upQ, act, N, K);
+    float* ref = (float*)malloc(sizeof(float) * M * K);
+    gemv_ref_int4(act, &downQ, ref, K, N);
+
+    float* out = (float*)calloc(M * K, sizeof(float));
+    float* resZero = (float*)calloc(K, sizeof(float));
+
+    uint8_t* tg = (uint8_t*)malloc(K * N / 2);
+    uint8_t* tu = (uint8_t*)malloc(K * N / 2);
+    uint8_t* td = (uint8_t*)malloc(N * K / 2);
+    transpose_block16(gateQ.data, tg, K, N, QUANT_INT4);
+    transpose_block16(upQ.data, tu, K, N, QUANT_INT4);
+    transpose_block16(downQ.data, td, N, K, QUANT_INT4);
+    int gs = K * N / gateQ.group_size;
+    int ds = N * K / downQ.group_size;
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gateBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tg, K * N / 2, MEMORY_RAM);
+    buffer upBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tu, K * N / 2, MEMORY_RAM);
+    float* pinit = (float*)calloc(8 * N, sizeof(float));
+    float* ginit = (float*)calloc(4 * K, sizeof(float));
+    buffer pgpuBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 8 * N, MEMORY_RAM);
+    buffer gsc = createBuffer(s.dev.device, s.dev.physicalDevice, gateQ.scale, sizeof(float) * gs, MEMORY_RAM);
+    buffer gze = createBuffer(s.dev.device, s.dev.physicalDevice, gateQ.z, sizeof(float) * gs, MEMORY_RAM);
+    buffer usc = createBuffer(s.dev.device, s.dev.physicalDevice, upQ.scale, sizeof(float) * gs, MEMORY_RAM);
+    buffer uze = createBuffer(s.dev.device, s.dev.physicalDevice, upQ.z, sizeof(float) * gs, MEMORY_RAM);
+    buffer downBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, td, N * K / 2, MEMORY_RAM);
+    buffer dsc = createBuffer(s.dev.device, s.dev.physicalDevice, downQ.scale, sizeof(float) * ds, MEMORY_RAM);
+    buffer dze = createBuffer(s.dev.device, s.dev.physicalDevice, downQ.z, sizeof(float) * ds, MEMORY_RAM);
+    buffer goutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, ginit, sizeof(float) * 4 * K, MEMORY_RAM);
+    buffer resBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, resZero, sizeof(float) * K, MEMORY_RAM);
+    buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * K, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer, gsc, gze, usc, uze, downBuffer, dsc, dze, goutBuffer, resBuffer, outBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    free(tg); free(tu); free(td); free(pinit); free(ginit);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-up-ffn-SplitK-INT4.spv", .buffers = {xBuffer, gammaBuffer, gateBuffer, upBuffer, pgpuBuffer, gsc, gze, usc, uze}, .bufferCount = 9,
+         .pushConstants = {M, N, K}, .pushConstantCount = 3,
+         .dispatchX = N / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "FFN-Down-SplitK-INT4.spv", .buffers = {pgpuBuffer, downBuffer, goutBuffer, dsc, dze}, .bufferCount = 5,
+         .pushConstants = {M, K, N}, .pushConstantCount = 3,
+         .dispatchX = K / 256, .dispatchY = 4, .dispatchZ = 1},
+        {.shader = "Reduce-GEMV-ADD.spv", .buffers = {goutBuffer, resBuffer, outBuffer}, .bufferCount = 3,
+         .pushConstants = {K, 4}, .pushConstantCount = 2,
+         .dispatchX = K / 256, .dispatchY = 1, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 3);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
+    report("SwiGLU-Split INT4", 100, out, ref, M * K, ms);
+
+    destroy_buffers(s, bufs, 15);
+    free(act);
+    free(ref);
+    free(out);
+    free(resZero);
+}
+
+#define K_OFF2 2048
+#define V_OFF2 4096
+#define G_OFF2 8192
+#define A_OFF2 12288
+#define B_OFF2 12304
+
+static void linear_proj_route_ref(const float* proj, float* q, float* k, float* v, float* g, float* a, float* b) {
+    for (int i = 0; i < 2048; i++) q[i] = proj[i];
+    for (int i = 0; i < 2048; i++) k[i] = proj[K_OFF2 + i];
+    for (int i = 0; i < 4096; i++) v[i] = proj[V_OFF2 + i];
+    for (int i = 0; i < 4096; i++) g[i] = proj[G_OFF2 + i];
+    for (int i = 0; i < 16; i++) a[i] = proj[A_OFF2 + i];
+    for (int i = 0; i < 16; i++) b[i] = proj[B_OFF2 + i];
+}
+
+static double linear_proj_split_run(session s, int M, int K, float* input, float* gamma,
+                                    buffer weightBuffer, buffer scaleBuffer, buffer zeroBuffer, int hasScale,
+                                    int nTotal, const char* splitShader, const char* reduceShader,
+                                    buffer qOut, buffer kOut, buffer vOut, buffer gOut, buffer aOut, buffer bOut) {
+    buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_RAM);
+    float* pinit = (float*)calloc(4 * nTotal, sizeof(float));
+    buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * nTotal, MEMORY_RAM);
+
+    operation ops[2] = {0};
+    if (hasScale) {
+        snprintf(ops[0].shader, sizeof(ops[0].shader), "%s", splitShader);
+        ops[0].buffers[0] = xBuffer; ops[0].buffers[1] = gammaBuffer; ops[0].buffers[2] = weightBuffer;
+        ops[0].buffers[3] = scaleBuffer; ops[0].buffers[4] = zeroBuffer; ops[0].buffers[5] = partialBuffer;
+        ops[0].bufferCount = 6;
+    } else {
+        snprintf(ops[0].shader, sizeof(ops[0].shader), "%s", splitShader);
+        ops[0].buffers[0] = xBuffer; ops[0].buffers[1] = gammaBuffer; ops[0].buffers[2] = weightBuffer;
+        ops[0].buffers[3] = partialBuffer;
+        ops[0].bufferCount = 4;
+    }
+    ops[0].pushConstants[0] = M; ops[0].pushConstants[1] = nTotal; ops[0].pushConstants[2] = K;
+    ops[0].pushConstantCount = 3;
+    ops[0].dispatchX = (nTotal + 255) / 256; ops[0].dispatchY = 4; ops[0].dispatchZ = 1;
+
+    snprintf(ops[1].shader, sizeof(ops[1].shader), "%s", reduceShader);
+    ops[1].buffers[0] = partialBuffer; ops[1].buffers[1] = qOut; ops[1].buffers[2] = kOut;
+    ops[1].buffers[3] = vOut; ops[1].buffers[4] = gOut; ops[1].buffers[5] = aOut; ops[1].buffers[6] = bOut;
+    ops[1].bufferCount = 7;
+    ops[1].pushConstants[0] = nTotal;
+    ops[1].pushConstantCount = 1;
+    ops[1].dispatchX = (nTotal + 255) / 256; ops[1].dispatchY = 1; ops[1].dispatchZ = 1;
+
+    if (hasScale) {
+        buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer};
+        createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 6);
+    } else {
+        buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, partialBuffer};
+        createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+    }
+    double ms = run_ops(s, ops, 2);
+    free(pinit);
+    destroyBuffer(s.dev.device, xBuffer);
+    destroyBuffer(s.dev.device, gammaBuffer);
+    destroyBuffer(s.dev.device, partialBuffer);
+    return ms;
+}
+
+void validateLinearProjSplitKFP16(session s, int M, int K, float* input, float* gamma, uint16_t* w_inFP16) {
+    int nTotal = 12320;
+    float* xn = (float*)malloc(sizeof(float) * K);
+    rms_norm_apply(input, gamma, xn, K);
+    float* proj = (float*)malloc(sizeof(float) * nTotal);
+    gemv_ref_fp16(xn, w_inFP16, proj, nTotal, K);
+    float* qr = (float*)malloc(sizeof(float) * 2048);
+    float* kr = (float*)malloc(sizeof(float) * 2048);
+    float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* gr = (float*)malloc(sizeof(float) * 4096);
+    float* ar = (float*)malloc(sizeof(float) * 32);
+    float* br = (float*)malloc(sizeof(float) * 16);
+    linear_proj_route_ref(proj, qr, kr, vr, gr, ar, br);
+
+    uint16_t* tw = (uint16_t*)malloc(sizeof(uint16_t) * K * nTotal);
+    transpose_block16((uint8_t*)w_inFP16, (uint8_t*)tw, K, nTotal, QUANT_FP16);
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tw, sizeof(uint16_t) * K * nTotal, MEMORY_RAM);
+    buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer gO = createBuffer(s.dev.device, s.dev.physicalDevice, gr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
+    buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 16, MEMORY_RAM);
+
+    double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, weightBuffer, weightBuffer, 0,
+                                      nTotal, "RmsNorm-LinearProj-SplitK-FP16.spv", "Reduce-LinearProj.spv",
+                                      qO, kO, vO, gO, aO, bO);
+
+    float* q = (float*)malloc(sizeof(float) * 2048);
+    float* kk = (float*)malloc(sizeof(float) * 2048);
+    float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* gg = (float*)malloc(sizeof(float) * 4096);
+    float* aa = (float*)malloc(sizeof(float) * 32);
+    float* bb = (float*)malloc(sizeof(float) * 16);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gO, gg);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
+    report("LP-Split-q FP16", 100, q, qr, 2048, ms);
+    report("LP-Split-k FP16", 100, kk, kr, 2048, ms);
+    report("LP-Split-v FP16", 100, vv, vr, 4096, ms);
+    report("LP-Split-g FP16", 100, gg, gr, 4096, ms);
+    report("LP-Split-a FP16", 0, aa, ar, 16, ms);
+    report("LP-Split-b FP16", 0, bb, br, 16, ms);
+
+    destroy_buffers(s, (buffer[]){weightBuffer, qO, kO, vO, gO, aO, bO}, 7);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(gr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(gg); free(aa); free(bb);
+}
+
+void validateLinearProjSplitKINT8(session s, int M, int K, float* input, float* gamma, QuantizedData wQ) {
+    int nTotal = 12320;
+    float* xn = (float*)malloc(sizeof(float) * K);
+    rms_norm_apply(input, gamma, xn, K);
+    float* proj = (float*)malloc(sizeof(float) * nTotal);
+    gemv_ref_int8(xn, &wQ, proj, nTotal, K);
+    float* qr = (float*)malloc(sizeof(float) * 2048);
+    float* kr = (float*)malloc(sizeof(float) * 2048);
+    float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* gr = (float*)malloc(sizeof(float) * 4096);
+    float* ar = (float*)malloc(sizeof(float) * 32);
+    float* br = (float*)malloc(sizeof(float) * 16);
+    linear_proj_route_ref(proj, qr, kr, vr, gr, ar, br);
+
+    uint8_t* tw = (uint8_t*)malloc(K * nTotal);
+    transpose_block16(wQ.data, tw, K, nTotal, QUANT_INT8);
+    int sc = ((nTotal + 255) / 256) * K;
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tw, K * nTotal, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wQ.scale, sizeof(float) * sc, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wQ.z, sizeof(float) * sc, MEMORY_RAM);
+    buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer gO = createBuffer(s.dev.device, s.dev.physicalDevice, gr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
+    buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 16, MEMORY_RAM);
+
+    double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, scaleBuffer, zeroBuffer, 1,
+                                      nTotal, "RmsNorm-LinearProj-SplitK-INT8.spv", "Reduce-LinearProj.spv",
+                                      qO, kO, vO, gO, aO, bO);
+
+    float* q = (float*)malloc(sizeof(float) * 2048);
+    float* kk = (float*)malloc(sizeof(float) * 2048);
+    float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* gg = (float*)malloc(sizeof(float) * 4096);
+    float* aa = (float*)malloc(sizeof(float) * 32);
+    float* bb = (float*)malloc(sizeof(float) * 16);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gO, gg);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
+    report("LP-Split-q INT8", 100, q, qr, 2048, ms);
+    report("LP-Split-k INT8", 100, kk, kr, 2048, ms);
+    report("LP-Split-v INT8", 100, vv, vr, 4096, ms);
+    report("LP-Split-g INT8", 100, gg, gr, 4096, ms);
+    report("LP-Split-a INT8", 0, aa, ar, 16, ms);
+    report("LP-Split-b INT8", 0, bb, br, 16, ms);
+
+    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, gO, aO, bO}, 9);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(gr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(gg); free(aa); free(bb);
+}
+
+void validateLinearProjSplitKINT4(session s, int M, int K, float* input, float* gamma, QuantizedData wQ) {
+    int nTotal = 12320;
+    float* xn = (float*)malloc(sizeof(float) * K);
+    rms_norm_apply(input, gamma, xn, K);
+    float* proj = (float*)malloc(sizeof(float) * nTotal);
+    gemv_ref_int4(xn, &wQ, proj, nTotal, K);
+    float* qr = (float*)malloc(sizeof(float) * 2048);
+    float* kr = (float*)malloc(sizeof(float) * 2048);
+    float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* gr = (float*)malloc(sizeof(float) * 4096);
+    float* ar = (float*)malloc(sizeof(float) * 32);
+    float* br = (float*)malloc(sizeof(float) * 16);
+    linear_proj_route_ref(proj, qr, kr, vr, gr, ar, br);
+
+    uint8_t* tw = (uint8_t*)malloc(K * nTotal / 2);
+    transpose_block16(wQ.data, tw, K, nTotal, QUANT_INT4);
+    int sc = ((nTotal + 255) / 256) * K;
+    buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, tw, K * nTotal / 2, MEMORY_RAM);
+    buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wQ.scale, sizeof(float) * sc, MEMORY_RAM);
+    buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wQ.z, sizeof(float) * sc, MEMORY_RAM);
+    buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
+    buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer gO = createBuffer(s.dev.device, s.dev.physicalDevice, gr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
+    buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 16, MEMORY_RAM);
+
+    double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, scaleBuffer, zeroBuffer, 1,
+                                      nTotal, "RmsNorm-LinearProj-SplitK-INT4.spv", "Reduce-LinearProj.spv",
+                                      qO, kO, vO, gO, aO, bO);
+
+    float* q = (float*)malloc(sizeof(float) * 2048);
+    float* kk = (float*)malloc(sizeof(float) * 2048);
+    float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* gg = (float*)malloc(sizeof(float) * 4096);
+    float* aa = (float*)malloc(sizeof(float) * 32);
+    float* bb = (float*)malloc(sizeof(float) * 16);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gO, gg);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
+    report("LP-Split-q INT4", 100, q, qr, 2048, ms);
+    report("LP-Split-k INT4", 100, kk, kr, 2048, ms);
+    report("LP-Split-v INT4", 100, vv, vr, 4096, ms);
+    report("LP-Split-g INT4", 100, gg, gr, 4096, ms);
+    report("LP-Split-a INT4", 0, aa, ar, 16, ms);
+    report("LP-Split-b INT4", 0, bb, br, 16, ms);
+
+    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, gO, aO, bO}, 9);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(gr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(gg); free(aa); free(bb);
+}
+
 void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, float* gamma, uint16_t* lmHeadFP16) {
     int numGroups = (vocabSize + 255) / 256;
     float* maxValues = (float*)calloc(numGroups, sizeof(float));
@@ -3363,6 +4183,10 @@ void validation(void) {
     // validateGemvAddFP16(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownFP16);
     // validateGemvAddINT8(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT8);
     // validateGemvAddINT4(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT4);
+    validateGemvSplitKINT4(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT4);
+    validateSwigluFfnSplitKFP16(s, 1, ffn_n, K, input, gamma, weightFP16, weight2FP16, ffnDownFP16);
+    validateSwigluFfnSplitKINT8(s, 1, ffn_n, K, input, gamma, weightINT8, weight2INT8, ffnDownINT8);
+    validateSwigluFfnSplitKINT4(s, 1, ffn_n, K, input, gamma, weightINT4, weight2INT4, ffnDownINT4);
     float* ffnDownInputM = getData(9111, Mg, ffn_n);
     float* ffnDownResidualM = getData(9222, Mg, K);
     // validateGemmAddFP16(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownFP16);
@@ -3403,6 +4227,9 @@ void validation(void) {
     // validateGemvAddFP16(s, M, wo_n, K, input2, input, woFP16);
     // validateGemvAddINT8(s, M, wo_n, K, input2, input, woINT8);
     // validateGemvAddINT4(s, M, wo_n, K, input2, input, woINT4);
+    validateGemvSplitKFP16(s, M, wo_n, K, input2, input, woFP16);
+    validateGemvSplitKINT8(s, M, wo_n, K, input2, input, woINT8);
+    validateGemvSplitKINT4(s, M, wo_n, K, input2, input, woINT4);
     // validateRmsNormSwigluFfn(s, M, N, K, input, gamma, weight);
     // validateRmsNormSwigluFfnFP16(s, M, N, K, input, gamma, weightFP16, weight2FP16);
     // validateRmsNormSwigluFfnINT8(s, M, N, K, input, gamma, weightINT8, weight2INT8);
@@ -3414,6 +4241,12 @@ void validation(void) {
     // validateQkvRopeFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightFP16, qkv_theta);
     validateQkvRopeINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT8, qkv_theta);
     // validateQkvRopeINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT4, qkv_theta);
+    validateQkvRopeSplitKFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightFP16, qkv_theta);
+    validateQkvRopeSplitKINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT8, qkv_theta);
+    validateQkvRopeSplitKINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT4, qkv_theta);
+    validateLinearProjSplitKFP16(s, M, K, input, gamma, w_inFP16);
+    validateLinearProjSplitKINT8(s, M, K, input, gamma, w_inINT8);
+    validateLinearProjSplitKINT4(s, M, K, input, gamma, w_inINT4);
     // validateGatedDeltaNetFP16(s, K, input, input2, gamma, w_inFP16, woFP16);
     // validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
     // validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);

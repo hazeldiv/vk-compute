@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PIPE_CACHE_MAX 64
+#define PIPE_CACHE_MAX 96
 #define TIMING_AGG_MAX 128
 
 typedef struct pipe_entry {

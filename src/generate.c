@@ -19,7 +19,42 @@ static void addOp(operation* ops, int* n, const char* shader, int layer, buffer*
     (*n)++;
 }
 
+static void addGemvSplit(generator* g, operation* ops, int* n, int L, const tensor* wt, buffer input, buffer output, buffer residual, QuantType q) {
+    buffer bufs[5];
+    int b = 0;
+    bufs[b++] = input;
+    bufs[b++] = wt->data;
+    bufs[b++] = g->st.gemvPartial;
+    if (q != QUANT_FP16) {
+        bufs[b++] = wt->scale;
+        bufs[b++] = wt->zero;
+    }
+    int push[] = {1, MODEL_K, MODEL_K};
+    addOp(ops, n, model_shader("GEMV-SplitK", q), L, bufs, b, push, 3, MODEL_K / 256, 4);
+
+    buffer rBufs[3];
+    rBufs[0] = g->st.gemvPartial;
+    rBufs[1] = residual;
+    rBufs[2] = output;
+    int pushR[] = {MODEL_K, 4};
+    addOp(ops, n, "Reduce-GEMV-ADD.spv", L, rBufs, 3, pushR, 2, MODEL_K / 256, 1);
+}
+
+static void addReduceGemvAdd(operation* ops, int* n, int L, buffer partial, buffer output, buffer residual) {
+    buffer rBufs[3];
+    rBufs[0] = partial;
+    rBufs[1] = residual;
+    rBufs[2] = output;
+    int pushR[] = {MODEL_K, 4};
+    addOp(ops, n, "Reduce-GEMV-ADD.spv", L, rBufs, 3, pushR, 2, MODEL_K / 256, 1);
+}
+
 static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor* wt, buffer input, buffer output, buffer residual, QuantType q, int m) {
+    if (m == 1) {
+        addGemvSplit(g, ops, n, L, wt, input, output, residual, q);
+        return;
+    }
+
     buffer bufs[6];
     int b = 0;
     bufs[b++] = input;
@@ -32,42 +67,103 @@ static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor
     bufs[b++] = residual;
     int k = (input.buffer == g->st.act.buffer) ? MODEL_FFN_N : MODEL_K;
     int push[] = {m, MODEL_K, k};
-    addOp(ops, n, model_shader(m == 1 ? "GEMV-ADD" : "GEMM-ADD", q), L, bufs, b, push, 3,
-          m == 1 ? MODEL_K / 256 : MODEL_K / 16, m == 1 ? 1 : m / 16);
+    addOp(ops, n, model_shader("GEMM-ADD", q), L, bufs, b, push, 3, MODEL_K / 16, m / 16);
 }
 
 static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm, int m) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType q = g->spec->layers[L].attn.q;
+
+    if (!gemm) {
+        buffer bufs[6];
+        int b = 0;
+        bufs[b++] = st->h;
+        bufs[b++] = w->gammaIn[L];
+        bufs[b++] = w->proj[L].data;
+        if (q != QUANT_FP16) {
+            bufs[b++] = w->proj[L].scale;
+            bufs[b++] = w->proj[L].zero;
+        }
+        bufs[b++] = st->linprojPartial;
+        int push[] = {m, MODEL_PROJ_N, MODEL_K};
+        addOp(ops, n, model_shader("RmsNorm-LinearProj-SplitK", q), L, bufs, b, push, 3,
+              (MODEL_PROJ_N + 255) / 256, 4);
+
+        buffer rBufs[7];
+        rBufs[0] = st->linprojPartial;
+        rBufs[1] = st->qProj;
+        rBufs[2] = st->kProj;
+        rBufs[3] = st->vProj;
+        rBufs[4] = st->gProj;
+        rBufs[5] = st->aProj;
+        rBufs[6] = st->bProj;
+        int pushR[] = {MODEL_PROJ_N};
+        addOp(ops, n, "Reduce-LinearProj.spv", L, rBufs, 7, pushR, 1,
+              (MODEL_PROJ_N + 255) / 256, 1);
+        return;
+    }
+
     buffer bufs[14];
     int b = 0;
     bufs[b++] = st->h;
     bufs[b++] = w->gammaIn[L];
     bufs[b++] = w->proj[L].data;
-    if (!gemm && q != QUANT_FP16) {
-        bufs[b++] = w->proj[L].scale;
-        bufs[b++] = w->proj[L].zero;
-    }
     bufs[b++] = st->qProj;
     bufs[b++] = st->kProj;
     bufs[b++] = st->vProj;
     bufs[b++] = st->gProj;
     bufs[b++] = st->aProj;
     bufs[b++] = st->bProj;
-    if (gemm && q != QUANT_FP16) {
+    if (q != QUANT_FP16) {
         bufs[b++] = w->proj[L].scale;
         bufs[b++] = w->proj[L].zero;
     }
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
-    addOp(ops, n, model_shader(gemm ? "RmsNorm-LinearProj-GEMM" : "RmsNorm-LinearProj", q), L, bufs, b, push, 3,
-          gemm ? MODEL_PROJ_N / 16 : (MODEL_PROJ_N + 255) / 256, gemm ? m / 16 : 1);
+    addOp(ops, n, model_shader("RmsNorm-LinearProj-GEMM", q), L, bufs, b, push, 3,
+          MODEL_PROJ_N / 16, m / 16);
 }
 
 static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int m) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType f = g->spec->layers[L].ffn.q;
+
+    if (!gemm) {
+        buffer upBufs[9];
+        int b = 0;
+        upBufs[b++] = st->h;
+        upBufs[b++] = w->gammaF[L];
+        upBufs[b++] = w->gate[L].data;
+        upBufs[b++] = w->up[L].data;
+        upBufs[b++] = st->ffnPartial;
+        if (f != QUANT_FP16) {
+            upBufs[b++] = w->gate[L].scale;
+            upBufs[b++] = w->gate[L].zero;
+            upBufs[b++] = w->up[L].scale;
+            upBufs[b++] = w->up[L].zero;
+        }
+        int push[] = {m, MODEL_FFN_N, MODEL_K};
+        addOp(ops, n, model_shader("RmsNorm-up-ffn-SplitK", f), L, upBufs, b, push, 3,
+              MODEL_FFN_N / 256, 4);
+
+        buffer dBufs[5];
+        int d = 0;
+        dBufs[d++] = st->ffnPartial;
+        dBufs[d++] = w->down[L].data;
+        dBufs[d++] = st->gemvPartial;
+        if (f != QUANT_FP16) {
+            dBufs[d++] = w->down[L].scale;
+            dBufs[d++] = w->down[L].zero;
+        }
+        int pushD[] = {m, MODEL_K, MODEL_FFN_N};
+        addOp(ops, n, model_shader("FFN-Down-SplitK", f), L, dBufs, d, pushD, 3,
+              MODEL_K / 256, 4);
+
+        addReduceGemvAdd(ops, n, L, st->gemvPartial, st->h, st->h);
+        return;
+    }
+
     buffer ffnBufs[11];
     int bf = 0;
     ffnBufs[bf++] = st->h;
@@ -82,8 +178,8 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         ffnBufs[bf++] = w->up[L].zero;
     }
     int push[] = {m, MODEL_FFN_N, MODEL_K};
-    addOp(ops, n, model_shader(gemm ? "RmsNorm-swiglu-ffn-GEMM" : "RmsNorm-swiglu-ffn", f), L, ffnBufs, bf, push, 3,
-          gemm ? MODEL_FFN_N / 16 : (MODEL_FFN_N + 255) / 256, gemm ? m / 16 : 1);
+    addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM", f), L, ffnBufs, bf, push, 3,
+          MODEL_FFN_N / 16, m / 16);
 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
@@ -133,8 +229,37 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         int pushA[] = {m};
         addOp(ops, n, model_shader("Att-full-GEMM", q), L, attBufs, ba, pushA, 1, MODEL_HEADS, m / 16);
     } else {
-        int push[] = {1, MODEL_QKV_N, MODEL_K, MODEL_Q_OFF, MODEL_V_OFF};
-        addOp(ops, n, model_shader("RmsNorm-QKV", q), L, qkvBufs, b, push, 5, MODEL_QKV_N / 256, 1);
+        buffer splitBufs[6];
+        int bs = 0;
+        splitBufs[bs++] = st->h;
+        splitBufs[bs++] = w->gammaIn[L];
+        splitBufs[bs++] = w->proj[L].data;
+        if (q != QUANT_FP16) {
+            splitBufs[bs++] = w->proj[L].scale;
+            splitBufs[bs++] = w->proj[L].zero;
+        }
+        splitBufs[bs++] = st->qkvPartial;
+        int push[] = {1, MODEL_QKV_N, MODEL_K};
+        addOp(ops, n, model_shader("RmsNorm-QKV-SplitK", q), L, splitBufs, bs, push, 3,
+              MODEL_QKV_N / 256, 4);
+
+        buffer ropeBufs[10];
+        int br = 0;
+        ropeBufs[br++] = st->qkvPartial;
+        ropeBufs[br++] = st->qOut;
+        ropeBufs[br++] = st->kCache[L];
+        ropeBufs[br++] = st->vCache[L];
+        if (q != QUANT_FP16) {
+            ropeBufs[br++] = st->kScale[L];
+            ropeBufs[br++] = st->kZero[L];
+            ropeBufs[br++] = st->vScale[L];
+            ropeBufs[br++] = st->vZero[L];
+        }
+        ropeBufs[br++] = w->theta;
+        ropeBufs[br++] = st->position;
+        int pushRope[] = {MODEL_QKV_N, MODEL_Q_OFF, MODEL_V_OFF};
+        addOp(ops, n, model_shader("Reduce-Rope", q), L, ropeBufs, br, pushRope, 3,
+              MODEL_HEADS + 2 * MODEL_KV_HEADS, 1);
 
         buffer attBufs[9];
         int ba = 0;
@@ -244,8 +369,9 @@ static int compileFinal(generator* g) {
     return n;
 }
 
-generator createGenerator(session s, const model_config* spec, int maxM) {
-    generator g = {0};
+generator* createGenerator(session s, const model_config* spec, int maxM) {
+    static generator g;
+    memset(&g, 0, sizeof(generator));
     g.s = s;
     g.spec = spec;
     g.maxM = maxM;
@@ -254,7 +380,7 @@ generator createGenerator(session s, const model_config* spec, int maxM) {
     g.decodeOpCount = compileDecode(&g);
     g.prefillOpCount = compilePrefill(&g);
     g.finalOpCount = compileFinal(&g);
-    return g;
+    return &g;
 }
 
 void destroyGenerator(generator* g) {

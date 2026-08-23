@@ -32,6 +32,10 @@ typedef struct model_state {
     buffer maxIndex;
     buffer result;
     buffer lastRow;
+    buffer gemvPartial;
+    buffer qkvPartial;
+    buffer ffnPartial;
+    buffer linprojPartial;
 } model_state;
 
 model_state createState(session s, const model_config* spec, int maxM);

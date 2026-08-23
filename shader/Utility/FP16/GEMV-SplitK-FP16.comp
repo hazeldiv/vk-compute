@@ -1,0 +1,61 @@
+#version 450
+#define TS 256
+#define vec 4
+#define SPLIT 4
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions {
+    uint M;
+    uint N;
+    uint K;
+} dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 A[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer PartialBuffer { float P[]; };
+
+shared vec4 aSub[2][TS];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint chunk = gl_WorkGroupID.y;
+    uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint numTiles = (dims.K + TS - 1) / TS / vec;
+
+    float acc = 0.0;
+    if (globalCol < dims.N && chunk < numTiles) {
+        aSub[0][col] = A[chunk*TS + col];
+    }
+
+    barrier();
+    uint it = 0;
+    for (uint t = chunk; t < numTiles; t += SPLIT) {
+        uint cur = it & 1, nxt = (it+1) & 1;
+        uint nextTile = t + SPLIT;
+        if (globalCol < dims.N && nextTile < numTiles) {
+            aSub[nxt][col] = A[nextTile*TS + col];
+        }
+
+        uint baseRow = t * (TS / 2) * dims.N;
+        if (globalCol < dims.N) {
+            #pragma unroll
+            for (uint k=0;k<TS; k+=2) {
+                uvec4 rawInput = B[baseRow + globalCol];
+                vec4 outVectorA = vec4(unpackHalf2x16(rawInput.x), unpackHalf2x16(rawInput.y));
+                vec4 outVectorB = vec4(unpackHalf2x16(rawInput.z), unpackHalf2x16(rawInput.w));
+
+                acc += dot(aSub[cur][k], outVectorA);
+                acc += dot(aSub[cur][k+1], outVectorB);
+                baseRow += dims.N;
+            }
+        }
+
+        barrier();
+        it++;
+    }
+    if (globalCol < dims.N) {
+        P[chunk * dims.N + globalCol] = acc;
+    }
+}

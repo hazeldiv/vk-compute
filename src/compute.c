@@ -44,17 +44,17 @@ static model_config spec = {
     .lmHeadQ = QUANT_FP16,
 };
 
-void compute() {
+void compute(void) {
     session s = createSession();
-    generator g = createGenerator(s, &spec, MODEL_MAX_GEMM);
+    generator* g = createGenerator(s, &spec, MODEL_MAX_GEMM);
 
     uint32_t prompt[MODEL_MAX_GEMM];
     for (int i = 0; i < MODEL_MAX_GEMM; i++) {
         prompt[i] = (uint32_t)((i * 1237 + 555) % MODEL_VOCAB);
     }
 
-    runGenerate(&g, prompt, MODEL_MAX_GEMM, 1024);
+    runGenerate(g, prompt, MODEL_MAX_GEMM, 128);
 
-    destroyGenerator(&g);
+    destroyGenerator(g);
     destroySession(s);
 }

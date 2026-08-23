@@ -22,7 +22,7 @@ typedef struct generator {
     uint32_t nextPos;
 } generator;
 
-generator createGenerator(session s, const model_config* spec, int maxM);
+generator* createGenerator(session s, const model_config* spec, int maxM);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
 uint32_t runDecode(generator* g, uint32_t token);
