@@ -5,7 +5,7 @@
 #include "device.h"
 #include "buffer.h"
 
-#define TIMESTAMP_QUERY_COUNT 2
+#define TIMESTAMP_QUERY_COUNT 512
 
 typedef struct session {
     device dev;

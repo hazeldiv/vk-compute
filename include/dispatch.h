@@ -20,9 +20,12 @@ typedef struct operation {
     int dispatchX;
     int dispatchY;
     int dispatchZ;
+    int layer;
 } operation;
 
 void execute(session s, operation ops[], int opCount);
+void executeLogged(session s, operation ops[], int opCount, const char* phase, int token);
+void closeTimingLog(void);
 double getExecutionTime(session s);
 
 #endif

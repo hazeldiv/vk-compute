@@ -19,6 +19,7 @@ typedef struct generator {
     int prefillOpCount;
     operation finalOps[MODEL_MAX_OPS];
     int finalOpCount;
+    uint32_t nextPos;
 } generator;
 
 generator createGenerator(session s, const model_config* spec, int maxM);

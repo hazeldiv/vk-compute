@@ -4,7 +4,7 @@
 #include <windows.h>
 #include "generate.h"
 
-static void addOp(operation* ops, int* n, const char* shader, buffer* bufs, int bc, const int* push, int pc, int dx, int dy) {
+static void addOp(operation* ops, int* n, const char* shader, int layer, buffer* bufs, int bc, const int* push, int pc, int dx, int dy) {
     operation* op = &ops[*n];
     memset(op, 0, sizeof(operation));
     snprintf(op->shader, sizeof(op->shader), "%s", shader);
@@ -15,10 +15,11 @@ static void addOp(operation* ops, int* n, const char* shader, buffer* bufs, int 
     op->dispatchX = dx;
     op->dispatchY = dy;
     op->dispatchZ = 1;
+    op->layer = layer;
     (*n)++;
 }
 
-static void addGemmAdd(generator* g, operation* ops, int* n, const tensor* wt, buffer input, buffer output, buffer residual, QuantType q, int m) {
+static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor* wt, buffer input, buffer output, buffer residual, QuantType q, int m) {
     buffer bufs[6];
     int b = 0;
     bufs[b++] = input;
@@ -31,7 +32,7 @@ static void addGemmAdd(generator* g, operation* ops, int* n, const tensor* wt, b
     bufs[b++] = residual;
     int k = (input.buffer == g->st.act.buffer) ? MODEL_FFN_N : MODEL_K;
     int push[] = {m, MODEL_K, k};
-    addOp(ops, n, model_shader(m == 1 ? "GEMV-ADD" : "GEMM-ADD", q), bufs, b, push, 3,
+    addOp(ops, n, model_shader(m == 1 ? "GEMV-ADD" : "GEMM-ADD", q), L, bufs, b, push, 3,
           m == 1 ? MODEL_K / 256 : MODEL_K / 16, m == 1 ? 1 : m / 16);
 }
 
@@ -59,7 +60,7 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
         bufs[b++] = w->proj[L].zero;
     }
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
-    addOp(ops, n, model_shader(gemm ? "RmsNorm-LinearProj-GEMM" : "RmsNorm-LinearProj", q), bufs, b, push, 3,
+    addOp(ops, n, model_shader(gemm ? "RmsNorm-LinearProj-GEMM" : "RmsNorm-LinearProj", q), L, bufs, b, push, 3,
           gemm ? MODEL_PROJ_N / 16 : (MODEL_PROJ_N + 255) / 256, gemm ? m / 16 : 1);
 }
 
@@ -81,10 +82,10 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         ffnBufs[bf++] = w->up[L].zero;
     }
     int push[] = {m, MODEL_FFN_N, MODEL_K};
-    addOp(ops, n, model_shader(gemm ? "RmsNorm-swiglu-ffn-GEMM" : "RmsNorm-swiglu-ffn", f), ffnBufs, bf, push, 3,
+    addOp(ops, n, model_shader(gemm ? "RmsNorm-swiglu-ffn-GEMM" : "RmsNorm-swiglu-ffn", f), L, ffnBufs, bf, push, 3,
           gemm ? MODEL_FFN_N / 16 : (MODEL_FFN_N + 255) / 256, gemm ? m / 16 : 1);
 
-    addGemmAdd(g, ops, n, &w->down[L], st->act, st->h, st->h, f, m);
+    addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
 
 static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -115,7 +116,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
 
     if (gemm) {
         int push[] = {m, MODEL_QKV_N, MODEL_K, 0, MODEL_Q_OFF, MODEL_V_OFF};
-        addOp(ops, n, model_shader("RmsNorm-QKV-GEMM", q), qkvBufs, b, push, 6, MODEL_HEADS + 2 * MODEL_KV_HEADS, m / 16);
+        addOp(ops, n, model_shader("RmsNorm-QKV-GEMM", q), L, qkvBufs, b, push, 6, MODEL_HEADS + 2 * MODEL_KV_HEADS, m / 16);
 
         buffer attBufs[9];
         int ba = 0;
@@ -130,10 +131,10 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             attBufs[ba++] = st->vZero[L];
         }
         int pushA[] = {m};
-        addOp(ops, n, model_shader("Att-full-GEMM", q), attBufs, ba, pushA, 1, MODEL_HEADS, m / 16);
+        addOp(ops, n, model_shader("Att-full-GEMM", q), L, attBufs, ba, pushA, 1, MODEL_HEADS, m / 16);
     } else {
         int push[] = {1, MODEL_QKV_N, MODEL_K, MODEL_Q_OFF, MODEL_V_OFF};
-        addOp(ops, n, model_shader("RmsNorm-QKV", q), qkvBufs, b, push, 5, MODEL_QKV_N / 256, 1);
+        addOp(ops, n, model_shader("RmsNorm-QKV", q), L, qkvBufs, b, push, 5, MODEL_QKV_N / 256, 1);
 
         buffer attBufs[9];
         int ba = 0;
@@ -149,10 +150,10 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         }
         attBufs[ba++] = st->position;
         int push0[1] = {0};
-        addOp(ops, n, model_shader("Att-full", q), attBufs, ba, push0, 0, MODEL_HEADS, 1);
+        addOp(ops, n, model_shader("Att-full", q), L, attBufs, ba, push0, 0, MODEL_HEADS, 1);
     }
 
-    addGemmAdd(g, ops, n, &w->out[L], st->attnOut, st->h, st->h, q, m);
+    addGemmAdd(g, ops, n, L, &w->out[L], st->attnOut, st->h, st->h, q, m);
 }
 
 static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -167,13 +168,13 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->stateS[L], st->yGated};
     if (gemm) {
         int pushDn[] = {m};
-        addOp(ops, n, "GatedDeltaNet-GEMM.spv", dnBufs, 8, pushDn, 1, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 8, pushDn, 1, MODEL_N_V, 1);
     } else {
         int pushDn[] = {MODEL_N_V, MODEL_N_QK, MODEL_DIM};
-        addOp(ops, n, "GatedDeltaNet.spv", dnBufs, 8, pushDn, 3, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 8, pushDn, 3, MODEL_N_V, 1);
     }
 
-    addGemmAdd(g, ops, n, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
+    addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
 }
 
 static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -194,11 +195,11 @@ static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int
 
     buffer lmBufs[] = {*input, w->lmHead, st->maxValue, st->maxIndex, w->gammaFinal};
     int pushL[] = {1, MODEL_VOCAB, MODEL_K};
-    addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", lmBufs, 5, pushL, 3, (MODEL_VOCAB + 255) / 256, 1);
+    addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (MODEL_VOCAB + 255) / 256, 1);
 
     buffer redBufs[] = {st->maxValue, st->maxIndex, st->result, st->position};
     int pushR[] = {MODEL_VOCAB, doIncrement};
-    addOp(ops, n, "ArgMax-Reduce.spv", redBufs, 4, pushR, 2, 1, 1);
+    addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 4, pushR, 2, 1, 1);
 }
 
 static int compileDecode(generator* g) {
@@ -209,7 +210,7 @@ static int compileDecode(generator* g) {
 
     buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
     int pushE[] = {1, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
-    addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
+    addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
     for (int L = 0; L < g->spec->layerCount; L++) {
         buildLayer(g, ops, &n, L, 0, 1);
@@ -228,7 +229,7 @@ static int compilePrefill(generator* g) {
 
     buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
     int pushE[] = {m, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
-    addOp(ops, &n, "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", embedBufs, 11, pushE, 4, MODEL_PROJ_N / 16, m / 16);
+    addOp(ops, &n, "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", -1, embedBufs, 11, pushE, 4, MODEL_PROJ_N / 16, m / 16);
 
     for (int L = 0; L < g->spec->layerCount; L++) {
         buildLayer(g, ops, &n, L, 1, m);
@@ -267,14 +268,16 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
 
     memcpy(st->tokenIds.mappedMemory, tokens, sizeof(uint32_t) * m);
 
-    execute(g->s, g->prefillOps, g->prefillOpCount);
+    executeLogged(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)g->nextPos);
 
     float* hCpu = (float*)malloc(sizeof(float) * m * MODEL_K);
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->h, hCpu);
     memcpy(st->lastRow.mappedMemory, hCpu + (nTokens - 1) * MODEL_K, sizeof(float) * MODEL_K);
     free(hCpu);
 
-    execute(g->s, g->finalOps, g->finalOpCount);
+    executeLogged(g->s, g->finalOps, g->finalOpCount, "prefill", (int)g->nextPos);
+
+    g->nextPos += (uint32_t)m;
 
     uint32_t result = 0;
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, &result);
@@ -286,7 +289,9 @@ uint32_t runDecode(generator* g, uint32_t token) {
 
     ((uint32_t*)st->tokenIds.mappedMemory)[0] = token;
 
-    execute(g->s, g->decodeOps, g->decodeOpCount);
+    executeLogged(g->s, g->decodeOps, g->decodeOpCount, "decode", (int)g->nextPos);
+
+    g->nextPos++;
 
     uint32_t result = 0;
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, &result);
@@ -306,4 +311,5 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
         double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
         printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, token, stateReadPosition(g->s, &g->st), speed);
     }
+    closeTimingLog();
 }
