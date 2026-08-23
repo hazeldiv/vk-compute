@@ -4248,8 +4248,8 @@ void validation(void) {
     validateLinearProjSplitKINT8(s, M, K, input, gamma, w_inINT8);
     validateLinearProjSplitKINT4(s, M, K, input, gamma, w_inINT4);
     // validateGatedDeltaNetFP16(s, K, input, input2, gamma, w_inFP16, woFP16);
-    // validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
-    // validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);
+    validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
+    validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);
 
     free(input);
     free(input2);
