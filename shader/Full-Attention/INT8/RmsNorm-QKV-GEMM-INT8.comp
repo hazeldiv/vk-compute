@@ -3,7 +3,7 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_atomic_float : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
 #define TS 16
 #define vec 4
 #define HEAD_DIM 256
@@ -24,9 +24,13 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 layout(set = 0, binding = 5) readonly buffer thetaBuffer { float theta[]; };
 layout(set = 0, binding = 6) buffer qOutBuffer { float qOut[]; };
-layout(set = 0, binding = 7) buffer kCacheBuffer { uint16_t kCache[]; };
-layout(set = 0, binding = 8) buffer vCacheBuffer { uint16_t vCache[]; };
-layout(set = 0, binding = 9) buffer PositionBuffer { uint position[]; };
+layout(set = 0, binding = 7) buffer kCacheBuffer { uint8_t kCache[]; };
+layout(set = 0, binding = 8) buffer vCacheBuffer { uint8_t vCache[]; };
+layout(set = 0, binding = 9) buffer kScaleBuffer { float kScale[]; };
+layout(set = 0, binding = 10) buffer kZeroBuffer { float kZero[]; };
+layout(set = 0, binding = 11) buffer vScaleBuffer { float vScale[]; };
+layout(set = 0, binding = 12) buffer vZeroBuffer { float vZero[]; };
+layout(set = 0, binding = 13) buffer PositionBuffer { uint position[]; };
 
 shared vec4 Asub[4][TS];
 shared vec4 Bsub[4][HEAD_DIM];
@@ -35,6 +39,10 @@ shared float inv_rms_sh[TS];
 shared float acc_sh[TS][HEAD_DIM];
 shared float norm_sh[TS][HEAD_DIM];
 shared float inv_rms2_sh[TS];
+shared float qscale_sh[TS];
+shared float qzero_sh[TS];
+shared float valmin_sh[TS][TS];
+shared float valmax_sh[TS][TS];
 
 vec4 unpackUint8x4(uint packedData) {
     uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
@@ -106,10 +114,42 @@ void main() {
 
     if (nBase >= param.vOffset) {
         uint kvHead = head - param.vOffset / HEAD_DIM;
+        float mn = acc_sh[row][col * 16];
+        float mx = acc_sh[row][col * 16];
+        #pragma unroll
+        for (uint j = 1; j < 16; j++) {
+            mn = min(mn, acc_sh[row][col * 16 + j]);
+            mx = max(mx, acc_sh[row][col * 16 + j]);
+        }
+        valmin_sh[row][col] = mn;
+        valmax_sh[row][col] = mx;
+        barrier();
+        for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+            if (col < stride) {
+                valmin_sh[row][col] = min(valmin_sh[row][col], valmin_sh[row][col + stride]);
+                valmax_sh[row][col] = max(valmax_sh[row][col], valmax_sh[row][col + stride]);
+            }
+            barrier();
+        }
+        if (col == 0) {
+            float s = (valmax_sh[row][0] - valmin_sh[row][0]) / 255.0;
+            if (s == 0.0) s = 1.0;
+            qscale_sh[row] = s;
+            qzero_sh[row] = -valmin_sh[row][0];
+        }
+        barrier();
         #pragma unroll
         for (uint j = 0; j < 16; j++) {
             uint d = col * 16 + j;
-            vCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(acc_sh[row][d])));
+            float v = (acc_sh[row][d] + qzero_sh[row]) / qscale_sh[row];
+            int qi = int(round(v));
+            if (qi < 0) qi = 0;
+            if (qi > 255) qi = 255;
+            vCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
+        }
+        if (col == 0) {
+            vScale[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qscale_sh[row];
+            vZero[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qzero_sh[row];
         }
         return;
     }
@@ -153,10 +193,42 @@ void main() {
         }
     } else {
         uint kvHead = head - param.kOffset / HEAD_DIM;
+        float mn = norm_sh[row][col * 16];
+        float mx = norm_sh[row][col * 16];
+        #pragma unroll
+        for (uint j = 1; j < 16; j++) {
+            mn = min(mn, norm_sh[row][col * 16 + j]);
+            mx = max(mx, norm_sh[row][col * 16 + j]);
+        }
+        valmin_sh[row][col] = mn;
+        valmax_sh[row][col] = mx;
+        barrier();
+        for (uint stride = TS / 2; stride > 0; stride >>= 1) {
+            if (col < stride) {
+                valmin_sh[row][col] = min(valmin_sh[row][col], valmin_sh[row][col + stride]);
+                valmax_sh[row][col] = max(valmax_sh[row][col], valmax_sh[row][col + stride]);
+            }
+            barrier();
+        }
+        if (col == 0) {
+            float s = (valmax_sh[row][0] - valmin_sh[row][0]) / 255.0;
+            if (s == 0.0) s = 1.0;
+            qscale_sh[row] = s;
+            qzero_sh[row] = -valmin_sh[row][0];
+        }
+        barrier();
         #pragma unroll
         for (uint j = 0; j < 16; j++) {
             uint d = col * 16 + j;
-            kCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint16_t(packHalf2x16(vec2(norm_sh[row][d])));
+            float v = (norm_sh[row][d] + qzero_sh[row]) / qscale_sh[row];
+            int qi = int(round(v));
+            if (qi < 0) qi = 0;
+            if (qi > 255) qi = 255;
+            kCache[(param.tokenIdx + mGlobal) * cacheRows + kvHead * HEAD_DIM + d] = uint8_t(qi);
+        }
+        if (col == 0) {
+            kScale[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qscale_sh[row];
+            kZero[kvHead * (param.tokenIdx + param.M) + (param.tokenIdx + mGlobal)] = qzero_sh[row];
         }
     }
 }

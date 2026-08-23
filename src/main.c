@@ -1,8 +1,10 @@
 #include <stdio.h>
 
 void compute();
+void validation();
 
 int main() {
-    compute();
+    // compute();
+    validation();
     return 0;
 }

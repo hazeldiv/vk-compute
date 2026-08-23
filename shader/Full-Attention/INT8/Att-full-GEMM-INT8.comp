@@ -1,6 +1,7 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
 #define TS 16
 #define HEAD_DIM 256
 #define KV_HEADS 4
@@ -12,21 +13,20 @@ layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
 layout(push_constant) uniform Dimensions { uint context_length; } param;
 
-layout(set = 0, binding = 0) readonly buffer keyBuffer   { uint16_t key[]; };
-layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
+layout(set = 0, binding = 0) readonly buffer keyBuffer   { uint8_t key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer  { float y[]; };
+layout(set = 0, binding = 4) readonly buffer kScaleBuffer { float kscale[]; };
+layout(set = 0, binding = 5) readonly buffer kZeroBuffer  { float kzero[]; };
+layout(set = 0, binding = 6) readonly buffer vScaleBuffer { float vscale[]; };
+layout(set = 0, binding = 7) readonly buffer vZeroBuffer  { float vzero[]; };
 
 shared vec4    Qs[HEAD_DIM / 4][TS];
 shared f16vec4 KVs[HEAD_DIM / 4][TS];
 shared float s_max[TS][TS];
 shared float s_exp[TS][TS];
 shared float s_p[TS][TS];
-
-vec4 loadHalf4(uint b0, uint b1, uint b2, uint b3) {
-    return vec4(unpackHalf2x16(b0 | (b1 << 16)),
-                unpackHalf2x16(b2 | (b3 << 16)));
-}
 
 void main() {
     uint r = gl_LocalInvocationID.y;
@@ -57,8 +57,12 @@ void main() {
         for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
             uint dv = i / TS;
             uint tok = i % TS;
-            uint base = (t * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
-            KVs[dv][tok] = f16vec4(loadHalf4(uint(key[base]), uint(key[base + 1]), uint(key[base + 2]), uint(key[base + 3])));
+            uint kt = t * TS + tok;
+            float ks = kscale[kvh * param.context_length + kt];
+            float zs = kzero[kvh * param.context_length + kt];
+            uint base = kt * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
+            vec4 kv = vec4(float(uint(key[base])), float(uint(key[base + 1])), float(uint(key[base + 2])), float(uint(key[base + 3])));
+            KVs[dv][tok] = f16vec4(kv * ks - zs);
         }
         barrier();
 
@@ -95,8 +99,12 @@ void main() {
         for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
             uint dv = i / TS;
             uint tok = i % TS;
-            uint base = (t * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
-            KVs[dv][tok] = f16vec4(loadHalf4(uint(value[base]), uint(value[base + 1]), uint(value[base + 2]), uint(value[base + 3])));
+            uint kt = t * TS + tok;
+            float vs = vscale[kvh * param.context_length + kt];
+            float vz = vzero[kvh * param.context_length + kt];
+            uint base = kt * KV_TOTAL_ROWS + kvh * HEAD_DIM + dv * 4;
+            vec4 vv = vec4(float(uint(value[base])), float(uint(value[base + 1])), float(uint(value[base + 2])), float(uint(value[base + 3])));
+            KVs[dv][tok] = f16vec4(vv * vs - vz);
         }
         barrier();
 

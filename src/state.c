@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include "state.h"
 
@@ -29,10 +30,9 @@ model_state createState(session s, const model_config* spec, int maxM) {
 
     for (int L = 0; L < spec->layerCount; L++) {
         const layer* ly = &spec->layers[L];
-        if (ly->attn.type == ATTENTION_FULL) {
+if (ly->attn.type == ATTENTION_FULL) {
             int64_t cacheBytes = (int64_t)MODEL_KV_ROWS * MODEL_MAX_CTX;
-            
-            if (ly->attn.q == QUANT_INT4) {
+            if (ly->attn.q != QUANT_FP16) {
                 st.kCache[L] = createZeroed(s, cacheBytes);
                 st.vCache[L] = createZeroed(s, cacheBytes);
                 st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);

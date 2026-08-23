@@ -1,6 +1,5 @@
 #version 450
-#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
 
 #define TS 256
 #define HEAD_DIM 256
@@ -10,15 +9,21 @@
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
-layout(set = 0, binding = 0) readonly buffer keyBuffer { uint16_t key[]; };
-layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
+layout(set = 0, binding = 0) readonly buffer keyBuffer { uint8_t key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
 layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
 layout(set = 0, binding = 3) writeonly buffer outBuffer { float y[]; };
-layout(set = 0, binding = 4) readonly buffer PositionBuffer { uint position[]; };
+layout(set = 0, binding = 4) readonly buffer kScaleBuffer { float kscale[]; };
+layout(set = 0, binding = 5) readonly buffer kZeroBuffer { float kzero[]; };
+layout(set = 0, binding = 6) readonly buffer vScaleBuffer { float vscale[]; };
+layout(set = 0, binding = 7) readonly buffer vZeroBuffer { float vzero[]; };
+layout(set = 0, binding = 8) readonly buffer PositionBuffer { uint position[]; };
 
 shared float q_shared[HEAD_DIM];
 shared float s_max[TS];
 shared float s_exp[TS];
+shared float scale_s[TS];
+shared float zero_s[TS];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
@@ -44,11 +49,17 @@ void main() {
     for (uint k = 0; k < num_tiles; k++) {
         uint s = k * TS + tid;
 
+        if (s < context) {
+            scale_s[tid] = kscale[kv_block_id * context + s];
+            zero_s[tid] = kzero[kv_block_id * context + s];
+        }
+        barrier();
+
         float score = NEG_INF;
         if (s < context) {
             score = 0.0;
             for (uint d = 0; d < HEAD_DIM; d++) {
-                float k_val = unpackHalf2x16(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])).x;
+                float k_val = float(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])) * scale_s[tid] - zero_s[tid];
                 score += q_shared[d] * k_val;
             }
         }
@@ -89,7 +100,7 @@ void main() {
             if (tile_size > TS) tile_size = TS;
             for (uint i = 0; i < tile_size; i++) {
                 uint t = tile_start + i;
-                float v = unpackHalf2x16(uint(value[t * KV_TOTAL_ROWS + (kv_row_base + tid)])).x;
+                float v = float(uint(value[t * KV_TOTAL_ROWS + (kv_row_base + tid)])) * scale_s[i] - zero_s[i];
                 tile_acc += s_exp[i] * v;
             }
 

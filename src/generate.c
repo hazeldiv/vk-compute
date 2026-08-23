@@ -104,7 +104,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
     qkvBufs[b++] = st->qOut;
     qkvBufs[b++] = st->kCache[L];
     qkvBufs[b++] = st->vCache[L];
-    if (q == QUANT_INT4) {
+    if (q != QUANT_FP16) {
         qkvBufs[b++] = st->kScale[L];
         qkvBufs[b++] = st->kZero[L];
         qkvBufs[b++] = st->vScale[L];
@@ -122,7 +122,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         attBufs[ba++] = st->vCache[L];
         attBufs[ba++] = st->qOut;
         attBufs[ba++] = st->attnOut;
-        if (q == QUANT_INT4) {
+        if (q != QUANT_FP16) {
             attBufs[ba++] = st->kScale[L];
             attBufs[ba++] = st->kZero[L];
             attBufs[ba++] = st->vScale[L];
@@ -140,7 +140,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         attBufs[ba++] = st->vCache[L];
         attBufs[ba++] = st->qOut;
         attBufs[ba++] = st->attnOut;
-        if (q == QUANT_INT4) {
+        if (q != QUANT_FP16) {
             attBufs[ba++] = st->kScale[L];
             attBufs[ba++] = st->kZero[L];
             attBufs[ba++] = st->vScale[L];

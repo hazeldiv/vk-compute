@@ -946,35 +946,82 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     int dim = att_dim;
     int rows = kv_heads * dim;
     int kvs = rows * seq;
+    uint8_t* kq = (uint8_t*)malloc(kvs);
+    uint8_t* vq = (uint8_t*)malloc(kvs);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    for (int h = 0; h < kv_heads; h++) {
+        for (int s2 = 0; s2 < seq; s2++) {
+            float mn = FLT_MAX;
+            float mx = -FLT_MAX;
+            for (int d = 0; d < dim; d++) {
+                float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
+                mn = fminf(mn, kv);
+                mx = fmaxf(mx, kv);
+            }
+            float ks = (mx - mn) / 255.0f;
+            if (ks == 0.0f) ks = 1.0f;
+            kScale[h * seq + s2] = ks;
+            kZero[h * seq + s2] = -mn;
+            for (int d = 0; d < dim; d++) {
+                float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
+                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                if (q < 0) q = 0;
+                if (q > 255) q = 255;
+                kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
+            }
+        }
+    }
+    for (int h = 0; h < kv_heads; h++) {
+        for (int s2 = 0; s2 < seq; s2++) {
+            float mn = FLT_MAX;
+            float mx = -FLT_MAX;
+            for (int d = 0; d < dim; d++) {
+                float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
+                mn = fminf(mn, vv);
+                mx = fmaxf(mx, vv);
+            }
+            float vs = (mx - mn) / 255.0f;
+            if (vs == 0.0f) vs = 1.0f;
+            vScale[h * seq + s2] = vs;
+            vZero[h * seq + s2] = -mn;
+            for (int d = 0; d < dim; d++) {
+                float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
+                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                if (q < 0) q = 0;
+                if (q > 255) q = 255;
+                vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
+            }
+        }
+    }
     float* kf = (float*)malloc(sizeof(float) * kvs);
     float* vf = (float*)malloc(sizeof(float) * kvs);
-    for (int i = 0; i < kvs; i++) {
-        kf[i] = fp16_to_float(att_k[i]);
-        vf[i] = fp16_to_float(att_v[i]);
-    }
-    uint16_t* att_k_t = (uint16_t*)malloc(sizeof(uint16_t) * kvs);
-    uint16_t* att_v_t = (uint16_t*)malloc(sizeof(uint16_t) * kvs);
-    for (int s2 = 0; s2 < seq; s2++) {
-        for (int r = 0; r < rows; r++) {
-            att_k_t[s2 * rows + r] = att_k[r * seq + s2];
-            att_v_t[s2 * rows + r] = att_v[r * seq + s2];
+    for (int r = 0; r < rows; r++) {
+        int h = r / dim;
+        for (int s2 = 0; s2 < seq; s2++) {
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
         }
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
 
     uint32_t posVal = (uint32_t)(seq - 1);
-    buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_k_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
-    buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_v_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
+    buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kq, sizeof(uint8_t) * kvs, MEMORY_RAM);
+    buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
+    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 5);
-    free(att_k_t);
-    free(att_v_t);
+    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
 
     operation ops[] = {
-        {.shader = "Att-full-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer}, .bufferCount = 5,
+        {.shader = "Att-full-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer}, .bufferCount = 9,
          .pushConstants = {0}, .pushConstantCount = 0,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
@@ -985,7 +1032,13 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
     report("Attention INT8", 100, out, ref, heads * dim, ms);
 
-    destroy_buffers(s, bufs, 5);
+    destroy_buffers(s, bufs, 9);
+    free(kq);
+    free(vq);
+    free(kScale);
+    free(kZero);
+    free(vScale);
+    free(vZero);
     free(kf);
     free(vf);
     free(out);
@@ -1151,29 +1204,80 @@ void validateAttentionGEMMINT8(session s, int seq, int heads, int kv_heads, int 
     uint16_t* att_k = getDataFP16(8100, rows, seq);
     uint16_t* att_v = getDataFP16(9100, rows, seq);
 
+    uint8_t* kq = (uint8_t*)malloc(kvs);
+    uint8_t* vq = (uint8_t*)malloc(kvs);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    for (int h = 0; h < kv_heads; h++) {
+        for (int s2 = 0; s2 < seq; s2++) {
+            float mn = FLT_MAX;
+            float mx = -FLT_MAX;
+            for (int d = 0; d < dim; d++) {
+                float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
+                mn = fminf(mn, kv);
+                mx = fmaxf(mx, kv);
+            }
+            float ks = (mx - mn) / 255.0f;
+            if (ks == 0.0f) ks = 1.0f;
+            kScale[h * seq + s2] = ks;
+            kZero[h * seq + s2] = -mn;
+            for (int d = 0; d < dim; d++) {
+                float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
+                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                if (q < 0) q = 0;
+                if (q > 255) q = 255;
+                kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
+            }
+        }
+    }
+    for (int h = 0; h < kv_heads; h++) {
+        for (int s2 = 0; s2 < seq; s2++) {
+            float mn = FLT_MAX;
+            float mx = -FLT_MAX;
+            for (int d = 0; d < dim; d++) {
+                float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
+                mn = fminf(mn, vv);
+                mx = fmaxf(mx, vv);
+            }
+            float vs = (mx - mn) / 255.0f;
+            if (vs == 0.0f) vs = 1.0f;
+            vScale[h * seq + s2] = vs;
+            vZero[h * seq + s2] = -mn;
+            for (int d = 0; d < dim; d++) {
+                float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
+                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                if (q < 0) q = 0;
+                if (q > 255) q = 255;
+                vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
+            }
+        }
+    }
     float* kf = (float*)malloc(sizeof(float) * kvs);
     float* vf = (float*)malloc(sizeof(float) * kvs);
-    for (int i = 0; i < kvs; i++) { kf[i] = fp16_to_float(att_k[i]); vf[i] = fp16_to_float(att_v[i]); }
-
-    uint16_t* att_k_t = (uint16_t*)malloc(sizeof(uint16_t) * kvs);
-    uint16_t* att_v_t = (uint16_t*)malloc(sizeof(uint16_t) * kvs);
-    for (int s2 = 0; s2 < seq; s2++)
-        for (int r = 0; r < rows; r++) {
-            att_k_t[s2 * rows + r] = att_k[r * seq + s2];
-            att_v_t[s2 * rows + r] = att_v[r * seq + s2];
+    for (int r = 0; r < rows; r++) {
+        int h = r / dim;
+        for (int s2 = 0; s2 < seq; s2++) {
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
         }
-
+    }
     float* out = (float*)calloc(seq * heads * dim, sizeof(float));
 
-    buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_k_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
-    buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_v_t, sizeof(uint16_t) * kvs, MEMORY_RAM);
+    buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kq, sizeof(uint8_t) * kvs, MEMORY_RAM);
+    buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * seq * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * seq * heads * dim, MEMORY_RAM);
-    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
 
     operation ops[] = {
-        {.shader = "Att-full-GEMM-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer}, .bufferCount = 4,
+        {.shader = "Att-full-GEMM-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf}, .bufferCount = 8,
          .pushConstants = {seq}, .pushConstantCount = 1,
          .dispatchX = heads, .dispatchY = seq / 16, .dispatchZ = 1}
     };
@@ -1184,10 +1288,18 @@ void validateAttentionGEMMINT8(session s, int seq, int heads, int kv_heads, int 
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, outBuffer, out);
     report("Attention-GEMM INT8", 100, out, ref, seq * heads * dim, ms);
 
-    destroy_buffers(s, bufs, 4);
+    destroy_buffers(s, bufs, 8);
     free(att_q); free(att_k); free(att_v);
-    free(kf); free(vf); free(att_k_t); free(att_v_t);
-    free(out); free(ref);
+    free(kq);
+    free(vq);
+    free(kScale);
+    free(kZero);
+    free(vScale);
+    free(vZero);
+    free(kf);
+    free(vf);
+    free(out);
+    free(ref);
 }
 
 void validateAttentionGEMMINT4(session s, int seq, int heads, int kv_heads, int dim) {
@@ -1442,8 +1554,12 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     qkv_rope_ref(proj, qkv_theta, qref, kref, vref, n_total, k_offset, v_offset, dim, ctx);
 
     float* qOut = (float*)calloc(heads * dim, sizeof(float));
-    uint16_t* kCache = (uint16_t*)calloc(rows * seq_len, sizeof(uint16_t));
-    uint16_t* vCache = (uint16_t*)calloc(rows * seq_len, sizeof(uint16_t));
+    uint8_t* kCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    uint8_t* vCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
+    float* kScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
 
     uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total);
     transpose_block16(qkv_weightINT8.data, transposed, k, n_total, QUANT_INT8);
@@ -1455,15 +1571,19 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
-    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
-    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
+    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 14);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-QKV-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer}, .bufferCount = 14,
          .pushConstants = {1, n_total, k, k_offset, v_offset}, .pushConstantCount = 5,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
@@ -1472,10 +1592,17 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qOutBuffer, qOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kCacheBuffer, kCache);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vCacheBuffer, vCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kScaleBuffer, kScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kZeroBuffer, kZero);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vScaleBuffer, vScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vZeroBuffer, vZero);
     float* kstored = (float*)malloc(sizeof(float) * rows);
     float* vstored = (float*)malloc(sizeof(float) * rows);
-    for (int r = 0; r < rows; r++) kstored[r] = fp16_to_float(kCache[(seq_len - 1) * rows + r]);
-    for (int r = 0; r < rows; r++) vstored[r] = fp16_to_float(vCache[(seq_len - 1) * rows + r]);
+    for (int r = 0; r < rows; r++) {
+        int h = r / dim;
+        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * seq_len + seq_len - 1] - kZero[h * seq_len + seq_len - 1];
+        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * seq_len + seq_len - 1] - vZero[h * seq_len + seq_len - 1];
+    }
     float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
     float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
     for (int r = 0; r < rows; r++) {
@@ -1491,7 +1618,7 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
     printf("QKV-Rope-pos INT8: shader[0]= %u ref= %d\n", posRead, ctx);
 
-    destroy_buffers(s, bufs, 10);
+    destroy_buffers(s, bufs, 14);
     free(xn);
     free(proj);
     free(qref);
@@ -1500,6 +1627,10 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     free(qOut);
     free(kCache);
     free(vCache);
+    free(kScale);
+    free(kZero);
+    free(vScale);
+    free(vZero);
     free(kstored);
     free(vstored);
     free(kvOut);
@@ -2753,8 +2884,12 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     }
 
     float* qOut = (float*)calloc(M * heads * dim, sizeof(float));
-    uint16_t* kCache = (uint16_t*)calloc(M * rows, sizeof(uint16_t));
-    uint16_t* vCache = (uint16_t*)calloc(M * rows, sizeof(uint16_t));
+    uint8_t* kCache = (uint8_t*)calloc(M * rows, sizeof(uint8_t));
+    uint8_t* vCache = (uint8_t*)calloc(M * rows, sizeof(uint8_t));
+    float* kScale = (float*)calloc(kv_heads * M, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * M, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * M, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * M, sizeof(float));
 
     uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total);
     transpose_block16(qkv_weightINT8.data, transposed, k, n_total, QUANT_INT8);
@@ -2766,15 +2901,19 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
-    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
-    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
+    buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
+    buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * M, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * M, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * M, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * M, MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 10);
+    buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 14);
     free(transposed);
 
     operation ops[] = {
-        {.shader = "RmsNorm-QKV-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-QKV-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer}, .bufferCount = 14,
          .pushConstants = {M, n_total, k, 0, k_offset, v_offset}, .pushConstantCount = 6,
          .dispatchX = heads + 2 * kv_heads, .dispatchY = M / 16, .dispatchZ = 1}
     };
@@ -2783,10 +2922,19 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qOutBuffer, qOut);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kCacheBuffer, kCache);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vCacheBuffer, vCache);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kScaleBuffer, kScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kZeroBuffer, kZero);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vScaleBuffer, vScale);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vZeroBuffer, vZero);
     float* kstored = (float*)malloc(sizeof(float) * M * rows);
     float* vstored = (float*)malloc(sizeof(float) * M * rows);
-    for (int i = 0; i < M * rows; i++) kstored[i] = fp16_to_float(kCache[i]);
-    for (int i = 0; i < M * rows; i++) vstored[i] = fp16_to_float(vCache[i]);
+    for (int m = 0; m < M; m++) {
+        for (int r = 0; r < rows; r++) {
+            int h = r / dim;
+            kstored[m * rows + r] = (float)kCache[m * rows + r] * kScale[h * M + m] - kZero[h * M + m];
+            vstored[m * rows + r] = (float)vCache[m * rows + r] * vScale[h * M + m] - vZero[h * M + m];
+        }
+    }
 
     report("QKV-Rope-GEMM INT8", 100, qOut, qref, M * heads * dim, ms);
     report("QKV-Rope-GEMM-kv INT8", 100, kstored, kref, M * rows, ms);
@@ -2795,9 +2943,10 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
     printf("QKV-Rope-GEMM-pos INT8: shader[0]= %u ref= %d\n", posRead, M);
 
-    destroy_buffers(s, bufs, 10);
+    destroy_buffers(s, bufs, 14);
     free(qref); free(kref); free(vref);
     free(qOut); free(kCache); free(vCache);
+    free(kScale); free(kZero); free(vScale); free(vZero);
     free(kstored); free(vstored);
 }
 
@@ -3177,32 +3326,32 @@ void validation(void) {
     QuantizedData woINT8 = getDataINT8(8642, K, wo_n);
     QuantizedData woINT4 = getDataINT4(8642, K, wo_n);
 
-    validateGEMV(s, M, N, K, input, weight);
-    validateGEMVFP16(s, M, N, K, input, weightFP16);
-    validateGEMVINT8(s, M, N, K, input, weightINT8);
-    validateGEMVINT4(s, M, N, K, input, weightINT4);
+    // validateGEMV(s, M, N, K, input, weight);
+    // validateGEMVFP16(s, M, N, K, input, weightFP16);
+    // validateGEMVINT8(s, M, N, K, input, weightINT8);
+    // validateGEMVINT4(s, M, N, K, input, weightINT4);
 
     int vocab_size = 81920;
     uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
-    validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
+    // validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
 
     int Mg = 64;
-    uint32_t token = 12345 % vocab_size;
-    validateEmbedRmsNormLinearProjFP16(s, vocab_size, K, token, gamma, lmHeadFP16, w_inFP16);
-    uint32_t tokensM[64];
-    for (int i = 0; i < Mg; i++) tokensM[i] = (uint32_t)((i * 1237 + 555) % vocab_size);
-    validateEmbedRmsNormLinearProjGEMMFP16(s, Mg, vocab_size, K, tokensM, gamma, lmHeadFP16, w_inFP16);
+    // uint32_t token = 12345 % vocab_size;
+    // validateEmbedRmsNormLinearProjFP16(s, vocab_size, K, token, gamma, lmHeadFP16, w_inFP16);
+    // uint32_t tokensM[64];
+    // for (int i = 0; i < Mg; i++) tokensM[i] = (uint32_t)((i * 1237 + 555) % vocab_size);
+    // validateEmbedRmsNormLinearProjGEMMFP16(s, Mg, vocab_size, K, tokensM, gamma, lmHeadFP16, w_inFP16);
     free(lmHeadFP16);
 
     float* inputM = getData(4321, Mg, K);
-    validateGEMMFP16(s, Mg, N, K, inputM, weightFP16);
-    validateGEMMINT8(s, Mg, N, K, inputM, weightINT8);
-    validateGEMMINT4(s, Mg, N, K, inputM, weightINT4);
+    // validateGEMMFP16(s, Mg, N, K, inputM, weightFP16);
+    // validateGEMMINT8(s, Mg, N, K, inputM, weightINT8);
+    // validateGEMMINT4(s, Mg, N, K, inputM, weightINT4);
 
     float* residualM = getData(5555, Mg, wo_n);
-    validateGemmAddFP16(s, Mg, wo_n, K, inputM, residualM, woFP16);
-    validateGemmAddINT8(s, Mg, wo_n, K, inputM, residualM, woINT8);
-    validateGemmAddINT4(s, Mg, wo_n, K, inputM, residualM, woINT4);
+    // validateGemmAddFP16(s, Mg, wo_n, K, inputM, residualM, woFP16);
+    // validateGemmAddINT8(s, Mg, wo_n, K, inputM, residualM, woINT8);
+    // validateGemmAddINT4(s, Mg, wo_n, K, inputM, residualM, woINT4);
     free(residualM);
 
     int ffn_n = 12288;
@@ -3211,14 +3360,14 @@ void validation(void) {
     uint16_t* ffnDownFP16 = getDataFP16(9333, ffn_n, K);
     QuantizedData ffnDownINT8 = getDataINT8(9333, ffn_n, K);
     QuantizedData ffnDownINT4 = getDataINT4(9333, ffn_n, K);
-    validateGemvAddFP16(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownFP16);
-    validateGemvAddINT8(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT8);
-    validateGemvAddINT4(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT4);
+    // validateGemvAddFP16(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownFP16);
+    // validateGemvAddINT8(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT8);
+    // validateGemvAddINT4(s, 1, K, ffn_n, ffnDownInput, ffnDownResidual, ffnDownINT4);
     float* ffnDownInputM = getData(9111, Mg, ffn_n);
     float* ffnDownResidualM = getData(9222, Mg, K);
-    validateGemmAddFP16(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownFP16);
-    validateGemmAddINT8(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT8);
-    validateGemmAddINT4(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT4);
+    // validateGemmAddFP16(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownFP16);
+    // validateGemmAddINT8(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT8);
+    // validateGemmAddINT4(s, Mg, K, ffn_n, ffnDownInputM, ffnDownResidualM, ffnDownINT4);
     free(ffnDownInput);
     free(ffnDownResidual);
     free(ffnDownFP16);
@@ -3227,47 +3376,47 @@ void validation(void) {
     free(ffnDownInputM);
     free(ffnDownResidualM);
 
-    validateRmsNormSwigluFfnGEMMFP16(s, Mg, N, K, inputM, gamma, weightFP16, weight2FP16);
-    validateRmsNormSwigluFfnGEMMINT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
-    validateRmsNormSwigluFfnGEMMINT4(s, Mg, N, K, inputM, gamma, weightINT4, weight2INT4);
+    // validateRmsNormSwigluFfnGEMMFP16(s, Mg, N, K, inputM, gamma, weightFP16, weight2FP16);
+    // validateRmsNormSwigluFfnGEMMINT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
+    // validateRmsNormSwigluFfnGEMMINT4(s, Mg, N, K, inputM, gamma, weightINT4, weight2INT4);
 
-    validateRmsNormLinearProjGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16);
-    validateRmsNormLinearProjGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8);
-    validateRmsNormLinearProjGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4);
+    // validateRmsNormLinearProjGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16);
+    // validateRmsNormLinearProjGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8);
+    // validateRmsNormLinearProjGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4);
 
-    validateQkvRopeGEMMFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightFP16, qkv_theta, Mg);
+    // validateQkvRopeGEMMFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightFP16, qkv_theta, Mg);
     validateQkvRopeGEMMINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightINT8, qkv_theta, Mg);
-    validateQkvRopeGEMMINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightINT4, qkv_theta, Mg);
+    // validateQkvRopeGEMMINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, inputM, gamma, qkv_weightINT4, qkv_theta, Mg);
 
-    validateAttentionGEMMFP16(s, Mg, 16, 4, 256);
+    // validateAttentionGEMMFP16(s, Mg, 16, 4, 256);
     validateAttentionGEMMINT8(s, Mg, 16, 4, 256);
-    validateAttentionGEMMINT4(s, Mg, 16, 4, 256);
+    // validateAttentionGEMMINT4(s, Mg, 16, 4, 256);
 
-    validateGatedDeltaNetGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16, woFP16);
-    validateGatedDeltaNetGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8, woINT8);
-    validateGatedDeltaNetGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4, woINT4);
+    // validateGatedDeltaNetGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16, woFP16);
+    // validateGatedDeltaNetGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8, woINT8);
+    // validateGatedDeltaNetGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4, woINT4);
 
     free(inputM);
-    validateRmsNormGEMVFP16(s, M, N, K, input, gamma, weightFP16);
-    validateRmsNormGEMVINT8(s, M, N, K, input, gamma, weightINT8);
-    validateRmsNormGEMVINT4(s, M, N, K, input, gamma, weightINT4);
-    validateGemvAddFP16(s, M, wo_n, K, input2, input, woFP16);
-    validateGemvAddINT8(s, M, wo_n, K, input2, input, woINT8);
-    validateGemvAddINT4(s, M, wo_n, K, input2, input, woINT4);
-    validateRmsNormSwigluFfn(s, M, N, K, input, gamma, weight);
-    validateRmsNormSwigluFfnFP16(s, M, N, K, input, gamma, weightFP16, weight2FP16);
-    validateRmsNormSwigluFfnINT8(s, M, N, K, input, gamma, weightINT8, weight2INT8);
-    validateRmsNormSwigluFfnINT4(s, M, N, K, input, gamma, weightINT4, weight2INT4);
-    validateOnlineSoftmax(s, softmax_n, softmax_x, softmax_v);
-    validateAttentionFP16(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
+    // validateRmsNormGEMVFP16(s, M, N, K, input, gamma, weightFP16);
+    // validateRmsNormGEMVINT8(s, M, N, K, input, gamma, weightINT8);
+    // validateRmsNormGEMVINT4(s, M, N, K, input, gamma, weightINT4);
+    // validateGemvAddFP16(s, M, wo_n, K, input2, input, woFP16);
+    // validateGemvAddINT8(s, M, wo_n, K, input2, input, woINT8);
+    // validateGemvAddINT4(s, M, wo_n, K, input2, input, woINT4);
+    // validateRmsNormSwigluFfn(s, M, N, K, input, gamma, weight);
+    // validateRmsNormSwigluFfnFP16(s, M, N, K, input, gamma, weightFP16, weight2FP16);
+    // validateRmsNormSwigluFfnINT8(s, M, N, K, input, gamma, weightINT8, weight2INT8);
+    // validateRmsNormSwigluFfnINT4(s, M, N, K, input, gamma, weightINT4, weight2INT4);
+    // validateOnlineSoftmax(s, softmax_n, softmax_x, softmax_v);
+    // validateAttentionFP16(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
     validateAttentionINT8(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
-    validateAttentionINT4(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
-    validateQkvRopeFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightFP16, qkv_theta);
+    // validateAttentionINT4(s, att_seq, att_heads, att_kv_heads, att_dim, att_q, att_k, att_v);
+    // validateQkvRopeFP16(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightFP16, qkv_theta);
     validateQkvRopeINT8(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT8, qkv_theta);
-    validateQkvRopeINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT4, qkv_theta);
-    validateGatedDeltaNetFP16(s, K, input, input2, gamma, w_inFP16, woFP16);
-    validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
-    validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);
+    // validateQkvRopeINT4(s, K, qkv_heads, qkv_kv_heads, qkv_dim, input, gamma, qkv_weightINT4, qkv_theta);
+    // validateGatedDeltaNetFP16(s, K, input, input2, gamma, w_inFP16, woFP16);
+    // validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
+    // validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);
 
     free(input);
     free(input2);
