@@ -4,7 +4,7 @@ void compute();
 void validation();
 
 int main() {
-    // compute();
-    validation();
+    compute();
+    // validation();
     return 0;
 }

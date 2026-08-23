@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 #include "generate.h"
 
 static void addOp(operation* ops, int* n, const char* shader, buffer* bufs, int bc, const int* push, int pc, int dx, int dy) {
@@ -293,10 +294,16 @@ uint32_t runDecode(generator* g, uint32_t token) {
 }
 
 void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens) {
+    uint64_t tPrefill = GetTickCount64();
     uint32_t token = runPrefill(g, prompt, nPrompt);
-    printf("gen[%d]= %u  pos= %u\n", 0, token, stateReadPosition(g->s, &g->st));
+    uint64_t prefillMs = GetTickCount64() - tPrefill;
+    double prefillSpeed = prefillMs > 0 ? (double)(nPrompt * 1000) / prefillMs : 0.0;
+    printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", 0, token, stateReadPosition(g->s, &g->st), prefillSpeed);
+    uint64_t t0 = GetTickCount64();
     for (int i = 1; i < maxNewTokens; i++) {
         token = runDecode(g, token);
-        printf("gen[%d]= %u  pos= %u\n", i, token, stateReadPosition(g->s, &g->st));
+        uint64_t ms = GetTickCount64() - t0;
+        double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
+        printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, token, stateReadPosition(g->s, &g->st), speed);
     }
 }
