@@ -17,6 +17,8 @@ typedef struct generator {
     int maxM;
     operation groupOps[MODEL_MAX_OPS];
     int groupOpCount;
+    operation groupOpsShort[MODEL_MAX_OPS];
+    int groupOpCountShort;
     operation prefillOps[MODEL_MAX_OPS];
     int prefillOpCount;
     operation finalOps[MODEL_MAX_OPS];

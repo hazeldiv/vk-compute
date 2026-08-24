@@ -4,6 +4,8 @@
 #include <windows.h>
 #include "generate.h"
 
+#define ATT_SPLIT_THRESHOLD 256
+
 static void addOp(operation* ops, int* n, const char* shader, int layer, buffer* bufs, int bc, const int* push, int pc, int dx, int dy) {
     operation* op = &ops[*n];
     memset(op, 0, sizeof(operation));
@@ -184,7 +186,7 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
 
-static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m) {
+static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType q = g->spec->layers[L].attn.q;
@@ -266,16 +268,39 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         attBufs[ba++] = st->kCache[L];
         attBufs[ba++] = st->vCache[L];
         attBufs[ba++] = st->qOut;
-        attBufs[ba++] = st->attnOut;
         if (q != QUANT_FP16) {
             attBufs[ba++] = st->kScale[L];
             attBufs[ba++] = st->kZero[L];
             attBufs[ba++] = st->vScale[L];
             attBufs[ba++] = st->vZero[L];
         }
+        attBufs[ba++] = st->attPartial;
         attBufs[ba++] = st->position;
         int push0[1] = {0};
-        addOp(ops, n, model_shader("Att-full", q), L, attBufs, ba, push0, 0, MODEL_HEADS, 1);
+        if (splitAttn) {
+            addOp(ops, n, model_shader("Att-SplitK", q), L, attBufs, ba, push0, 0, MODEL_HEADS, 32);
+
+            buffer attRedBufs[3];
+            attRedBufs[0] = st->attPartial;
+            attRedBufs[1] = st->attnOut;
+            attRedBufs[2] = st->position;
+            addOp(ops, n, "Reduce-Att.spv", L, attRedBufs, 3, push0, 0, MODEL_HEADS * MODEL_HEAD_DIM / 256, 1);
+        } else {
+            buffer fullBufs[10];
+            int bf = 0;
+            fullBufs[bf++] = st->kCache[L];
+            fullBufs[bf++] = st->vCache[L];
+            fullBufs[bf++] = st->qOut;
+            fullBufs[bf++] = st->attnOut;
+            if (q != QUANT_FP16) {
+                fullBufs[bf++] = st->kScale[L];
+                fullBufs[bf++] = st->kZero[L];
+                fullBufs[bf++] = st->vScale[L];
+                fullBufs[bf++] = st->vZero[L];
+            }
+            fullBufs[bf++] = st->position;
+            addOp(ops, n, model_shader("Att-full", q), L, fullBufs, bf, push0, 0, MODEL_HEADS, 1);
+        }
     }
 
     addGemmAdd(g, ops, n, L, &w->out[L], st->attnOut, st->h, st->h, q, m);
@@ -302,10 +327,10 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
 }
 
-static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m) {
+static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn) {
     const layer* ly = &g->spec->layers[L];
     if (ly->attn.type == ATTENTION_FULL) {
-        buildAttention(g, ops, n, L, gemm, m);
+        buildAttention(g, ops, n, L, gemm, m, splitAttn);
     } else if (ly->attn.type == ATTENTION_DELTA) {
         buildDelta(g, ops, n, L, gemm, m);
     }
@@ -327,10 +352,9 @@ static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int
     addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 5, pushR, 3, 1, 1);
 }
 
-static int compileDecodeGroup(generator* g) {
+static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
-    operation* ops = g->groupOps;
     int n = 0;
 
     for (int p = 0; p < DECODE_GROUP; p++) {
@@ -339,7 +363,7 @@ static int compileDecodeGroup(generator* g) {
         addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
         for (int L = 0; L < g->spec->layerCount; L++) {
-            buildLayer(g, ops, &n, L, 0, 1);
+            buildLayer(g, ops, &n, L, 0, 1, splitAttn);
         }
 
         buildLmHead(g, ops, &n, &st->h, 1, p);
@@ -359,7 +383,7 @@ static int compilePrefill(generator* g) {
     addOp(ops, &n, "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", -1, embedBufs, 11, pushE, 4, MODEL_PROJ_N / 16, m / 16);
 
     for (int L = 0; L < g->spec->layerCount; L++) {
-        buildLayer(g, ops, &n, L, 1, m);
+        buildLayer(g, ops, &n, L, 1, m, 0);
     }
 
     return n;
@@ -379,7 +403,8 @@ generator* createGenerator(session s, const model_config* spec, int maxM) {
     g.maxM = maxM;
     g.w = createWeights(s, spec);
     g.st = createState(s, spec, maxM);
-    g.groupOpCount = compileDecodeGroup(&g);
+    g.groupOpCount = compileDecodeGroup(&g, g.groupOps, 1);
+    g.groupOpCountShort = compileDecodeGroup(&g, g.groupOpsShort, 0);
     g.prefillOpCount = compilePrefill(&g);
     g.finalOpCount = compileFinal(&g);
     return &g;
@@ -422,10 +447,13 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
     int decodeTokens = maxNewTokens - 1;
     int fullGroups = decodeTokens / DECODE_GROUP;
     int rem = decodeTokens % DECODE_GROUP;
-    int opsPerPass = g->groupOpCount / DECODE_GROUP;
+
+    int curSplit = (int)(g->nextPos >= ATT_SPLIT_THRESHOLD);
+    operation* curOps = curSplit ? g->groupOps : g->groupOpsShort;
+    int curCount = curSplit ? g->groupOpCount : g->groupOpCountShort;
 
     ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = token;
-    executeRecord(&g->s, g->groupOps, g->groupOpCount);
+    executeRecord(&g->s, curOps, curCount);
     executeSubmitNow(&g->s);
 
     uint64_t t0 = GetTickCount64();
@@ -435,10 +463,14 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
         int cur = (u == fullGroups) ? rem : DECODE_GROUP;
         int next = ((rem > 0) && (u + 1 == fullGroups)) ? rem : DECODE_GROUP;
 
+        int nextSplit = (int)((g->nextPos + cur) >= ATT_SPLIT_THRESHOLD);
+        operation* nextOps = nextSplit ? g->groupOps : g->groupOpsShort;
+        int nextCount = nextSplit ? g->groupOpCount : g->groupOpCountShort;
+
         uint32_t tokens[DECODE_GROUP];
-        executeRecord(&g->s, g->groupOps, next * opsPerPass);
+        executeRecord(&g->s, nextOps, next * (nextCount / DECODE_GROUP));
         executeWaitLast(&g->s);
-        logLastFrame(&g->s, g->groupOps, cur * opsPerPass, "decode", (int)g->nextPos);
+        logLastFrame(&g->s, curOps, cur * (curCount / DECODE_GROUP), "decode", (int)g->nextPos);
         readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.result, tokens);
         ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = tokens[cur - 1];
         executeSubmitNow(&g->s);
@@ -450,6 +482,10 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
             double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
             printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, tokens[j], stateReadPosition(g->s, &g->st), speed);
         }
+
+        curSplit = nextSplit;
+        curOps = nextOps;
+        curCount = nextCount;
     }
     executeWaitLast(&g->s);
     closeTimingLog();
