@@ -6,12 +6,14 @@ layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 layout(push_constant) uniform Params {
     uint vocabSize;
     uint doIncrement;
+    uint passIdx;
 } params;
 
 layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
 layout(set = 0, binding = 3) buffer PositionBuffer { uint position[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer TokenIdsBuffer { uint tokenIds[]; };
 
 shared float redValue[TS];
 shared uint redIndex[TS];
@@ -47,7 +49,8 @@ void main() {
         barrier();
     }
     if (tid == 0) {
-        result[0] = redIndex[0];
+        result[params.passIdx] = redIndex[0];
+        tokenIds[0] = redIndex[0];
         if (params.doIncrement == 1u) position[0] = position[0] + 1u;
     }
 }

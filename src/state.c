@@ -61,7 +61,7 @@ if (ly->attn.type == ATTENTION_FULL) {
     int numGroups = (MODEL_VOCAB + 255) / 256;
     st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups);
     st.maxIndex = createZeroed(s, (int64_t)sizeof(uint32_t) * numGroups);
-    st.result = createZeroed(s, sizeof(uint32_t));
+    st.result = createZeroed(s, sizeof(uint32_t) * 4);
     st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_K);
     st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N);
     st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N);

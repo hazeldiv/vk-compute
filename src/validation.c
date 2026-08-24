@@ -4166,6 +4166,7 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     uint32_t* maxIndices = (uint32_t*)calloc(numGroups, sizeof(uint32_t));
     uint32_t* result = (uint32_t*)calloc(1, sizeof(uint32_t));
     uint32_t posVal = 41;
+    uint32_t tokenVal = 0;
 
     uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * vocabSize);
     transpose_block16((uint8_t*)lmHeadFP16, (uint8_t*)transposed, K, vocabSize, QUANT_FP16);
@@ -4177,16 +4178,17 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, maxIndices, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
     buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, result, sizeof(uint32_t), MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {inputBuffer, gammaBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 7);
+    buffer tokenIdsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &tokenVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {inputBuffer, gammaBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer, tokenIdsBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
     free(transposed);
 
     operation ops[] = {
         {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, gammaBuffer}, .bufferCount = 5,
          .pushConstants = {1, vocabSize, K}, .pushConstantCount = 3,
          .dispatchX = numGroups, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer}, .bufferCount = 4,
-         .pushConstants = {vocabSize, 1}, .pushConstantCount = 2,
+        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer, tokenIdsBuffer}, .bufferCount = 5,
+         .pushConstants = {vocabSize, 1, 0}, .pushConstantCount = 3,
          .dispatchX = 1, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4201,7 +4203,7 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     printf("LMHead-ArgMax-pos FP16: shader[0]= %u ref= %d\n", posRead, posVal + 1);
     printf("LMHead-ArgMax FP16 time: %.3f ms\n", ms);
 
-    destroy_buffers(s, bufs, 7);
+    destroy_buffers(s, bufs, 8);
     free(maxValues);
     free(maxIndices);
     free(result);

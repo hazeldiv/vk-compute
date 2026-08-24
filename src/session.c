@@ -56,6 +56,7 @@ session createSession() {
 }
 
 void destroySession(session s) {
+    vkDeviceWaitIdle(s.dev.device);
     for (int i = 0; i < FRAME_COUNT; i++) {
         vkDestroyFence(s.dev.device, s.fence[i], NULL);
     }

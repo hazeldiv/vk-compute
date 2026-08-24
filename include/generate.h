@@ -7,14 +7,16 @@
 #include "state.h"
 #include "dispatch.h"
 
+#define DECODE_GROUP 4
+
 typedef struct generator {
     session s;
     model_weights w;
     model_state st;
     const model_config* spec;
     int maxM;
-    operation decodeOps[MODEL_MAX_OPS];
-    int decodeOpCount;
+    operation groupOps[MODEL_MAX_OPS];
+    int groupOpCount;
     operation prefillOps[MODEL_MAX_OPS];
     int prefillOpCount;
     operation finalOps[MODEL_MAX_OPS];
@@ -25,7 +27,6 @@ typedef struct generator {
 generator* createGenerator(session s, const model_config* spec, int maxM);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
-uint32_t runDecode(generator* g);
 void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens);
 
 #endif

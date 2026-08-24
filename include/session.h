@@ -5,7 +5,7 @@
 #include "device.h"
 #include "buffer.h"
 
-#define TIMESTAMP_QUERY_COUNT 2048
+#define TIMESTAMP_QUERY_COUNT 8192
 #define FRAME_COUNT 3
 
 typedef struct session {

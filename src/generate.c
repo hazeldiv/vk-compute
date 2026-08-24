@@ -314,7 +314,7 @@ static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, in
     }
 }
 
-static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int doIncrement) {
+static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int doIncrement, int passIdx) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
 
@@ -322,26 +322,28 @@ static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int
     int pushL[] = {1, MODEL_VOCAB, MODEL_K};
     addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (MODEL_VOCAB + 255) / 256, 1);
 
-    buffer redBufs[] = {st->maxValue, st->maxIndex, st->result, st->position};
-    int pushR[] = {MODEL_VOCAB, doIncrement};
-    addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 4, pushR, 2, 1, 1);
+    buffer redBufs[] = {st->maxValue, st->maxIndex, st->result, st->position, st->tokenIds};
+    int pushR[] = {MODEL_VOCAB, doIncrement, passIdx};
+    addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 5, pushR, 3, 1, 1);
 }
 
-static int compileDecode(generator* g) {
+static int compileDecodeGroup(generator* g) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
-    operation* ops = g->decodeOps;
+    operation* ops = g->groupOps;
     int n = 0;
 
-    buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
-    int pushE[] = {1, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
-    addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
+    for (int p = 0; p < DECODE_GROUP; p++) {
+        buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
+        int pushE[] = {1, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
+        addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
-    for (int L = 0; L < g->spec->layerCount; L++) {
-        buildLayer(g, ops, &n, L, 0, 1);
+        for (int L = 0; L < g->spec->layerCount; L++) {
+            buildLayer(g, ops, &n, L, 0, 1);
+        }
+
+        buildLmHead(g, ops, &n, &st->h, 1, p);
     }
-
-    buildLmHead(g, ops, &n, &st->h, 1);
     return n;
 }
 
@@ -365,7 +367,7 @@ static int compilePrefill(generator* g) {
 
 static int compileFinal(generator* g) {
     int n = 0;
-    buildLmHead(g, g->finalOps, &n, &g->st.lastRow, 0);
+    buildLmHead(g, g->finalOps, &n, &g->st.lastRow, 0, 0);
     return n;
 }
 
@@ -377,7 +379,7 @@ generator* createGenerator(session s, const model_config* spec, int maxM) {
     g.maxM = maxM;
     g.w = createWeights(s, spec);
     g.st = createState(s, spec, maxM);
-    g.decodeOpCount = compileDecode(&g);
+    g.groupOpCount = compileDecodeGroup(&g);
     g.prefillOpCount = compilePrefill(&g);
     g.finalOpCount = compileFinal(&g);
     return &g;
@@ -405,25 +407,9 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
 
     g->nextPos += (uint32_t)m;
 
-    uint32_t result = 0;
-    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, &result);
-    return result;
-}
-
-uint32_t runDecode(generator* g) {
-    model_state* st = &g->st;
-
-    executeRecord(&g->s, g->decodeOps, g->decodeOpCount);
-    executeWaitLast(&g->s);
-    logLastFrame(&g->s, g->decodeOps, g->decodeOpCount, "decode", (int)g->nextPos);
-
-    uint32_t result = 0;
-    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, &result);
-    ((uint32_t*)st->tokenIds.mappedMemory)[0] = result;
-
-    executeSubmitNow(&g->s);
-    g->nextPos++;
-    return result;
+    uint32_t results[4] = {0};
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, results);
+    return results[0];
 }
 
 void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens) {
@@ -433,16 +419,38 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
     double prefillSpeed = prefillMs > 0 ? (double)(nPrompt * 1000) / prefillMs : 0.0;
     printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", 0, token, stateReadPosition(g->s, &g->st), prefillSpeed);
 
+    int decodeTokens = maxNewTokens - 1;
+    int fullGroups = decodeTokens / DECODE_GROUP;
+    int rem = decodeTokens % DECODE_GROUP;
+    int opsPerPass = g->groupOpCount / DECODE_GROUP;
+
     ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = token;
-    executeRecord(&g->s, g->decodeOps, g->decodeOpCount);
+    executeRecord(&g->s, g->groupOps, g->groupOpCount);
     executeSubmitNow(&g->s);
 
     uint64_t t0 = GetTickCount64();
-    for (int i = 1; i < maxNewTokens; i++) {
-        token = runDecode(g);
-        uint64_t ms = GetTickCount64() - t0;
-        double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
-        printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, token, stateReadPosition(g->s, &g->st), speed);
+    int printed = 0;
+    int units = fullGroups + (rem > 0 ? 1 : 0);
+    for (int u = 0; u < units; u++) {
+        int cur = (u == fullGroups) ? rem : DECODE_GROUP;
+        int next = ((rem > 0) && (u + 1 == fullGroups)) ? rem : DECODE_GROUP;
+
+        uint32_t tokens[DECODE_GROUP];
+        executeRecord(&g->s, g->groupOps, next * opsPerPass);
+        executeWaitLast(&g->s);
+        logLastFrame(&g->s, g->groupOps, cur * opsPerPass, "decode", (int)g->nextPos);
+        readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.result, tokens);
+        ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = tokens[cur - 1];
+        executeSubmitNow(&g->s);
+        g->nextPos += cur;
+
+        for (int j = 0; j < cur; j++) {
+            int i = ++printed;
+            uint64_t ms = GetTickCount64() - t0;
+            double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
+            printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, tokens[j], stateReadPosition(g->s, &g->st), speed);
+        }
     }
+    executeWaitLast(&g->s);
     closeTimingLog();
 }
