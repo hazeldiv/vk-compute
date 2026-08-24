@@ -274,9 +274,13 @@ static void recordFrame(session* s, operation ops[], int opCount) {
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0, 1, &barrier, 0, NULL, 0, NULL);
         }
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 2 + 2 * i);
+        if (timingEnabled) {
+            vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 2 + 2 * i);
+        }
         vkCmdDispatch(cb, (uint32_t)op->dispatchX, (uint32_t)op->dispatchY, (uint32_t)op->dispatchZ);
-        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 3 + 2 * i);
+        if (timingEnabled) {
+            vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 3 + 2 * i);
+        }
     }
 
     vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 1);

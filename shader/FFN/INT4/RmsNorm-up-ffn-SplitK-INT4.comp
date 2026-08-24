@@ -132,20 +132,34 @@ void main() {
 
         uint baseRow = t * (TS / 8) * dims.N;
         #pragma unroll
-        for (uint k=0;k<TS; k+=8) {
-            uvec4 rawInput;
-            if (upHalf == 1u) rawInput = up[baseRow + globalCol];
-            else rawInput = gate[baseRow + globalCol];
-            result += dot(xsCache[cur][k], unpackInt4x4(rawInput.x));
-            result += dot(xsCache[cur][k+1], unpackInt4x4High(rawInput.x));
-            result += dot(xsCache[cur][k+2], unpackInt4x4(rawInput.y));
-            result += dot(xsCache[cur][k+3], unpackInt4x4High(rawInput.y));
-            result += dot(xsCache[cur][k+4], unpackInt4x4(rawInput.z));
-            result += dot(xsCache[cur][k+5], unpackInt4x4High(rawInput.z));
-            result += dot(xsCache[cur][k+6], unpackInt4x4(rawInput.w));
-            result += dot(xsCache[cur][k+7], unpackInt4x4High(rawInput.w));
+        for (uint k=0;k<TS; k+=16) {
+            uvec4 ra;
+            uvec4 rb;
+            if (upHalf == 1u) {
+                ra = up[baseRow + globalCol];
+                rb = up[baseRow + dims.N + globalCol];
+            } else {
+                ra = gate[baseRow + globalCol];
+                rb = gate[baseRow + dims.N + globalCol];
+            }
+            result += dot(xsCache[cur][k], unpackInt4x4(ra.x));
+            result += dot(xsCache[cur][k+1], unpackInt4x4High(ra.x));
+            result += dot(xsCache[cur][k+2], unpackInt4x4(ra.y));
+            result += dot(xsCache[cur][k+3], unpackInt4x4High(ra.y));
+            result += dot(xsCache[cur][k+4], unpackInt4x4(ra.z));
+            result += dot(xsCache[cur][k+5], unpackInt4x4High(ra.z));
+            result += dot(xsCache[cur][k+6], unpackInt4x4(ra.w));
+            result += dot(xsCache[cur][k+7], unpackInt4x4High(ra.w));
+            result += dot(xsCache[cur][k+8], unpackInt4x4(rb.x));
+            result += dot(xsCache[cur][k+9], unpackInt4x4High(rb.x));
+            result += dot(xsCache[cur][k+10], unpackInt4x4(rb.y));
+            result += dot(xsCache[cur][k+11], unpackInt4x4High(rb.y));
+            result += dot(xsCache[cur][k+12], unpackInt4x4(rb.z));
+            result += dot(xsCache[cur][k+13], unpackInt4x4High(rb.z));
+            result += dot(xsCache[cur][k+14], unpackInt4x4(rb.w));
+            result += dot(xsCache[cur][k+15], unpackInt4x4High(rb.w));
 
-            baseRow += dims.N;
+            baseRow += 2 * dims.N;
         }
 
         barrier();
