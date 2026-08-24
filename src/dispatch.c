@@ -6,7 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PIPE_CACHE_MAX 96
+#define PIPE_CACHE_MAX 512
+#define DESC_CACHE_MAX 1024
 #define TIMING_AGG_MAX 128
 
 typedef struct pipe_entry {
@@ -27,10 +28,92 @@ typedef struct timing_agg {
 static pipe_entry pipeCache[PIPE_CACHE_MAX];
 static int pipeCacheCount = 0;
 
+typedef struct desc_entry {
+    VkDescriptorSetLayout layout;
+    int bufferCount;
+    VkBuffer handles[MAX_OP_BUFFERS];
+    VkDescriptorSet set;
+} desc_entry;
+
+static VkDescriptorPool descPool = VK_NULL_HANDLE;
+static desc_entry descCache[DESC_CACHE_MAX];
+static int descCacheCount = 0;
+static int timingEnabled = 0;
+
 static FILE* timingFile = NULL;
 static timing_agg aggTable[TIMING_AGG_MAX];
 static int aggCount = 0;
 static double grandTotalMs = 0.0;
+
+void setTimingEnabled(int enabled) {
+    timingEnabled = enabled;
+}
+
+static VkDescriptorSet getDescriptorSet(session s, VkDescriptorSetLayout layout, const operation* op) {
+    for (int i = 0; i < descCacheCount; i++) {
+        desc_entry* e = &descCache[i];
+        if (e->layout != layout || e->bufferCount != op->bufferCount) continue;
+        int match = 1;
+        for (int b = 0; b < op->bufferCount; b++) {
+            if (e->handles[b] != op->buffers[b].buffer) { match = 0; break; }
+        }
+        if (match) return e->set;
+    }
+
+    if (descPool == VK_NULL_HANDLE) {
+        VkDescriptorPoolSize ps = {0};
+        ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        ps.descriptorCount = DESC_CACHE_MAX * MAX_OP_BUFFERS;
+        VkDescriptorPoolCreateInfo ci = {0};
+        ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        ci.poolSizeCount = 1;
+        ci.pPoolSizes = &ps;
+        ci.maxSets = DESC_CACHE_MAX;
+        if (vkCreateDescriptorPool(s.dev.device, &ci, NULL, &descPool) != VK_SUCCESS) {
+            fprintf(stderr, "Error: Failed to create descriptor pool\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    VkDescriptorSetAllocateInfo ai = {0};
+    ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    ai.descriptorPool = descPool;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &layout;
+    VkDescriptorSet set;
+    if (vkAllocateDescriptorSets(s.dev.device, &ai, &set) != VK_SUCCESS) {
+        fprintf(stderr, "Error: Failed to allocate descriptor set\n");
+        exit(EXIT_FAILURE);
+    }
+
+    VkDescriptorBufferInfo bi[MAX_OP_BUFFERS];
+    VkWriteDescriptorSet wr[MAX_OP_BUFFERS];
+    for (int i = 0; i < op->bufferCount; i++) {
+        bi[i].buffer = op->buffers[i].buffer;
+        bi[i].offset = 0;
+        bi[i].range = VK_WHOLE_SIZE;
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[i].pNext = NULL;
+        wr[i].dstSet = set;
+        wr[i].dstBinding = i;
+        wr[i].dstArrayElement = 0;
+        wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        wr[i].descriptorCount = 1;
+        wr[i].pBufferInfo = &bi[i];
+        wr[i].pImageInfo = NULL;
+        wr[i].pTexelBufferView = NULL;
+    }
+    vkUpdateDescriptorSets(s.dev.device, op->bufferCount, wr, 0, NULL);
+
+    if (descCacheCount < DESC_CACHE_MAX) {
+        desc_entry* e = &descCache[descCacheCount++];
+        e->layout = layout;
+        e->bufferCount = op->bufferCount;
+        for (int i = 0; i < op->bufferCount; i++) e->handles[i] = op->buffers[i].buffer;
+        e->set = set;
+    }
+    return set;
+}
 
 static pipe_entry* getPipeEntry(session s, const operation* op) {
     int pushSize = sizeof(int) * op->pushConstantCount;
@@ -159,10 +242,11 @@ static void runOps(session s, operation ops[], int opCount, const char* phase, i
     vkCmdResetQueryPool(s.buffer, s.qpool, 0, TIMESTAMP_QUERY_COUNT);
     vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 0);
 
-    descriptor descs[opCount];
+    descriptor transient[opCount];
     pipeline freshPipes[opCount];
     VkDescriptorSetLayout freshLayouts[opCount];
     int freshCount = 0;
+    int transientCount = 0;
 
     for (int i = 0; i < opCount; i++) {
         operation* op = &ops[i];
@@ -186,10 +270,17 @@ static void runOps(session s, operation ops[], int opCount, const char* phase, i
             freshCount++;
         }
 
-        descs[i] = createDescriptorSetFromLayout(s.dev.device, setLayout, op->bufferCount, op->buffers);
+        VkDescriptorSet set;
+        if (entry != NULL) {
+            set = getDescriptorSet(s, setLayout, op);
+        } else {
+            descriptor d = createDescriptorSetFromLayout(s.dev.device, setLayout, op->bufferCount, op->buffers);
+            transient[transientCount++] = d;
+            set = d.set;
+        }
 
         vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descs[i].set, 0, NULL);
+        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, NULL);
 
         if (op->pushConstantCount > 0) {
             vkCmdPushConstants(s.buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
@@ -222,8 +313,8 @@ static void runOps(session s, operation ops[], int opCount, const char* phase, i
     vkQueueSubmit(s.dev.queue, 1, &submitInfo, s.fence);
     vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
 
-    for (int i = 0; i < opCount; i++) {
-        destroyDescriptorSet(s.dev.device, descs[i]);
+    for (int i = 0; i < transientCount; i++) {
+        destroyDescriptorSet(s.dev.device, transient[i]);
     }
     for (int i = 0; i < freshCount; i++) {
         destroyPipeline(s.dev.device, freshPipes[i]);
@@ -240,7 +331,7 @@ void execute(session s, operation ops[], int opCount) {
 }
 
 void executeLogged(session s, operation ops[], int opCount, const char* phase, int token) {
-    runOps(s, ops, opCount, phase, token);
+    runOps(s, ops, opCount, timingEnabled ? phase : NULL, token);
 }
 
 double getExecutionTime(session s) {
