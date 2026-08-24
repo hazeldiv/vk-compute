@@ -6,7 +6,6 @@
 #define TS 256
 #define vec 4
 #define d_model 4096
-#define SPLIT 4
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -26,8 +25,7 @@ layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]
 layout(set = 0, binding = 5) writeonly buffer PartialBuffer { float P[]; };
 
 shared float shared_sum;
-shared vec4 cache[d_model/vec];
-shared vec4 scaleCache[d_model/vec];
+shared vec4 xsCache[2][TS];
 shared float sub_sums[TS / 64];
 
 vec4 unpackInt4x4(uint packedComponent) {
@@ -54,10 +52,7 @@ void main() {
     float sum_sq = 0.0;
 
     for (uint t = 0; t < param.K/vec; t+=TS) {
-        uint idx = t + col;
-        vec4 val = x[idx];
-        cache[idx] = val * gamma[idx];
-        scaleCache[idx] = scale[idx + scaleIdx];
+        vec4 val = x[t + col];
         sum_sq += dot(val, val);
     }
 
@@ -78,31 +73,59 @@ void main() {
     barrier();
     float inv_rms = 1.0 / sqrt((shared_sum / float(d_model)) + EPSILON);
 
-    uint kvStart = chunk * (param.K / vec / SPLIT);
-    uint kvEnd = kvStart + param.K / vec / SPLIT;
+    float ztot = 0.0;
     float acc = 0.0;
-    uint baseRow = (kvStart / 8) * param.N;
+    uint numTiles = (param.K + TS - 1) / TS / vec;
 
-    scaleCache[kvStart + col] *= cache[kvStart + col] * inv_rms;
-    float zp = subgroupAdd(dot(cache[kvStart + col] * inv_rms * zeroPoint[(kvStart + col) + scaleIdx], vec4(1.0)));
-    if (subgroupElect()) {
-        sub_sums[gl_SubgroupID] = zp;
+    if (chunk < numTiles) {
+        uint base = chunk*TS + col;
+        vec4 xa = x[base] * gamma[base] * inv_rms;
+        xsCache[0][col] = xa * scale[base + scaleIdx];
+        float zp = subgroupAdd(dot(xa * zeroPoint[base + scaleIdx], vec4(1.0)));
+        if (subgroupElect()) {
+            sub_sums[gl_SubgroupID] = zp;
+        }
     }
     barrier();
-    float ztot = sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+    if (chunk < numTiles) {
+        ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+    }
 
-    #pragma unroll
-    for (uint k=kvStart;k<kvEnd; k+=8) {
-        uvec4 rawInput = w[baseRow + safeCol];
-        acc += dot(scaleCache[k], unpackInt4x4(rawInput.x));
-        acc += dot(scaleCache[k+1], unpackInt4x4High(rawInput.x));
-        acc += dot(scaleCache[k+2], unpackInt4x4(rawInput.y));
-        acc += dot(scaleCache[k+3], unpackInt4x4High(rawInput.y));
-        acc += dot(scaleCache[k+4], unpackInt4x4(rawInput.z));
-        acc += dot(scaleCache[k+5], unpackInt4x4High(rawInput.z));
-        acc += dot(scaleCache[k+6], unpackInt4x4(rawInput.w));
-        acc += dot(scaleCache[k+7], unpackInt4x4High(rawInput.w));
-        baseRow += param.N;
+    uint it = 0;
+    for (uint t = chunk; t < numTiles; t += 4u) {
+        uint cur = it & 1, nxt = (it+1) & 1;
+        uint nextTile = t + 4u;
+        if (nextTile < numTiles) {
+            uint base = nextTile*TS + col;
+            vec4 xa = x[base] * gamma[base] * inv_rms;
+            xsCache[nxt][col] = xa * scale[base + scaleIdx];
+            float zp = subgroupAdd(dot(xa * zeroPoint[base + scaleIdx], vec4(1.0)));
+            if (subgroupElect()) {
+                sub_sums[gl_SubgroupID] = zp;
+            }
+        }
+        barrier();
+        if (nextTile < numTiles) {
+            ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+        }
+
+        uint baseRow = t * (TS / 8) * param.N;
+        #pragma unroll
+        for (uint k=0;k<TS; k+=8) {
+            uvec4 rawInput = w[baseRow + safeCol];
+            acc += dot(xsCache[cur][k], unpackInt4x4(rawInput.x));
+            acc += dot(xsCache[cur][k+1], unpackInt4x4High(rawInput.x));
+            acc += dot(xsCache[cur][k+2], unpackInt4x4(rawInput.y));
+            acc += dot(xsCache[cur][k+3], unpackInt4x4High(rawInput.y));
+            acc += dot(xsCache[cur][k+4], unpackInt4x4(rawInput.z));
+            acc += dot(xsCache[cur][k+5], unpackInt4x4High(rawInput.z));
+            acc += dot(xsCache[cur][k+6], unpackInt4x4(rawInput.w));
+            acc += dot(xsCache[cur][k+7], unpackInt4x4High(rawInput.w));
+            baseRow += param.N;
+        }
+
+        barrier();
+        it++;
     }
 
     if (globalCol < param.N) {
