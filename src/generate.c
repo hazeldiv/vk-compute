@@ -143,9 +143,9 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
             upBufs[b++] = w->up[L].scale;
             upBufs[b++] = w->up[L].zero;
         }
-        int push[] = {m, MODEL_FFN_N, MODEL_K};
-        addOp(ops, n, model_shader("RmsNorm-up-ffn-SplitK", f), L, upBufs, b, push, 3,
-              MODEL_FFN_N / 256, 4);
+        int push[] = {m, MODEL_FFN_N, MODEL_K, MODEL_FFN_N};
+        addOp(ops, n, model_shader("RmsNorm-up-ffn-SplitK", f), L, upBufs, b, push, 4,
+              2 * MODEL_FFN_N / 256, 4);
 
         buffer dBufs[5];
         int d = 0;
@@ -261,7 +261,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         addOp(ops, n, model_shader("Reduce-Rope", q), L, ropeBufs, br, pushRope, 3,
               MODEL_HEADS + 2 * MODEL_KV_HEADS, 1);
 
-        buffer attBufs[9];
+        buffer attBufs[10];
         int ba = 0;
         attBufs[ba++] = st->kCache[L];
         attBufs[ba++] = st->vCache[L];

@@ -66,6 +66,7 @@ if (ly->attn.type == ATTENTION_FULL) {
     st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N);
     st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N);
     st.linprojPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_PROJ_N);
+    st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 132096);
 
     buffer bufs[] = {
         st.h, st.act, st.embOut, st.yGated, st.attnOut, st.qOut,
@@ -119,6 +120,7 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->qkvPartial);
     destroyBuffer(s.dev.device, st->ffnPartial);
     destroyBuffer(s.dev.device, st->linprojPartial);
+    destroyBuffer(s.dev.device, st->attPartial);
 }
 
 void stateSetPosition(session s, model_state* st, uint32_t pos) {

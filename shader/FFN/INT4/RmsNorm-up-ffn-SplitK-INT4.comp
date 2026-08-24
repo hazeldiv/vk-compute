@@ -12,6 +12,7 @@ layout(push_constant) uniform Dimensions {
     uint M;
     uint N;
     uint K;
+    uint off;
 } dims;
 
 const float EPSILON = 1e-5;
@@ -28,10 +29,8 @@ layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 zeroPointUp
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared vec4 scaleSubCacheGate[2][TS];
-shared vec4 zeroSubCacheGate[2][TS];
-shared vec4 scaleSubCacheUp[2][TS];
-shared vec4 zeroSubCacheUp[2][TS];
+shared vec4 scaleSubCache[2][TS];
+shared vec4 zeroSubCache[2][TS];
 shared float sub_sums[TS / 64];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
@@ -45,7 +44,9 @@ void main() {
     uint col = gl_LocalInvocationID.x;
     uint chunk = gl_WorkGroupID.y;
     uint globalCol = gl_WorkGroupID.x*TS + col;
-    uint blockIdx = gl_WorkGroupID.x * dims.K / vec + col;
+    uint upHalf = uint(globalCol >= dims.off);
+    if (upHalf == 1u) globalCol -= dims.off;
+    uint blockIdx = (gl_WorkGroupID.x - upHalf * (dims.off / TS)) * dims.K / vec + col;
 
     float sum_sq = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;
@@ -75,25 +76,30 @@ void main() {
     float inv_rms = 1.0 / rms;
 
     if (chunk < numTiles) {
-        scaleSubCacheGate[0][col] = scaleGate[chunk*TS + blockIdx];
-        zeroSubCacheGate[0][col] = zeroPointGate[chunk*TS + blockIdx];
-        scaleSubCacheUp[0][col] = scaleUp[chunk*TS + blockIdx];
-        zeroSubCacheUp[0][col] = zeroPointUp[chunk*TS + blockIdx];
+        if (upHalf == 1u) {
+            scaleSubCache[0][col] = scaleUp[chunk*TS + blockIdx];
+            zeroSubCache[0][col] = zeroPointUp[chunk*TS + blockIdx];
+        } else {
+            scaleSubCache[0][col] = scaleGate[chunk*TS + blockIdx];
+            zeroSubCache[0][col] = zeroPointGate[chunk*TS + blockIdx];
+        }
     }
 
     barrier();
     uint blockCount = 0;
-    float gateResult = 0.0;
-    float upResult = 0.0;
+    float result = 0.0;
 
     for (uint t = chunk; t < numTiles; t += 4u) {
         uint cur = blockCount & 1, nxt = (blockCount+1) & 1;
         uint nextTile = t + 4u;
         if (nextTile < numTiles) {
-            scaleSubCacheGate[nxt][col] = scaleGate[nextTile*TS + blockIdx];
-            zeroSubCacheGate[nxt][col] = zeroPointGate[nextTile*TS + blockIdx];
-            scaleSubCacheUp[nxt][col] = scaleUp[nextTile*TS + blockIdx];
-            zeroSubCacheUp[nxt][col] = zeroPointUp[nextTile*TS + blockIdx];
+            if (upHalf == 1u) {
+                scaleSubCache[nxt][col] = scaleUp[nextTile*TS + blockIdx];
+                zeroSubCache[nxt][col] = zeroPointUp[nextTile*TS + blockIdx];
+            } else {
+                scaleSubCache[nxt][col] = scaleGate[nextTile*TS + blockIdx];
+                zeroSubCache[nxt][col] = zeroPointGate[nextTile*TS + blockIdx];
+            }
         }
         blockCount++;
 
@@ -110,41 +116,17 @@ void main() {
             vec4 tempA6 = cache[xOff + k+6] * inv_rms;
             vec4 tempA7 = cache[xOff + k+7] * inv_rms;
 
-            uvec4 rawInput = gate[baseRow + globalCol];
-            vec4 w0 = unpackInt4x4(rawInput.x, lowShifts) * scaleSubCacheGate[cur][k] - zeroSubCacheGate[cur][k];
-            vec4 w1 = unpackInt4x4(rawInput.x, highShifts) * scaleSubCacheGate[cur][k+1] - zeroSubCacheGate[cur][k+1];
-            vec4 w2 = unpackInt4x4(rawInput.y, lowShifts) * scaleSubCacheGate[cur][k+2] - zeroSubCacheGate[cur][k+2];
-            vec4 w3 = unpackInt4x4(rawInput.y, highShifts) * scaleSubCacheGate[cur][k+3] - zeroSubCacheGate[cur][k+3];
-            vec4 w4 = unpackInt4x4(rawInput.z, lowShifts) * scaleSubCacheGate[cur][k+4] - zeroSubCacheGate[cur][k+4];
-            vec4 w5 = unpackInt4x4(rawInput.z, highShifts) * scaleSubCacheGate[cur][k+5] - zeroSubCacheGate[cur][k+5];
-            vec4 w6 = unpackInt4x4(rawInput.w, lowShifts) * scaleSubCacheGate[cur][k+6] - zeroSubCacheGate[cur][k+6];
-            vec4 w7 = unpackInt4x4(rawInput.w, highShifts) * scaleSubCacheGate[cur][k+7] - zeroSubCacheGate[cur][k+7];
-            gateResult += dot(tempA0, w0);
-            gateResult += dot(tempA1, w1);
-            gateResult += dot(tempA2, w2);
-            gateResult += dot(tempA3, w3);
-            gateResult += dot(tempA4, w4);
-            gateResult += dot(tempA5, w5);
-            gateResult += dot(tempA6, w6);
-            gateResult += dot(tempA7, w7);
-
-            rawInput = up[baseRow + globalCol];
-            w0 = unpackInt4x4(rawInput.x, lowShifts) * scaleSubCacheUp[cur][k] - zeroSubCacheUp[cur][k];
-            w1 = unpackInt4x4(rawInput.x, highShifts) * scaleSubCacheUp[cur][k+1] - zeroSubCacheUp[cur][k+1];
-            w2 = unpackInt4x4(rawInput.y, lowShifts) * scaleSubCacheUp[cur][k+2] - zeroSubCacheUp[cur][k+2];
-            w3 = unpackInt4x4(rawInput.y, highShifts) * scaleSubCacheUp[cur][k+3] - zeroSubCacheUp[cur][k+3];
-            w4 = unpackInt4x4(rawInput.z, lowShifts) * scaleSubCacheUp[cur][k+4] - zeroSubCacheUp[cur][k+4];
-            w5 = unpackInt4x4(rawInput.z, highShifts) * scaleSubCacheUp[cur][k+5] - zeroSubCacheUp[cur][k+5];
-            w6 = unpackInt4x4(rawInput.w, lowShifts) * scaleSubCacheUp[cur][k+6] - zeroSubCacheUp[cur][k+6];
-            w7 = unpackInt4x4(rawInput.w, highShifts) * scaleSubCacheUp[cur][k+7] - zeroSubCacheUp[cur][k+7];
-            upResult += dot(tempA0, w0);
-            upResult += dot(tempA1, w1);
-            upResult += dot(tempA2, w2);
-            upResult += dot(tempA3, w3);
-            upResult += dot(tempA4, w4);
-            upResult += dot(tempA5, w5);
-            upResult += dot(tempA6, w6);
-            upResult += dot(tempA7, w7);
+            uvec4 rawInput;
+            if (upHalf == 1u) rawInput = up[baseRow + globalCol];
+            else rawInput = gate[baseRow + globalCol];
+            result += dot(tempA0, unpackInt4x4(rawInput.x, lowShifts) * scaleSubCache[cur][k] - zeroSubCache[cur][k]);
+            result += dot(tempA1, unpackInt4x4(rawInput.x, highShifts) * scaleSubCache[cur][k+1] - zeroSubCache[cur][k+1]);
+            result += dot(tempA2, unpackInt4x4(rawInput.y, lowShifts) * scaleSubCache[cur][k+2] - zeroSubCache[cur][k+2]);
+            result += dot(tempA3, unpackInt4x4(rawInput.y, highShifts) * scaleSubCache[cur][k+3] - zeroSubCache[cur][k+3]);
+            result += dot(tempA4, unpackInt4x4(rawInput.z, lowShifts) * scaleSubCache[cur][k+4] - zeroSubCache[cur][k+4]);
+            result += dot(tempA5, unpackInt4x4(rawInput.z, highShifts) * scaleSubCache[cur][k+5] - zeroSubCache[cur][k+5]);
+            result += dot(tempA6, unpackInt4x4(rawInput.w, lowShifts) * scaleSubCache[cur][k+6] - zeroSubCache[cur][k+6]);
+            result += dot(tempA7, unpackInt4x4(rawInput.w, highShifts) * scaleSubCache[cur][k+7] - zeroSubCache[cur][k+7]);
 
             baseRow += dims.N;
         }
@@ -152,6 +134,5 @@ void main() {
         barrier();
     }
 
-    PgPu[chunk * dims.N + globalCol] = gateResult;
-    PgPu[(4u + chunk) * dims.N + globalCol] = upResult;
+    PgPu[(upHalf * 4u + chunk) * dims.N + globalCol] = result;
 }

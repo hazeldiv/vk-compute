@@ -1,0 +1,46 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define HEADS 16
+#define HEAD_DIM 256
+#define TILE 64
+#define LOOPS 16
+#define NEG_INF -1e30
+#define ACC_BASE (MAXC * HEADS * 2)
+#define MAXC 32
+
+layout(set = 0, binding = 0) readonly buffer PartialBuffer { float P[]; };
+layout(set = 0, binding = 1) writeonly buffer OutBuffer { float y[]; };
+layout(set = 0, binding = 2) readonly buffer PositionBuffer { uint position[]; };
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    uint h = g / HEAD_DIM;
+    uint d = g % HEAD_DIM;
+    if (h >= HEADS) return;
+
+    uint context = position[0] + 1u;
+    uint num_tiles = (context + TILE - 1u) / TILE;
+    uint num_chunks = (num_tiles + LOOPS - 1u) / LOOPS;
+    if (num_chunks > MAXC) num_chunks = MAXC;
+
+    float m = NEG_INF;
+    for (uint c = 0; c < num_chunks; c++) {
+        m = max(m, P[(c * HEADS + h) * 2]);
+    }
+    if (m <= NEG_INF * 0.5) {
+        y[g] = 0.0;
+        return;
+    }
+
+    float l = 0.0;
+    float acc = 0.0;
+    for (uint c = 0; c < num_chunks; c++) {
+        uint ml = c * HEADS + h;
+        float w = exp(P[ml * 2] - m);
+        l += w * P[ml * 2 + 1];
+        acc += w * P[ACC_BASE + ml * HEAD_DIM + d];
+    }
+    y[g] = (l > 0.0) ? (acc / l) : 0.0;
+}
