@@ -1,6 +1,8 @@
 #version 450
 #define TS 256
 #define vec 4
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
@@ -17,15 +19,21 @@ layout(set = 0, binding = 2) writeonly restrict buffer PartialOutBuffer { float 
 layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 
-shared vec4 aSub[2][TS];
-shared vec4 scaleSub[2][TS];
-shared vec4 zeroSub[2][TS];
+shared vec4 asSub[2][TS];
+shared float sub_sums[TS / 64];
 
-const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
-const uvec4 highShifts = uvec4(16, 20, 24, 28);
+vec4 unpackInt4x4(uint packedComponent) {
+    return vec4(uvec4(bitfieldExtract(packedComponent, 0, 4),
+                      bitfieldExtract(packedComponent, 4, 4),
+                      bitfieldExtract(packedComponent, 8, 4),
+                      bitfieldExtract(packedComponent, 12, 4)));
+}
 
-vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
-    return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+vec4 unpackInt4x4High(uint packedComponent) {
+    return vec4(uvec4(bitfieldExtract(packedComponent, 16, 4),
+                      bitfieldExtract(packedComponent, 20, 4),
+                      bitfieldExtract(packedComponent, 24, 4),
+                      bitfieldExtract(packedComponent, 28, 4)));
 }
 
 vec4 loadAct(uint idx) {
@@ -45,51 +53,58 @@ void main() {
     if (globalCol >= dims.N) return;
     uint scaleIdx = gl_WorkGroupID.x * dims.K / vec + col;
 
+    float ztot = 0.0;
     float acc = 0.0;
     uint numTiles = (dims.K + TS - 1) / TS / vec;
-    if (globalCol < dims.N && chunk < numTiles) {
-        aSub[0][col] = loadAct(chunk*TS + col);
-        scaleSub[0][col] = scale[chunk*TS + scaleIdx];
-        zeroSub[0][col] = zeroPoint[chunk*TS + scaleIdx];
+    if (chunk < numTiles) {
+        vec4 act = loadAct(chunk*TS + col);
+        asSub[0][col] = act * scale[chunk*TS + scaleIdx];
+        float zp = subgroupAdd(dot(act * zeroPoint[chunk*TS + scaleIdx], vec4(1.0)));
+        if (subgroupElect()) {
+            sub_sums[gl_SubgroupID] = zp;
+        }
     }
 
     barrier();
+    if (chunk < numTiles) {
+        ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+    }
+
     uint it = 0;
     for (uint t = chunk; t < numTiles; t += 4u) {
         uint cur = it & 1, nxt = (it+1) & 1;
         uint nextTile = t + 4u;
         if (nextTile < numTiles) {
-            aSub[nxt][col] = loadAct(nextTile*TS + col);
-            scaleSub[nxt][col] = scale[nextTile*TS + scaleIdx];
-            zeroSub[nxt][col] = zeroPoint[nextTile*TS + scaleIdx];
+            vec4 act = loadAct(nextTile*TS + col);
+            asSub[nxt][col] = act * scale[nextTile*TS + scaleIdx];
+            float zp = subgroupAdd(dot(act * zeroPoint[nextTile*TS + scaleIdx], vec4(1.0)));
+            if (subgroupElect()) {
+                sub_sums[gl_SubgroupID] = zp;
+            }
+        }
+        barrier();
+        if (nextTile < numTiles) {
+            ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
         }
 
         uint baseRow = t * (TS / 8) * dims.N;
         #pragma unroll
         for (uint k=0;k<TS; k+=8) {
             uvec4 rawInput = B[baseRow + globalCol];
-            vec4 w0 = unpackInt4x4(rawInput.x, lowShifts) * scaleSub[cur][k] - zeroSub[cur][k];
-            vec4 w1 = unpackInt4x4(rawInput.x, highShifts) * scaleSub[cur][k+1] - zeroSub[cur][k+1];
-            vec4 w2 = unpackInt4x4(rawInput.y, lowShifts) * scaleSub[cur][k+2] - zeroSub[cur][k+2];
-            vec4 w3 = unpackInt4x4(rawInput.y, highShifts) * scaleSub[cur][k+3] - zeroSub[cur][k+3];
-            vec4 w4 = unpackInt4x4(rawInput.z, lowShifts) * scaleSub[cur][k+4] - zeroSub[cur][k+4];
-            vec4 w5 = unpackInt4x4(rawInput.z, highShifts) * scaleSub[cur][k+5] - zeroSub[cur][k+5];
-            vec4 w6 = unpackInt4x4(rawInput.w, lowShifts) * scaleSub[cur][k+6] - zeroSub[cur][k+6];
-            vec4 w7 = unpackInt4x4(rawInput.w, highShifts) * scaleSub[cur][k+7] - zeroSub[cur][k+7];
+            acc += dot(asSub[cur][k], unpackInt4x4(rawInput.x));
+            acc += dot(asSub[cur][k+1], unpackInt4x4High(rawInput.x));
+            acc += dot(asSub[cur][k+2], unpackInt4x4(rawInput.y));
+            acc += dot(asSub[cur][k+3], unpackInt4x4High(rawInput.y));
+            acc += dot(asSub[cur][k+4], unpackInt4x4(rawInput.z));
+            acc += dot(asSub[cur][k+5], unpackInt4x4High(rawInput.z));
+            acc += dot(asSub[cur][k+6], unpackInt4x4(rawInput.w));
+            acc += dot(asSub[cur][k+7], unpackInt4x4High(rawInput.w));
 
-            acc += dot(aSub[cur][k], w0);
-            acc += dot(aSub[cur][k+1], w1);
-            acc += dot(aSub[cur][k+2], w2);
-            acc += dot(aSub[cur][k+3], w3);
-            acc += dot(aSub[cur][k+4], w4);
-            acc += dot(aSub[cur][k+5], w5);
-            acc += dot(aSub[cur][k+6], w6);
-            acc += dot(aSub[cur][k+7], w7);
             baseRow += dims.N;
         }
 
         barrier();
         it++;
     }
-    P[chunk * dims.N + globalCol] = acc;
+    P[chunk * dims.N + globalCol] = acc - ztot;
 }

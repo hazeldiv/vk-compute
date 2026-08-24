@@ -29,15 +29,21 @@ layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 zeroPointUp
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared vec4 scaleSubCache[2][TS];
-shared vec4 zeroSubCache[2][TS];
+shared vec4 xsCache[2][TS];
 shared float sub_sums[TS / 64];
 
-const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
-const uvec4 highShifts = uvec4(16, 20, 24, 28);
+vec4 unpackInt4x4(uint packedComponent) {
+    return vec4(uvec4(bitfieldExtract(packedComponent, 0, 4),
+                      bitfieldExtract(packedComponent, 4, 4),
+                      bitfieldExtract(packedComponent, 8, 4),
+                      bitfieldExtract(packedComponent, 12, 4)));
+}
 
-vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
-    return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+vec4 unpackInt4x4High(uint packedComponent) {
+    return vec4(uvec4(bitfieldExtract(packedComponent, 16, 4),
+                      bitfieldExtract(packedComponent, 20, 4),
+                      bitfieldExtract(packedComponent, 24, 4),
+                      bitfieldExtract(packedComponent, 28, 4)));
 }
 
 void main() {
@@ -72,20 +78,32 @@ void main() {
         shared_sum = final_sum;
     }
     barrier();
-    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
-    float inv_rms = 1.0 / rms;
+    float inv_rms = 1.0 / sqrt((shared_sum / float(d_model)) + EPSILON);
 
+    float ztot = 0.0;
     if (chunk < numTiles) {
+        vec4 sc;
+        vec4 zc;
         if (upHalf == 1u) {
-            scaleSubCache[0][col] = scaleUp[chunk*TS + blockIdx];
-            zeroSubCache[0][col] = zeroPointUp[chunk*TS + blockIdx];
+            sc = scaleUp[chunk*TS + blockIdx];
+            zc = zeroPointUp[chunk*TS + blockIdx];
         } else {
-            scaleSubCache[0][col] = scaleGate[chunk*TS + blockIdx];
-            zeroSubCache[0][col] = zeroPointGate[chunk*TS + blockIdx];
+            sc = scaleGate[chunk*TS + blockIdx];
+            zc = zeroPointGate[chunk*TS + blockIdx];
+        }
+        vec4 xa = cache[chunk*TS + col] * inv_rms;
+        xsCache[0][col] = xa * sc;
+        float zp = subgroupAdd(dot(xa * zc, vec4(1.0)));
+        if (subgroupElect()) {
+            sub_sums[gl_SubgroupID] = zp;
         }
     }
 
     barrier();
+    if (chunk < numTiles) {
+        ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+    }
+
     uint blockCount = 0;
     float result = 0.0;
 
@@ -93,40 +111,42 @@ void main() {
         uint cur = blockCount & 1, nxt = (blockCount+1) & 1;
         uint nextTile = t + 4u;
         if (nextTile < numTiles) {
+            vec4 sc;
+            vec4 zc;
             if (upHalf == 1u) {
-                scaleSubCache[nxt][col] = scaleUp[nextTile*TS + blockIdx];
-                zeroSubCache[nxt][col] = zeroPointUp[nextTile*TS + blockIdx];
+                sc = scaleUp[nextTile*TS + blockIdx];
+                zc = zeroPointUp[nextTile*TS + blockIdx];
             } else {
-                scaleSubCache[nxt][col] = scaleGate[nextTile*TS + blockIdx];
-                zeroSubCache[nxt][col] = zeroPointGate[nextTile*TS + blockIdx];
+                sc = scaleGate[nextTile*TS + blockIdx];
+                zc = zeroPointGate[nextTile*TS + blockIdx];
             }
+            vec4 xa = cache[nextTile*TS + col] * inv_rms;
+            xsCache[nxt][col] = xa * sc;
+            float zp = subgroupAdd(dot(xa * zc, vec4(1.0)));
+            if (subgroupElect()) {
+                sub_sums[gl_SubgroupID] = zp;
+            }
+        }
+        barrier();
+        if (nextTile < numTiles) {
+            ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
         }
         blockCount++;
 
         uint baseRow = t * (TS / 8) * dims.N;
-        uint xOff = t * TS;
         #pragma unroll
         for (uint k=0;k<TS; k+=8) {
-            vec4 tempA0 = cache[xOff + k] * inv_rms;
-            vec4 tempA1 = cache[xOff + k+1] * inv_rms;
-            vec4 tempA2 = cache[xOff + k+2] * inv_rms;
-            vec4 tempA3 = cache[xOff + k+3] * inv_rms;
-            vec4 tempA4 = cache[xOff + k+4] * inv_rms;
-            vec4 tempA5 = cache[xOff + k+5] * inv_rms;
-            vec4 tempA6 = cache[xOff + k+6] * inv_rms;
-            vec4 tempA7 = cache[xOff + k+7] * inv_rms;
-
             uvec4 rawInput;
             if (upHalf == 1u) rawInput = up[baseRow + globalCol];
             else rawInput = gate[baseRow + globalCol];
-            result += dot(tempA0, unpackInt4x4(rawInput.x, lowShifts) * scaleSubCache[cur][k] - zeroSubCache[cur][k]);
-            result += dot(tempA1, unpackInt4x4(rawInput.x, highShifts) * scaleSubCache[cur][k+1] - zeroSubCache[cur][k+1]);
-            result += dot(tempA2, unpackInt4x4(rawInput.y, lowShifts) * scaleSubCache[cur][k+2] - zeroSubCache[cur][k+2]);
-            result += dot(tempA3, unpackInt4x4(rawInput.y, highShifts) * scaleSubCache[cur][k+3] - zeroSubCache[cur][k+3]);
-            result += dot(tempA4, unpackInt4x4(rawInput.z, lowShifts) * scaleSubCache[cur][k+4] - zeroSubCache[cur][k+4]);
-            result += dot(tempA5, unpackInt4x4(rawInput.z, highShifts) * scaleSubCache[cur][k+5] - zeroSubCache[cur][k+5]);
-            result += dot(tempA6, unpackInt4x4(rawInput.w, lowShifts) * scaleSubCache[cur][k+6] - zeroSubCache[cur][k+6]);
-            result += dot(tempA7, unpackInt4x4(rawInput.w, highShifts) * scaleSubCache[cur][k+7] - zeroSubCache[cur][k+7]);
+            result += dot(xsCache[cur][k], unpackInt4x4(rawInput.x));
+            result += dot(xsCache[cur][k+1], unpackInt4x4High(rawInput.x));
+            result += dot(xsCache[cur][k+2], unpackInt4x4(rawInput.y));
+            result += dot(xsCache[cur][k+3], unpackInt4x4High(rawInput.y));
+            result += dot(xsCache[cur][k+4], unpackInt4x4(rawInput.z));
+            result += dot(xsCache[cur][k+5], unpackInt4x4High(rawInput.z));
+            result += dot(xsCache[cur][k+6], unpackInt4x4(rawInput.w));
+            result += dot(xsCache[cur][k+7], unpackInt4x4High(rawInput.w));
 
             baseRow += dims.N;
         }
@@ -134,5 +154,5 @@ void main() {
         barrier();
     }
 
-    PgPu[(upHalf * 4u + chunk) * dims.N + globalCol] = result;
+    PgPu[(upHalf * 4u + chunk) * dims.N + globalCol] = result - ztot;
 }
