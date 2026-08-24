@@ -5,14 +5,17 @@
 #include "device.h"
 #include "buffer.h"
 
-#define TIMESTAMP_QUERY_COUNT 1024
+#define TIMESTAMP_QUERY_COUNT 2048
+#define FRAME_COUNT 3
 
 typedef struct session {
     device dev;
     VkCommandPool pool;
-    VkCommandBuffer buffer;
-    VkFence fence;
+    VkCommandBuffer buffer[FRAME_COUNT];
+    VkFence fence[FRAME_COUNT];
     VkQueryPool qpool;
+    uint32_t frame;
+    int lastSubmitted;
 } session;
 
 session createSession();

@@ -25,7 +25,7 @@ typedef struct generator {
 generator* createGenerator(session s, const model_config* spec, int maxM);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
-uint32_t runDecode(generator* g, uint32_t token);
+uint32_t runDecode(generator* g);
 void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens);
 
 #endif

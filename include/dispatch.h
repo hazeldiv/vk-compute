@@ -25,6 +25,10 @@ typedef struct operation {
 
 void execute(session s, operation ops[], int opCount);
 void executeLogged(session s, operation ops[], int opCount, const char* phase, int token);
+void executeRecord(session* s, operation ops[], int opCount);
+void executeSubmitNow(session* s);
+void executeWaitLast(session* s);
+void logLastFrame(session* s, operation ops[], int opCount, const char* phase, int token);
 void setTimingEnabled(int enabled);
 void closeTimingLog(void);
 double getExecutionTime(session s);

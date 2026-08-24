@@ -410,17 +410,19 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     return result;
 }
 
-uint32_t runDecode(generator* g, uint32_t token) {
+uint32_t runDecode(generator* g) {
     model_state* st = &g->st;
 
-    ((uint32_t*)st->tokenIds.mappedMemory)[0] = token;
-
-    executeLogged(g->s, g->decodeOps, g->decodeOpCount, "decode", (int)g->nextPos);
-
-    g->nextPos++;
+    executeRecord(&g->s, g->decodeOps, g->decodeOpCount);
+    executeWaitLast(&g->s);
+    logLastFrame(&g->s, g->decodeOps, g->decodeOpCount, "decode", (int)g->nextPos);
 
     uint32_t result = 0;
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, &result);
+    ((uint32_t*)st->tokenIds.mappedMemory)[0] = result;
+
+    executeSubmitNow(&g->s);
+    g->nextPos++;
     return result;
 }
 
@@ -430,9 +432,14 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
     uint64_t prefillMs = GetTickCount64() - tPrefill;
     double prefillSpeed = prefillMs > 0 ? (double)(nPrompt * 1000) / prefillMs : 0.0;
     printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", 0, token, stateReadPosition(g->s, &g->st), prefillSpeed);
+
+    ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = token;
+    executeRecord(&g->s, g->decodeOps, g->decodeOpCount);
+    executeSubmitNow(&g->s);
+
     uint64_t t0 = GetTickCount64();
     for (int i = 1; i < maxNewTokens; i++) {
-        token = runDecode(g, token);
+        token = runDecode(g);
         uint64_t ms = GetTickCount64() - t0;
         double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
         printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, token, stateReadPosition(g->s, &g->st), speed);

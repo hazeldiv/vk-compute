@@ -6,9 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PIPE_CACHE_MAX 512
+#define PIPE_CACHE_MAX 4096
 #define DESC_CACHE_MAX 1024
 #define TIMING_AGG_MAX 128
+#define QUERIES_PER_FRAME (TIMESTAMP_QUERY_COUNT / FRAME_COUNT)
 
 typedef struct pipe_entry {
     char shader[128];
@@ -124,7 +125,10 @@ static pipe_entry* getPipeEntry(session s, const operation* op) {
             return &pipeCache[i];
         }
     }
-    if (pipeCacheCount >= PIPE_CACHE_MAX) return NULL;
+    if (pipeCacheCount >= PIPE_CACHE_MAX) {
+        fprintf(stderr, "Error: pipeline cache overflow\n");
+        exit(EXIT_FAILURE);
+    }
 
     pipe_entry* e = &pipeCache[pipeCacheCount++];
     snprintf(e->shader, sizeof(e->shader), "%s", op->shader);
@@ -181,10 +185,11 @@ static double getTimestampPeriod(VkPhysicalDevice physicalDevice) {
     return cached;
 }
 
-static void logOpTimes(session s, operation ops[], int opCount, const char* phase, int token) {
+static void logFrame(session s, uint32_t slot, operation ops[], int opCount, const char* phase, int token) {
+    uint32_t qBase = slot * QUERIES_PER_FRAME;
     uint64_t stamps[2 + 2 * opCount];
     int queryCount = 2 + 2 * opCount;
-    vkGetQueryPoolResults(s.dev.device, s.qpool, 0, queryCount,
+    vkGetQueryPoolResults(s.dev.device, s.qpool, qBase, queryCount,
                           queryCount * sizeof(uint64_t), stamps,
                           sizeof(uint64_t), VK_QUERY_RESULT_WAIT_BIT);
 
@@ -229,61 +234,33 @@ void closeTimingLog(void) {
     grandTotalMs = 0.0;
 }
 
-static void runOps(session s, operation ops[], int opCount, const char* phase, int token) {
-    vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
-    vkResetFences(s.dev.device, 1, &s.fence);
-    vkResetCommandBuffer(s.buffer, 0);
+static void recordFrame(session* s, operation ops[], int opCount) {
+    uint32_t slot = s->frame;
+    uint32_t qBase = slot * QUERIES_PER_FRAME;
+    VkCommandBuffer cb = s->buffer[slot];
+
+    vkWaitForFences(s->dev.device, 1, &s->fence[slot], VK_TRUE, UINT64_MAX);
+    vkResetFences(s->dev.device, 1, &s->fence[slot]);
+    vkResetCommandBuffer(cb, 0);
 
     VkCommandBufferBeginInfo beginInfo = {0};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(s.buffer, &beginInfo);
+    vkBeginCommandBuffer(cb, &beginInfo);
 
-    vkCmdResetQueryPool(s.buffer, s.qpool, 0, TIMESTAMP_QUERY_COUNT);
-    vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 0);
-
-    descriptor transient[opCount];
-    pipeline freshPipes[opCount];
-    VkDescriptorSetLayout freshLayouts[opCount];
-    int freshCount = 0;
-    int transientCount = 0;
+    vkCmdResetQueryPool(cb, s->qpool, qBase, QUERIES_PER_FRAME);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase);
 
     for (int i = 0; i < opCount; i++) {
         operation* op = &ops[i];
+        pipe_entry* entry = getPipeEntry(*s, op);
+        VkDescriptorSet set = getDescriptorSet(*s, entry->setLayout, op);
 
-        pipe_entry* entry = getPipeEntry(s, op);
-        VkPipelineLayout layout;
-        VkPipeline pipe;
-        VkDescriptorSetLayout setLayout;
-        if (entry != NULL) {
-            layout = entry->layout;
-            pipe = entry->pipeline;
-            setLayout = entry->setLayout;
-        } else {
-            setLayout = createDescriptorSetLayout(s.dev.device, op->bufferCount);
-            char shaderPath[160];
-            snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
-            freshPipes[freshCount] = createPipeline(s.dev.device, setLayout, shaderPath, sizeof(int) * op->pushConstantCount);
-            freshLayouts[freshCount] = setLayout;
-            layout = freshPipes[freshCount].layout;
-            pipe = freshPipes[freshCount].pipeline;
-            freshCount++;
-        }
-
-        VkDescriptorSet set;
-        if (entry != NULL) {
-            set = getDescriptorSet(s, setLayout, op);
-        } else {
-            descriptor d = createDescriptorSetFromLayout(s.dev.device, setLayout, op->bufferCount, op->buffers);
-            transient[transientCount++] = d;
-            set = d.set;
-        }
-
-        vkCmdBindPipeline(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-        vkCmdBindDescriptorSets(s.buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &set, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, entry->pipeline);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, entry->layout, 0, 1, &set, 0, NULL);
 
         if (op->pushConstantCount > 0) {
-            vkCmdPushConstants(s.buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+            vkCmdPushConstants(cb, entry->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(int) * op->pushConstantCount, op->pushConstants);
         }
         if (i > 0) {
@@ -292,46 +269,65 @@ static void runOps(session s, operation ops[], int opCount, const char* phase, i
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
                 .dstAccessMask = VK_ACCESS_SHADER_READ_BIT
             };
-            vkCmdPipelineBarrier(s.buffer,
+            vkCmdPipelineBarrier(cb,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0, 1, &barrier, 0, NULL, 0, NULL);
         }
-        vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 2 + 2 * i);
-        vkCmdDispatch(s.buffer, (uint32_t)op->dispatchX, (uint32_t)op->dispatchY, (uint32_t)op->dispatchZ);
-        vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 3 + 2 * i);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 2 + 2 * i);
+        vkCmdDispatch(cb, (uint32_t)op->dispatchX, (uint32_t)op->dispatchY, (uint32_t)op->dispatchZ);
+        vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 3 + 2 * i);
     }
 
-    vkCmdWriteTimestamp(s.buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s.qpool, 1);
-    vkEndCommandBuffer(s.buffer);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, s->qpool, qBase + 1);
+    vkEndCommandBuffer(cb);
+}
 
+static void submitFrame(session* s) {
+    uint32_t slot = s->frame;
     VkSubmitInfo submitInfo = {0};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &s.buffer;
+    submitInfo.pCommandBuffers = &s->buffer[slot];
+    vkQueueSubmit(s->dev.queue, 1, &submitInfo, s->fence[slot]);
+    s->lastSubmitted = (int)slot;
+    s->frame = (slot + 1) % FRAME_COUNT;
+}
 
-    vkQueueSubmit(s.dev.queue, 1, &submitInfo, s.fence);
-    vkWaitForFences(s.dev.device, 1, &s.fence, VK_TRUE, UINT64_MAX);
+static void waitLast(session* s) {
+    if (s->lastSubmitted < 0) return;
+    vkWaitForFences(s->dev.device, 1, &s->fence[s->lastSubmitted], VK_TRUE, UINT64_MAX);
+}
 
-    for (int i = 0; i < transientCount; i++) {
-        destroyDescriptorSet(s.dev.device, transient[i]);
-    }
-    for (int i = 0; i < freshCount; i++) {
-        destroyPipeline(s.dev.device, freshPipes[i]);
-        vkDestroyDescriptorSetLayout(s.dev.device, freshLayouts[i], NULL);
-    }
+void executeRecord(session* s, operation ops[], int opCount) {
+    recordFrame(s, ops, opCount);
+}
 
-    if (phase != NULL) {
-        logOpTimes(s, ops, opCount, phase, token);
-    }
+void executeSubmitNow(session* s) {
+    submitFrame(s);
+}
+
+void executeWaitLast(session* s) {
+    waitLast(s);
+}
+
+void logLastFrame(session* s, operation ops[], int opCount, const char* phase, int token) {
+    if (!timingEnabled || s->lastSubmitted < 0) return;
+    logFrame(*s, (uint32_t)s->lastSubmitted, ops, opCount, phase, token);
 }
 
 void execute(session s, operation ops[], int opCount) {
-    runOps(s, ops, opCount, NULL, 0);
+    s.frame = 0;
+    recordFrame(&s, ops, opCount);
+    submitFrame(&s);
+    waitLast(&s);
 }
 
 void executeLogged(session s, operation ops[], int opCount, const char* phase, int token) {
-    runOps(s, ops, opCount, timingEnabled ? phase : NULL, token);
+    execute(s, ops, opCount);
+    if (timingEnabled && phase != NULL) {
+        logFrame(s, 0, ops, opCount, phase, token);
+    }
 }
 
 double getExecutionTime(session s) {

@@ -22,10 +22,10 @@ session createSession() {
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = s.pool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
+    allocInfo.commandBufferCount = FRAME_COUNT;
 
-    if (vkAllocateCommandBuffers(s.dev.device, &allocInfo, &s.buffer) != VK_SUCCESS) {
-        fprintf(stderr, "Error: Failed to allocate command buffer\n");
+    if (vkAllocateCommandBuffers(s.dev.device, &allocInfo, s.buffer) != VK_SUCCESS) {
+        fprintf(stderr, "Error: Failed to allocate command buffers\n");
         exit(EXIT_FAILURE);
     }
 
@@ -39,20 +39,26 @@ session createSession() {
         exit(EXIT_FAILURE);
     }
 
-    VkFenceCreateInfo fenceInfo = {0};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-    if (vkCreateFence(s.dev.device, &fenceInfo, NULL, &s.fence) != VK_SUCCESS) {
-        fprintf(stderr, "Error: Failed to create fence\n");
-        exit(EXIT_FAILURE);
+    for (int i = 0; i < FRAME_COUNT; i++) {
+        VkFenceCreateInfo fenceInfo = {0};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (vkCreateFence(s.dev.device, &fenceInfo, NULL, &s.fence[i]) != VK_SUCCESS) {
+            fprintf(stderr, "Error: Failed to create fence\n");
+            exit(EXIT_FAILURE);
+        }
     }
+
+    s.frame = 0;
+    s.lastSubmitted = -1;
 
     return s;
 }
 
 void destroySession(session s) {
-    vkDestroyFence(s.dev.device, s.fence, NULL);
+    for (int i = 0; i < FRAME_COUNT; i++) {
+        vkDestroyFence(s.dev.device, s.fence[i], NULL);
+    }
     vkDestroyQueryPool(s.dev.device, s.qpool, NULL);
     vkDestroyCommandPool(s.dev.device, s.pool, NULL);
     destroyDevice(s.dev);
