@@ -1,7 +1,7 @@
 #version 450
 #extension GL_KHR_shader_subgroup_arithmetic : enable
 #extension GL_KHR_shader_subgroup_basic : enable
-#define TS 128
+#define TS 256
 #define HEAD_DIM 128
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
@@ -24,14 +24,18 @@ layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
 shared vec4 k4[HEAD_DIM / 4];
 shared vec4 q4[HEAD_DIM / 4];
 shared float wave_kq[TS / 64];
+shared float pairV[TS];
+shared float pairY[TS];
 
 void main() {
     uint i = gl_LocalInvocationID.x;
     uint h = gl_WorkGroupID.x;
     uint qk = h >> 1;
+    uint r = i >> 1;
+    uint hlf = i & 1u;
 
-    float vv = V[h * HEAD_DIM + i];
-    float gv = G[h * HEAD_DIM + i];
+    float vv = V[h * HEAD_DIM + r];
+    float gv = G[h * HEAD_DIM + r];
     float a_raw = aRaw[qk];
     float b_raw = bRaw[qk];
 
@@ -45,8 +49,9 @@ void main() {
     float alpha = exp(-log(1.0 + exp(a_raw)));
     float beta = 1.0 / (1.0 + exp(-b_raw));
 
-    uvec2 cc = uvec2(i >> 2, i & 3);
-    float kq_p = k4[cc.x][cc.y] * q4[cc.x][cc.y];
+    uint e = i & 127u;
+    uvec2 cc = uvec2(e >> 2, e & 3u);
+    float kq_p = (i < 128u) ? k4[cc.x][cc.y] * q4[cc.x][cc.y] : 0.0;
     float kq_wave = subgroupAdd(kq_p);
     if (subgroupElect()) {
         wave_kq[gl_SubgroupID] = kq_wave;
@@ -62,28 +67,36 @@ void main() {
     barrier();
     float kq_dot = wave_kq[0];
 
-    uint base4 = h * (HEAD_DIM * HEAD_DIM / 4) + i * (HEAD_DIM / 4);
+    uint base4 = h * (HEAD_DIM * HEAD_DIM / 4) + r * (HEAD_DIM / 4) + hlf * (HEAD_DIM / 8);
     vec4 vhA = vec4(0.0), vhB = vec4(0.0);
     vec4 yA = vec4(0.0), yB = vec4(0.0);
-    for (uint j = 0; j < HEAD_DIM / 4; j += 2) {
+    for (uint j = 0; j < HEAD_DIM / 8; j += 2) {
         vec4 s0 = S[base4 + j];
         vec4 s1 = S[base4 + j + 1];
-        vhA += s0 * k4[j];
-        vhB += s1 * k4[j+1];
-        yA += s0 * q4[j];
-        yB += s1 * q4[j+1];
+        vhA += s0 * k4[hlf * (HEAD_DIM / 8) + j];
+        vhB += s1 * k4[hlf * (HEAD_DIM / 8) + j + 1];
+        yA += s0 * q4[hlf * (HEAD_DIM / 8) + j];
+        yB += s1 * q4[hlf * (HEAD_DIM / 8) + j + 1];
     }
     vec4 vh4 = vhA + vhB;
     vec4 y4 = yA + yB;
-    float vhat = vh4.x + vh4.y + vh4.z + vh4.w;
-    float y0 = y4.x + y4.y + y4.z + y4.w;
+    float vhat_partial = vh4.x + vh4.y + vh4.z + vh4.w;
+    float y0_partial = y4.x + y4.y + y4.z + y4.w;
+    pairV[i] = vhat_partial;
+    pairY[i] = y0_partial;
+    barrier();
+
+    float vhat = vhat_partial + pairV[i ^ 1u];
+    float y0 = y0_partial + pairY[i ^ 1u];
     float delta = vv - vhat;
 
     float bd = beta * delta;
-    for (uint j = 0; j < HEAD_DIM / 4; j++) {
-        S[base4 + j] = alpha * S[base4 + j] + bd * k4[j];
+    for (uint j = 0; j < HEAD_DIM / 8; j++) {
+        S[base4 + j] = alpha * S[base4 + j] + bd * k4[hlf * (HEAD_DIM / 8) + j];
     }
 
     float y = alpha * y0 + beta * delta * kq_dot;
-    yGated[h * HEAD_DIM + i] = y * (gv / (1.0 + exp(-gv)));
+    if (hlf == 0u) {
+        yGated[h * HEAD_DIM + r] = y * (gv / (1.0 + exp(-gv)));
+    }
 }
