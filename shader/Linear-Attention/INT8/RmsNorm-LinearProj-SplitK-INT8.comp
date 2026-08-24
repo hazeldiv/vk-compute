@@ -25,8 +25,7 @@ layout(set = 0, binding = 5) writeonly buffer PartialBuffer { float P[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared vec4 scaleSub[d_model/vec];
-shared vec4 zeroSub[d_model/vec];
+shared vec4 scaleCache[d_model/vec];
 shared float sub_sums[TS / 64];
 
 vec4 unpackUint8x4(uint packedData) {
@@ -38,6 +37,7 @@ void main() {
     uint col = gl_LocalInvocationID.x;
     uint chunk = gl_WorkGroupID.y;
     uint globalCol = gl_WorkGroupID.x*TS + col;
+    uint safeCol = min(globalCol, param.N - 1u);
 
     uint scaleIdx = gl_WorkGroupID.x * param.K / vec;
     float sum_sq = 0.0;
@@ -46,8 +46,7 @@ void main() {
         uint idx = t + col;
         vec4 val = x[idx];
         cache[idx] = val * gamma[idx];
-        scaleSub[idx] = scale[idx + scaleIdx];
-        zeroSub[idx] = zeroPoint[idx + scaleIdx];
+        scaleCache[idx] = scale[idx + scaleIdx];
         sum_sq += dot(val, val);
     }
 
@@ -66,28 +65,32 @@ void main() {
         shared_sum = final_sum;
     }
     barrier();
-    float rms = sqrt((shared_sum / float(d_model)) + EPSILON);
-    float inv_rms = 1.0 / rms;
-
-    if (globalCol >= param.N) return;
+    float inv_rms = 1.0 / sqrt((shared_sum / float(d_model)) + EPSILON);
 
     uint kvStart = chunk * (param.K / vec / 4u);
     uint kvEnd = kvStart + param.K / vec / 4u;
     float acc = 0.0;
     uint baseRow = (kvStart / 4) * param.N;
+
+    scaleCache[kvStart + col] *= cache[kvStart + col] * inv_rms;
+    float zp = subgroupAdd(dot(cache[kvStart + col] * inv_rms * zeroPoint[(kvStart + col) + scaleIdx], vec4(1.0)));
+    if (subgroupElect()) {
+        sub_sums[gl_SubgroupID] = zp;
+    }
+    barrier();
+    float ztot = sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+
     #pragma unroll
     for (uint k=kvStart;k<kvEnd; k+=4) {
-        uvec4 rawInput = w[baseRow + globalCol];
-        vec4 w0 = unpackUint8x4(rawInput.x) * scaleSub[k] - zeroSub[k];
-        vec4 w1 = unpackUint8x4(rawInput.y) * scaleSub[k+1] - zeroSub[k+1];
-        vec4 w2 = unpackUint8x4(rawInput.z) * scaleSub[k+2] - zeroSub[k+2];
-        vec4 w3 = unpackUint8x4(rawInput.w) * scaleSub[k+3] - zeroSub[k+3];
-        acc += dot(cache[k] * inv_rms, w0);
-        acc += dot(cache[k+1] * inv_rms, w1);
-        acc += dot(cache[k+2] * inv_rms, w2);
-        acc += dot(cache[k+3] * inv_rms, w3);
+        uvec4 rawInput = w[baseRow + safeCol];
+        acc += dot(scaleCache[k], unpackUint8x4(rawInput.x));
+        acc += dot(scaleCache[k+1], unpackUint8x4(rawInput.y));
+        acc += dot(scaleCache[k+2], unpackUint8x4(rawInput.z));
+        acc += dot(scaleCache[k+3], unpackUint8x4(rawInput.w));
         baseRow += param.N;
     }
 
-    P[chunk * param.N + globalCol] = acc;
+    if (globalCol < param.N) {
+        P[chunk * param.N + globalCol] = acc - ztot;
+    }
 }
