@@ -16,14 +16,33 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 layout(set = 0, binding = 5) readonly restrict buffer MatrixR { float R[]; };
 
-shared vec4 Asub[4][TS];
-shared vec4 Bsub[4][TN];
+shared vec4 Asub[2][4][TS];
+shared vec4 Bsub[2][4][TN];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
 const uvec4 highShifts = uvec4(16, 20, 24, 28);
 
 vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
     return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+}
+
+void loadTiles(uint t, uint buf, uint tid, uint nBase, uint g) {
+    if (tid < 64) {
+        uint m = tid / 4;
+        uint kv = tid % 4;
+        Asub[buf][kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
+    }
+    if (tid < 64) {
+        uint c = tid;
+        uvec4 raw = B[(t / 2) * dims.N + nBase + c];
+        bool hi = ((t & 1) == 1);
+        uint c0 = hi ? raw.z : raw.x;
+        uint c1 = hi ? raw.w : raw.y;
+        Bsub[buf][0][c] = unpackInt4x4(c0, lowShifts)  * scale[g*(dims.K/vec)+t*4+0] - zeroPoint[g*(dims.K/vec)+t*4+0];
+        Bsub[buf][1][c] = unpackInt4x4(c0, highShifts) * scale[g*(dims.K/vec)+t*4+1] - zeroPoint[g*(dims.K/vec)+t*4+1];
+        Bsub[buf][2][c] = unpackInt4x4(c1, lowShifts)  * scale[g*(dims.K/vec)+t*4+2] - zeroPoint[g*(dims.K/vec)+t*4+2];
+        Bsub[buf][3][c] = unpackInt4x4(c1, highShifts) * scale[g*(dims.K/vec)+t*4+3] - zeroPoint[g*(dims.K/vec)+t*4+3];
+    }
 }
 
 void main() {
@@ -39,31 +58,19 @@ void main() {
     float acc2 = 0.0;
     float acc3 = 0.0;
 
-    for (uint t = 0; t < dims.K / TS; t++) {
-        if (tid < 64) {
-            uint m = tid / 4;
-            uint kv = tid % 4;
-            Asub[kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
-        }
-        if (tid < 64) {
-            uint c = tid;
-            uvec4 raw = B[(t / 2) * dims.N + nBase + c];
-            bool hi = ((t & 1) == 1);
-            uint c0 = hi ? raw.z : raw.x;
-            uint c1 = hi ? raw.w : raw.y;
-            Bsub[0][c] = unpackInt4x4(c0, lowShifts)  * scale[g*(dims.K/vec)+t*4+0] - zeroPoint[g*(dims.K/vec)+t*4+0];
-            Bsub[1][c] = unpackInt4x4(c0, highShifts) * scale[g*(dims.K/vec)+t*4+1] - zeroPoint[g*(dims.K/vec)+t*4+1];
-            Bsub[2][c] = unpackInt4x4(c1, lowShifts)  * scale[g*(dims.K/vec)+t*4+2] - zeroPoint[g*(dims.K/vec)+t*4+2];
-            Bsub[3][c] = unpackInt4x4(c1, highShifts) * scale[g*(dims.K/vec)+t*4+3] - zeroPoint[g*(dims.K/vec)+t*4+3];
-        }
-        barrier();
+    uint numTiles = dims.K / TS;
+    loadTiles(0, 0, tid, nBase, g);
+    barrier();
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1u;
+        if (t + 1 < numTiles) loadTiles(t + 1, cur ^ 1u, tid, nBase, g);
         #pragma unroll
         for (uint kv = 0; kv < 4; kv++) {
-            vec4 a = Asub[kv][row];
-            acc0 += dot(a, Bsub[kv][col * 4]);
-            acc1 += dot(a, Bsub[kv][col * 4 + 1]);
-            acc2 += dot(a, Bsub[kv][col * 4 + 2]);
-            acc3 += dot(a, Bsub[kv][col * 4 + 3]);
+            vec4 a = Asub[cur][kv][row];
+            acc0 += dot(a, Bsub[cur][kv][col * 4]);
+            acc1 += dot(a, Bsub[cur][kv][col * 4 + 1]);
+            acc2 += dot(a, Bsub[cur][kv][col * 4 + 2]);
+            acc3 += dot(a, Bsub[cur][kv][col * 4 + 3]);
         }
         barrier();
     }

@@ -39,6 +39,7 @@ typedef struct model_state {
     buffer attPartial;
     buffer invRms;
     buffer attScores;
+    buffer smSum;
     buffer gAct;
     buffer uAct;
 } model_state;

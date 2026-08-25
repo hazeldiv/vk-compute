@@ -18,6 +18,7 @@ layout(set = 0, binding = 1) readonly restrict buffer V { uint8_t value[]; };
 layout(set = 0, binding = 2) readonly restrict buffer VS { float vscale[]; };
 layout(set = 0, binding = 3) readonly restrict buffer VZ { float vzero[]; };
 layout(set = 0, binding = 4) writeonly restrict buffer O { float y[]; };
+layout(set = 0, binding = 5) readonly restrict buffer SmSum { float smSum[]; };
 
 shared vec4 Vsub[TS][TS + 1];
 shared float p_sh[TS][TS + 1];
@@ -64,6 +65,7 @@ void main() {
     }
 
     uint d0 = nBase + col * 4;
+    oacc *= smSum[hL * param.mRows + mGlobal];
     y[mGlobal * Q_DIM + head * HEAD_DIM + d0]     = oacc.x;
     y[mGlobal * Q_DIM + head * HEAD_DIM + d0 + 1] = oacc.y;
     y[mGlobal * Q_DIM + head * HEAD_DIM + d0 + 2] = oacc.z;

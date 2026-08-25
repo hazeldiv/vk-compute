@@ -263,11 +263,12 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         qkBufs[bq++] = st->attScores;
         addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, ctx / 64, (m / 16) * 4);
 
-        buffer smBufs[1];
+        buffer smBufs[2];
         smBufs[0] = st->attScores;
-        addOp(ops, n, "Att-Softmax.spv", L, smBufs, 1, pushA, 4, m, 4);
+        smBufs[1] = st->smSum;
+        addOp(ops, n, "Att-Softmax.spv", L, smBufs, 2, pushA, 4, m, 4);
 
-        buffer pvBufs[5];
+        buffer pvBufs[6];
         int bp = 0;
         pvBufs[bp++] = st->attScores;
         pvBufs[bp++] = st->vCache[L];
@@ -276,6 +277,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             pvBufs[bp++] = st->vZero[L];
         }
         pvBufs[bp++] = st->attnOut;
+        pvBufs[bp++] = st->smSum;
         addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, (m / 16) * 4);
     } else {
         buffer splitBufs[6];

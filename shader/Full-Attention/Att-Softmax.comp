@@ -11,6 +11,7 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; } param;
 
 layout(set = 0, binding = 0) buffer S { float16_t s[]; };
+layout(set = 0, binding = 1) writeonly restrict buffer SmSum { float smSum[]; };
 
 shared float sub_max[4];
 shared float sub_sum[4];
@@ -44,9 +45,5 @@ void main() {
     if (subgroupElect()) sub_sum[gl_SubgroupID] = sum;
     barrier();
     float total = sub_sum[0] + sub_sum[1] + sub_sum[2] + sub_sum[3];
-    float inv = 1.0 / total;
-
-    for (uint t = lane; t < param.ctxLen; t += 256) {
-        s[pRow + t] = float16_t(float(s[pRow + t]) * inv);
-    }
+    smSum[hL * param.mRows + row] = 1.0 / total;
 }
