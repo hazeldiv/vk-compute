@@ -1,0 +1,95 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
+#define TS 16
+#define TN 64
+#define HEAD_DIM 256
+#define KV_HEADS 4
+#define Q_DIM 4096
+#define KV_TOTAL_ROWS 1024
+#define MAXCTX 32768
+#define NEG_INF -1e30
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; } param;
+
+layout(set = 0, binding = 0) readonly restrict buffer Q { vec4 query[]; };
+layout(set = 0, binding = 1) readonly restrict buffer K { uint8_t key[]; };
+layout(set = 0, binding = 2) readonly restrict buffer KS { float kscale[]; };
+layout(set = 0, binding = 3) readonly restrict buffer KZ { float kzero[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer S { float16_t s[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TN];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mtile = gl_WorkGroupID.y % (param.mRows / TS);
+    uint hL = gl_WorkGroupID.y / (param.mRows / TS);
+    uint head = param.headBase + hL;
+    uint kvh = head / KV_HEADS;
+    uint mGlobal = mtile * TS + row;
+    uint nBase = gl_WorkGroupID.x * TN;
+    uint limit = param.qOff + mGlobal;
+
+    float accRaw0 = 0.0;
+    float accRaw1 = 0.0;
+    float accRaw2 = 0.0;
+    float accRaw3 = 0.0;
+    float sumQ = 0.0;
+
+    bool inRange = (nBase + col * 4) <= limit;
+
+    for (uint c = 0; c < HEAD_DIM / TS; c++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            Asub[kv][m] = query[(mtile * TS + m) * (Q_DIM / 4) + head * (HEAD_DIM / 4) + c * 4 + kv];
+        }
+        if (tid < 64) {
+            uint tok = nBase + tid;
+            uint base = tok * KV_TOTAL_ROWS + kvh * HEAD_DIM + c * 16;
+            Bsub[0][tid] = vec4(float(uint(key[base])),     float(uint(key[base + 1])), float(uint(key[base + 2])), float(uint(key[base + 3])));
+            Bsub[1][tid] = vec4(float(uint(key[base + 4])), float(uint(key[base + 5])), float(uint(key[base + 6])), float(uint(key[base + 7])));
+            Bsub[2][tid] = vec4(float(uint(key[base + 8])), float(uint(key[base + 9])), float(uint(key[base + 10])), float(uint(key[base + 11])));
+            Bsub[3][tid] = vec4(float(uint(key[base + 12])), float(uint(key[base + 13])), float(uint(key[base + 14])), float(uint(key[base + 15])));
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            accRaw0 += dot(a, Bsub[kv][col * 4]);
+            accRaw1 += dot(a, Bsub[kv][col * 4 + 1]);
+            accRaw2 += dot(a, Bsub[kv][col * 4 + 2]);
+            accRaw3 += dot(a, Bsub[kv][col * 4 + 3]);
+            sumQ += a.x + a.y + a.z + a.w;
+        }
+        barrier();
+    }
+
+    uint n0 = nBase + col * 4;
+    uint pRow = (hL * param.mRows + mGlobal) * MAXCTX;
+    if (!inRange) {
+        s[pRow + n0]     = float16_t(NEG_INF);
+        s[pRow + n0 + 1] = float16_t(NEG_INF);
+        s[pRow + n0 + 2] = float16_t(NEG_INF);
+        s[pRow + n0 + 3] = float16_t(NEG_INF);
+        return;
+    }
+    #pragma unroll
+    for (uint j = 0; j < 4; j++) {
+        uint tok = n0 + j;
+        float v = NEG_INF;
+        if (tok <= limit) {
+            float sc = kscale[kvh * param.ctxLen + tok];
+            float zz = kzero[kvh * param.ctxLen + tok];
+            float raw = (j == 0) ? accRaw0 : (j == 1) ? accRaw1 : (j == 2) ? accRaw2 : accRaw3;
+            v = sc * raw - zz * sumQ;
+        }
+        s[pRow + tok] = float16_t(v);
+    }
+}

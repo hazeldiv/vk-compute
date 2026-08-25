@@ -198,7 +198,7 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
 
-static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn) {
+static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType q = g->spec->layers[L].attn.q;
@@ -228,20 +228,33 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         int push[] = {m, MODEL_QKV_N, MODEL_K, 0, MODEL_Q_OFF, MODEL_V_OFF};
         addOp(ops, n, model_shader("RmsNorm-QKV-GEMM", q), L, qkvBufs, b, push, 6, MODEL_HEADS + 2 * MODEL_KV_HEADS, m / 16);
 
-        buffer attBufs[9];
-        int ba = 0;
-        attBufs[ba++] = st->kCache[L];
-        attBufs[ba++] = st->vCache[L];
-        attBufs[ba++] = st->qOut;
-        attBufs[ba++] = st->attnOut;
+        int pushA[] = {ctx, 0, m, 0};
+
+        buffer qkBufs[5];
+        int bq = 0;
+        qkBufs[bq++] = st->qOut;
+        qkBufs[bq++] = st->kCache[L];
         if (q != QUANT_FP16) {
-            attBufs[ba++] = st->kScale[L];
-            attBufs[ba++] = st->kZero[L];
-            attBufs[ba++] = st->vScale[L];
-            attBufs[ba++] = st->vZero[L];
+            qkBufs[bq++] = st->kScale[L];
+            qkBufs[bq++] = st->kZero[L];
         }
-        int pushA[] = {m};
-        addOp(ops, n, model_shader("Att-full-GEMM", q), L, attBufs, ba, pushA, 1, MODEL_HEADS, m / 16);
+        qkBufs[bq++] = st->attScores;
+        addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, ctx / 64, (m / 16) * 4);
+
+        buffer smBufs[1];
+        smBufs[0] = st->attScores;
+        addOp(ops, n, "Att-Softmax.spv", L, smBufs, 1, pushA, 4, m, 4);
+
+        buffer pvBufs[5];
+        int bp = 0;
+        pvBufs[bp++] = st->attScores;
+        pvBufs[bp++] = st->vCache[L];
+        if (q != QUANT_FP16) {
+            pvBufs[bp++] = st->vScale[L];
+            pvBufs[bp++] = st->vZero[L];
+        }
+        pvBufs[bp++] = st->attnOut;
+        addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, (m / 16) * 4);
     } else {
         buffer splitBufs[6];
         int bs = 0;
@@ -339,10 +352,10 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
 }
 
-static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn) {
+static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx) {
     const layer* ly = &g->spec->layers[L];
     if (ly->attn.type == ATTENTION_FULL) {
-        buildAttention(g, ops, n, L, gemm, m, splitAttn);
+        buildAttention(g, ops, n, L, gemm, m, splitAttn, ctx);
     } else if (ly->attn.type == ATTENTION_DELTA) {
         buildDelta(g, ops, n, L, gemm, m);
     }
@@ -375,7 +388,7 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
         addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
         for (int L = 0; L < g->spec->layerCount; L++) {
-            buildLayer(g, ops, &n, L, 0, 1, splitAttn);
+            buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0);
         }
 
         buildLmHead(g, ops, &n, &st->h, 1, p);
@@ -395,13 +408,14 @@ static int compilePrefill(generator* g, int m, int offset) {
 
     int start = n;
     for (int L = 0; L < g->spec->layerCount; L++) {
-        buildLayer(g, ops, &n, L, 1, m, 0);
+        buildLayer(g, ops, &n, L, 1, m, 0, offset + m);
     }
     for (int i = start; i < n; i++) {
         if (strstr(ops[i].shader, "QKV-GEMM") != NULL) {
             ops[i].pushConstants[3] = offset;
-        } else if (strstr(ops[i].shader, "Att-full-GEMM") != NULL) {
+        } else if (strstr(ops[i].shader, "Att-QK2") != NULL || strstr(ops[i].shader, "Att-Softmax") != NULL || strstr(ops[i].shader, "Att-PV2") != NULL) {
             ops[i].pushConstants[0] = offset + m;
+            ops[i].pushConstants[1] = offset;
         }
     }
 

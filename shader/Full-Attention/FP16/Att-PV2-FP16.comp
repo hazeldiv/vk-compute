@@ -1,0 +1,67 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define HEAD_DIM 256
+#define KV_HEADS 4
+#define Q_DIM 4096
+#define KV_TOTAL_ROWS 1024
+#define MAXCTX 32768
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; } param;
+
+layout(set = 0, binding = 0) readonly restrict buffer S { float16_t s[]; };
+layout(set = 0, binding = 1) readonly restrict buffer V { uint16_t value[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer O { float y[]; };
+
+shared vec4 Vsub[TS][TS + 1];
+shared float p_sh[TS][TS + 1];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mtile = gl_WorkGroupID.y % (param.mRows / TS);
+    uint hL = gl_WorkGroupID.y / (param.mRows / TS);
+    uint head = param.headBase + hL;
+    uint mGlobal = mtile * TS + row;
+    uint nBase = gl_WorkGroupID.x * (TS * 4);
+    uint pRow = (hL * param.mRows + mGlobal) * MAXCTX;
+
+    vec4 oacc = vec4(0.0);
+
+    uint tiles = param.ctxLen / TS;
+    for (uint c = 0; c < tiles; c++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint base = (hL * param.mRows + mtile * TS + m) * MAXCTX + c * TS + kv * 4;
+            p_sh[m][kv * 4]     = float(s[base]);
+            p_sh[m][kv * 4 + 1] = float(s[base + 1]);
+            p_sh[m][kv * 4 + 2] = float(s[base + 2]);
+            p_sh[m][kv * 4 + 3] = float(s[base + 3]);
+        }
+        if (tid < 64) {
+            uint kv = tid / 16;
+            uint tok = tid % 16;
+            uint base = (c * TS + tok) * KV_TOTAL_ROWS + head * HEAD_DIM + nBase + kv * 2;
+            vec2 v01 = unpackHalf2x16(uint(value[base]) | (uint(value[base + 1]) << 16));
+            vec2 v23 = unpackHalf2x16(uint(value[base + 2]) | (uint(value[base + 3]) << 16));
+            Vsub[kv][tok] = vec4(v01.x, v01.y, v23.x, v23.y);
+        }
+        barrier();
+        #pragma unroll
+        for (uint kk = 0; kk < TS; kk++) {
+            oacc += p_sh[row][kk] * Vsub[col][kk];
+        }
+        barrier();
+    }
+
+    uint d0 = nBase + col * 4;
+    y[mGlobal * Q_DIM + head * HEAD_DIM + d0]     = oacc.x;
+    y[mGlobal * Q_DIM + head * HEAD_DIM + d0 + 1] = oacc.y;
+    y[mGlobal * Q_DIM + head * HEAD_DIM + d0 + 2] = oacc.z;
+    y[mGlobal * Q_DIM + head * HEAD_DIM + d0 + 3] = oacc.w;
+}
