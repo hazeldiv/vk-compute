@@ -11,6 +11,7 @@
 #define NEG_INF -1e30
 #define ACC_BASE (MAXC * HEADS * 2)
 #define MAXC 128
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -63,8 +64,8 @@ void main() {
         uint s = t * TS + lane;
         float score = NEG_INF;
         if (s < context) {
-            ks_s[lane] = kscale[kv_block_id * context + s];
-            kz_s[lane] = kzero[kv_block_id * context + s];
+            ks_s[lane] = kscale[kv_block_id * MAXCTX + s];
+            kz_s[lane] = kzero[kv_block_id * MAXCTX + s];
             score = 0.0;
         }
         barrier();
@@ -94,8 +95,8 @@ void main() {
         barrier();
 
         if (s < context) {
-            vs_s[lane] = vscale[kv_block_id * context + s];
-            vz_s[lane] = vzero[kv_block_id * context + s];
+            vs_s[lane] = vscale[kv_block_id * MAXCTX + s];
+            vz_s[lane] = vzero[kv_block_id * MAXCTX + s];
         }
         barrier();
 

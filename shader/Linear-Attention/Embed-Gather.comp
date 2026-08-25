@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Params { uint V; } param;
+
+layout(set = 0, binding = 0) readonly restrict buffer TokenBuffer { uint tokenIds[]; };
+layout(set = 0, binding = 1) readonly restrict buffer EmbedBuffer { uvec4 lm[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer StagedBuffer { vec4 staged[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer EmbOutBuffer { vec4 embOut[]; };
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+    uint tok = tokenIds[row];
+    for (uint i = col; i < 1024u; i += 256u) {
+        uvec4 rawv = lm[(i / 2u) * param.V + tok];
+        vec4 v = ((i & 1u) == 0u)
+            ? vec4(unpackHalf2x16(rawv.x), unpackHalf2x16(rawv.y))
+            : vec4(unpackHalf2x16(rawv.z), unpackHalf2x16(rawv.w));
+        staged[row * 1024u + i] = v;
+        embOut[row * 1024u + i] = v;
+    }
+}

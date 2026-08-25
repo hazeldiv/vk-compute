@@ -1,0 +1,58 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define TN 32
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 w[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer OutBuffer { float outBuf[]; };
+layout(set = 0, binding = 4) readonly restrict buffer InvRms { float invRms[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TN];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nBase = gl_WorkGroupID.x * TN;
+
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+        }
+        if (tid < 64) {
+            uint block = tid / 32;
+            uint c = tid % 32;
+            uvec4 raw = w[(t * 2 + block) * dims.N + nBase + c];
+            Bsub[block * 2][c]     = vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y));
+            Bsub[block * 2 + 1][c] = vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            acc0 += dot(a, Bsub[kv][col * 2]);
+            acc1 += dot(a, Bsub[kv][col * 2 + 1]);
+        }
+        barrier();
+    }
+
+    uint n0 = nBase + col * 2;
+    outBuf[mGlobal * dims.N + n0]     = acc0;
+    outBuf[mGlobal * dims.N + n0 + 1] = acc1;
+}

@@ -85,8 +85,8 @@ void main() {
         uint tok = n0 + j;
         float v = NEG_INF;
         if (tok <= limit) {
-            float sc = kscale[kvh * param.ctxLen + tok];
-            float zz = kzero[kvh * param.ctxLen + tok];
+            float sc = kscale[kvh * MAXCTX + tok];
+            float zz = kzero[kvh * MAXCTX + tok];
             float raw = (j == 0) ? accRaw0 : (j == 1) ? accRaw1 : (j == 2) ? accRaw2 : accRaw3;
             v = sc * raw - zz * sumQ;
         }

@@ -4,6 +4,7 @@
 #define TS 256
 #define HEAD_DIM 256
 #define HALF 128
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -77,8 +78,8 @@ void main() {
         quantizeParams(acc);
         vCache[cacheSlot + row] = uint8_t(quantize(acc));
         if (gl_LocalInvocationID.x == 0) {
-            vScale[kvHead * (pos + 1u) + pos] = qscale_sh;
-            vZero[kvHead * (pos + 1u) + pos] = qzero_sh;
+            vScale[kvHead * MAXCTX + pos] = qscale_sh;
+            vZero[kvHead * MAXCTX + pos] = qzero_sh;
         }
         return;
     }
@@ -117,8 +118,8 @@ void main() {
         quantizeParams(acc);
         kCache[cacheSlot + row] = uint8_t(quantize(acc));
         if (gl_LocalInvocationID.x == 0) {
-            kScale[kvHead * (pos + 1u) + pos] = qscale_sh;
-            kZero[kvHead * (pos + 1u) + pos] = qzero_sh;
+            kScale[kvHead * MAXCTX + pos] = qscale_sh;
+            kZero[kvHead * MAXCTX + pos] = qzero_sh;
         }
     }
 }

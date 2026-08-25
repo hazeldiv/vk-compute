@@ -18,6 +18,7 @@ model_state createState(session s, const model_config* spec, int maxM) {
     st.h = createZeroed(s, (int64_t)sizeof(float) * mn);
     st.act = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
     st.embOut = createZeroed(s, (int64_t)sizeof(float) * mn);
+    st.embStaged = createZeroed(s, (int64_t)sizeof(float) * mn);
     st.yGated = createZeroed(s, (int64_t)sizeof(float) * mn);
     st.attnOut = createZeroed(s, (int64_t)sizeof(float) * mn);
     st.qOut = createZeroed(s, (int64_t)sizeof(float) * mn);
@@ -70,6 +71,7 @@ if (ly->attn.type == ATTENTION_FULL) {
     st.invRms = createZeroed(s, (int64_t)sizeof(float) * maxM);
     st.attScores = createZeroed(s, (int64_t)maxM * MODEL_MAX_CTX * 4 * 2);
     st.smSum = createZeroed(s, (int64_t)sizeof(float) * maxM * 4);
+    st.qkvRaw = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_QKV_N);
     st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
     st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
 
@@ -97,6 +99,7 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->h);
     destroyBuffer(s.dev.device, st->act);
     destroyBuffer(s.dev.device, st->embOut);
+    destroyBuffer(s.dev.device, st->embStaged);
     destroyBuffer(s.dev.device, st->yGated);
     destroyBuffer(s.dev.device, st->attnOut);
     destroyBuffer(s.dev.device, st->qOut);
@@ -129,6 +132,7 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->invRms);
     destroyBuffer(s.dev.device, st->attScores);
     destroyBuffer(s.dev.device, st->smSum);
+    destroyBuffer(s.dev.device, st->qkvRaw);
     destroyBuffer(s.dev.device, st->gAct);
     destroyBuffer(s.dev.device, st->uAct);
 }

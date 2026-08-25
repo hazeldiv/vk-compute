@@ -73,7 +73,7 @@ static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor
     addOp(ops, n, model_shader("GEMM-ADD2", q), L, bufs, b, push, 3, MODEL_K / tn, m / 16);
 }
 
-static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm, int m) {
+static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm, int m, buffer input) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType q = g->spec->layers[L].attn.q;
@@ -81,7 +81,7 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
     if (!gemm) {
         buffer bufs[6];
         int b = 0;
-        bufs[b++] = st->h;
+        bufs[b++] = input;
         bufs[b++] = w->gammaIn[L];
         bufs[b++] = w->proj[L].data;
         if (q != QUANT_FP16) {
@@ -109,7 +109,7 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
 
     buffer bufs[14];
     int b = 0;
-    bufs[b++] = st->h;
+    bufs[b++] = input;
     bufs[b++] = w->gammaIn[L];
     bufs[b++] = w->proj[L].data;
     bufs[b++] = st->qProj;
@@ -220,37 +220,52 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
 
-static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx) {
+static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx, int offset) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     QuantType q = g->spec->layers[L].attn.q;
 
-    buffer qkvBufs[14];
-    int b = 0;
-    qkvBufs[b++] = st->h;
-    qkvBufs[b++] = w->gammaIn[L];
-    qkvBufs[b++] = w->proj[L].data;
-    if (q != QUANT_FP16) {
-        qkvBufs[b++] = w->proj[L].scale;
-        qkvBufs[b++] = w->proj[L].zero;
-    }
-    qkvBufs[b++] = w->theta;
-    qkvBufs[b++] = st->qOut;
-    qkvBufs[b++] = st->kCache[L];
-    qkvBufs[b++] = st->vCache[L];
-    if (q != QUANT_FP16) {
-        qkvBufs[b++] = st->kScale[L];
-        qkvBufs[b++] = st->kZero[L];
-        qkvBufs[b++] = st->vScale[L];
-        qkvBufs[b++] = st->vZero[L];
-    }
-    qkvBufs[b++] = st->position;
-
     if (gemm) {
-        int push[] = {m, MODEL_QKV_N, MODEL_K, 0, MODEL_Q_OFF, MODEL_V_OFF};
-        addOp(ops, n, model_shader("RmsNorm-QKV-GEMM", q), L, qkvBufs, b, push, 6, MODEL_HEADS + 2 * MODEL_KV_HEADS, m / 16);
+        int pushP[] = {MODEL_K};
+        buffer proBufs[2];
+        proBufs[0] = st->h;
+        proBufs[1] = st->invRms;
+        addOp(ops, n, "RmsNorm-Prologue.spv", L, proBufs, 2, pushP, 1, m, 1);
 
-        int pushA[] = {ctx, 0, m, 0};
+        buffer qkvGBufs[7];
+        int bq2 = 0;
+        qkvGBufs[bq2++] = st->h;
+        qkvGBufs[bq2++] = w->gammaIn[L];
+        qkvGBufs[bq2++] = w->proj[L].data;
+        if (q != QUANT_FP16) {
+            qkvGBufs[bq2++] = w->proj[L].scale;
+            qkvGBufs[bq2++] = w->proj[L].zero;
+        }
+        qkvGBufs[bq2++] = st->qkvRaw;
+        qkvGBufs[bq2++] = st->invRms;
+        int tnQkv = (q == QUANT_INT4) ? 64 : 32;
+        int pushQ[] = {m, MODEL_QKV_N, MODEL_K};
+        addOp(ops, n, model_shader("RmsNorm-QKV-GEMM2", q), L, qkvGBufs, bq2, pushQ, 3,
+              MODEL_QKV_N / tnQkv, m / 16);
+
+        buffer ropeGBufs[9];
+        int brg = 0;
+        ropeGBufs[brg++] = st->qkvRaw;
+        ropeGBufs[brg++] = st->qOut;
+        ropeGBufs[brg++] = st->kCache[L];
+        ropeGBufs[brg++] = st->vCache[L];
+        if (q != QUANT_FP16) {
+            ropeGBufs[brg++] = st->kScale[L];
+            ropeGBufs[brg++] = st->kZero[L];
+            ropeGBufs[brg++] = st->vScale[L];
+            ropeGBufs[brg++] = st->vZero[L];
+        }
+        ropeGBufs[brg++] = w->theta;
+        int pushRG[] = {MODEL_QKV_N, MODEL_Q_OFF, MODEL_V_OFF, offset};
+        addOp(ops, n, model_shader("Rope-GEMM", q), L, ropeGBufs, brg, pushRG, 4,
+              MODEL_HEADS + 2 * MODEL_KV_HEADS, m);
+
+        int pushA[] = {ctx, offset, m, 0};
 
         buffer qkBufs[5];
         int bq = 0;
@@ -361,7 +376,7 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     QuantType q = g->spec->layers[L].attn.q;
 
     if (L != 0) {
-        addLinearProj(g, ops, n, L, gemm, m);
+        addLinearProj(g, ops, n, L, gemm, m, st->h);
     }
 
     buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->stateS[L], st->yGated};
@@ -376,10 +391,10 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
 }
 
-static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx) {
+static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx, int offset) {
     const layer* ly = &g->spec->layers[L];
     if (ly->attn.type == ATTENTION_FULL) {
-        buildAttention(g, ops, n, L, gemm, m, splitAttn, ctx);
+        buildAttention(g, ops, n, L, gemm, m, splitAttn, ctx, offset);
     } else if (ly->attn.type == ATTENTION_DELTA) {
         buildDelta(g, ops, n, L, gemm, m);
     }
@@ -412,7 +427,7 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
         addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
         for (int L = 0; L < g->spec->layerCount; L++) {
-            buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0);
+            buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0, 0);
         }
 
         buildLmHead(g, ops, &n, &st->h, 1, p);
@@ -426,21 +441,18 @@ static int compilePrefill(generator* g, int m, int offset) {
     operation* ops = g->prefillOps;
     int n = 0;
 
-    buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
-    int pushE[] = {m, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
-    addOp(ops, &n, "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", -1, embedBufs, 11, pushE, 4, MODEL_PROJ_N / 16, m / 16);
+    buffer gatherBufs[4];
+    gatherBufs[0] = st->tokenIds;
+    gatherBufs[1] = w->embed;
+    gatherBufs[2] = st->embStaged;
+    gatherBufs[3] = st->embOut;
+    int pushG[] = {MODEL_VOCAB};
+    addOp(ops, &n, "Embed-Gather.spv", -1, gatherBufs, 4, pushG, 1, m, 1);
 
-    int start = n;
+    addLinearProj(g, ops, &n, 0, 1, m, st->embStaged);
+
     for (int L = 0; L < g->spec->layerCount; L++) {
-        buildLayer(g, ops, &n, L, 1, m, 0, offset + m);
-    }
-    for (int i = start; i < n; i++) {
-        if (strstr(ops[i].shader, "QKV-GEMM") != NULL) {
-            ops[i].pushConstants[3] = offset;
-        } else if (strstr(ops[i].shader, "Att-QK2") != NULL || strstr(ops[i].shader, "Att-Softmax") != NULL || strstr(ops[i].shader, "Att-PV2") != NULL) {
-            ops[i].pushConstants[0] = offset + m;
-            ops[i].pushConstants[1] = offset;
-        }
+        buildLayer(g, ops, &n, L, 1, m, 0, offset + m, offset);
     }
 
     return n;
@@ -505,6 +517,8 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->h, hCpu);
     memcpy(st->lastRow.mappedMemory, hCpu + (lastCur - 1) * MODEL_K, sizeof(float) * MODEL_K);
     free(hCpu);
+
+    stateSetPosition(g->s, &g->st, g->nextPos + (uint32_t)nTokens);
 
     executeLogged(g->s, g->finalOps, g->finalOpCount, "prefill", (int)g->nextPos);
 

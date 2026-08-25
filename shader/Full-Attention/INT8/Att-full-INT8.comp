@@ -6,6 +6,7 @@
 #define KV_HEADS 4
 #define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
 #define NEG_INF -1e30
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -50,8 +51,8 @@ void main() {
         uint s = k * TS + tid;
 
         if (s < context) {
-            scale_s[tid] = kscale[kv_block_id * context + s];
-            zero_s[tid] = kzero[kv_block_id * context + s];
+            scale_s[tid] = kscale[kv_block_id * MAXCTX + s];
+            zero_s[tid] = kzero[kv_block_id * MAXCTX + s];
         }
         barrier();
 

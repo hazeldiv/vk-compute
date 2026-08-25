@@ -1063,10 +1063,10 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     int kvs = rows * seq;
     uint8_t* kq = (uint8_t*)malloc(kvs);
     uint8_t* vq = (uint8_t*)malloc(kvs);
-    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
     for (int h = 0; h < kv_heads; h++) {
         for (int s2 = 0; s2 < seq; s2++) {
             float mn = FLT_MAX;
@@ -1078,11 +1078,11 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
             }
             float ks = (mx - mn) / 255.0f;
             if (ks == 0.0f) ks = 1.0f;
-            kScale[h * seq + s2] = ks;
-            kZero[h * seq + s2] = -mn;
+            kScale[h * 32768 + s2] = ks;
+            kZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                int q = (int)rintf((kv + kZero[h * 32768 + s2]) / ks);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -1100,11 +1100,11 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
             }
             float vs = (mx - mn) / 255.0f;
             if (vs == 0.0f) vs = 1.0f;
-            vScale[h * seq + s2] = vs;
-            vZero[h * seq + s2] = -mn;
+            vScale[h * 32768 + s2] = vs;
+            vZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                int q = (int)rintf((vv + vZero[h * 32768 + s2]) / vs);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -1116,8 +1116,8 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
         for (int s2 = 0; s2 < seq; s2++) {
-            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
-            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * 32768 + s2] - kZero[h * 32768 + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * 32768 + s2] - vZero[h * 32768 + s2];
         }
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
@@ -1127,10 +1127,10 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
     buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer};
     createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
@@ -1169,10 +1169,10 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     int kvs = rows * seq;
     uint8_t* kq = (uint8_t*)malloc(kvs);
     uint8_t* vq = (uint8_t*)malloc(kvs);
-    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
     for (int h = 0; h < kv_heads; h++) {
         for (int s2 = 0; s2 < seq; s2++) {
             float mn = FLT_MAX;
@@ -1184,11 +1184,11 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
             }
             float ks = (mx - mn) / 255.0f;
             if (ks == 0.0f) ks = 1.0f;
-            kScale[h * seq + s2] = ks;
-            kZero[h * seq + s2] = -mn;
+            kScale[h * 32768 + s2] = ks;
+            kZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                int q = (int)rintf((kv + kZero[h * 32768 + s2]) / ks);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -1206,11 +1206,11 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
             }
             float vs = (mx - mn) / 255.0f;
             if (vs == 0.0f) vs = 1.0f;
-            vScale[h * seq + s2] = vs;
-            vZero[h * seq + s2] = -mn;
+            vScale[h * 32768 + s2] = vs;
+            vZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                int q = (int)rintf((vv + vZero[h * 32768 + s2]) / vs);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -1222,8 +1222,8 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
         for (int s2 = 0; s2 < seq; s2++) {
-            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
-            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * 32768 + s2] - kZero[h * 32768 + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * 32768 + s2] - vZero[h * 32768 + s2];
         }
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
@@ -1233,10 +1233,10 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer kZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vScaleBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vZeroBuf = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
     buffer bufs[] = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer};
     createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
@@ -2711,10 +2711,10 @@ void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads
     float* qOut = (float*)calloc(heads * dim, sizeof(float));
     uint8_t* kCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
     uint8_t* vCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
-    float* kScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* kZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* vScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* vZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* kScale = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * 32768, sizeof(float));
 
     uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total);
     transpose_block16(qkv_weightINT8.data, transposed, k, n_total, QUANT_INT8);
@@ -2729,10 +2729,10 @@ void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
-    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
     buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
     createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
@@ -2760,8 +2760,8 @@ void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads
     float* vstored = (float*)malloc(sizeof(float) * rows);
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
-        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * seq_len + seq_len - 1] - kZero[h * seq_len + seq_len - 1];
-        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * seq_len + seq_len - 1] - vZero[h * seq_len + seq_len - 1];
+        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * 32768 + seq_len - 1] - kZero[h * 32768 + seq_len - 1];
+        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * 32768 + seq_len - 1] - vZero[h * 32768 + seq_len - 1];
     }
     float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
     float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
@@ -2820,10 +2820,10 @@ void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads
     float* qOut = (float*)calloc(heads * dim, sizeof(float));
     uint8_t* kCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
     uint8_t* vCache = (uint8_t*)calloc(rows * seq_len, sizeof(uint8_t));
-    float* kScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* kZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* vScale = (float*)calloc(kv_heads * seq_len, sizeof(float));
-    float* vZero = (float*)calloc(kv_heads * seq_len, sizeof(float));
+    float* kScale = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* kZero = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* vScale = (float*)calloc(kv_heads * 32768, sizeof(float));
+    float* vZero = (float*)calloc(kv_heads * 32768, sizeof(float));
 
     uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * k * n_total / 2);
     transpose_block16(qkv_weightINT4.data, transposed, k, n_total, QUANT_INT4);
@@ -2838,10 +2838,10 @@ void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
-    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
-    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq_len, MEMORY_VRAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
     buffer bufs[] = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, partialBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer};
     createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
@@ -2869,8 +2869,8 @@ void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads
     float* vstored = (float*)malloc(sizeof(float) * rows);
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
-        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * seq_len + seq_len - 1] - kZero[h * seq_len + seq_len - 1];
-        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * seq_len + seq_len - 1] - vZero[h * seq_len + seq_len - 1];
+        kstored[r] = (float)kCache[(seq_len - 1) * rows + r] * kScale[h * 32768 + seq_len - 1] - kZero[h * 32768 + seq_len - 1];
+        vstored[r] = (float)vCache[(seq_len - 1) * rows + r] * vScale[h * 32768 + seq_len - 1] - vZero[h * 32768 + seq_len - 1];
     }
     float* kvOut = (float*)malloc(sizeof(float) * 2 * rows);
     float* kvRef = (float*)malloc(sizeof(float) * 2 * rows);
@@ -4361,10 +4361,10 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
     float* vf = (float*)malloc(sizeof(float) * kvs);
     uint8_t* kq = (uint8_t*)malloc(kvs);
     uint8_t* vq = (uint8_t*)malloc(kvs);
-    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
     for (int h = 0; h < kv_heads; h++) {
         for (int s2 = 0; s2 < seq; s2++) {
             float mn = FLT_MAX;
@@ -4376,11 +4376,11 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
             }
             float ks = (mx - mn) / 255.0f;
             if (ks == 0.0f) ks = 1.0f;
-            kScale[h * seq + s2] = ks;
-            kZero[h * seq + s2] = -mn;
+            kScale[h * 32768 + s2] = ks;
+            kZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                int q = (int)rintf((kv + kZero[h * 32768 + s2]) / ks);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -4398,11 +4398,11 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
             }
             float vs = (mx - mn) / 255.0f;
             if (vs == 0.0f) vs = 1.0f;
-            vScale[h * seq + s2] = vs;
-            vZero[h * seq + s2] = -mn;
+            vScale[h * 32768 + s2] = vs;
+            vZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                int q = (int)rintf((vv + vZero[h * 32768 + s2]) / vs);
                 if (q < 0) q = 0;
                 if (q > 255) q = 255;
                 vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -4412,8 +4412,8 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
         for (int s2 = 0; s2 < seq; s2++) {
-            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
-            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * 32768 + s2] - kZero[h * 32768 + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * 32768 + s2] - vZero[h * 32768 + s2];
         }
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
@@ -4423,10 +4423,10 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
     buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
     buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, partials, sizeof(float) * 528384, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
@@ -4473,10 +4473,10 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
     float* vf = (float*)malloc(sizeof(float) * kvs);
     uint8_t* kq = (uint8_t*)malloc(kvs);
     uint8_t* vq = (uint8_t*)malloc(kvs);
-    float* kScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* kZero = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vScale = (float*)malloc(sizeof(float) * kv_heads * seq);
-    float* vZero = (float*)malloc(sizeof(float) * kv_heads * seq);
+    float* kScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* kZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vScale = (float*)malloc(sizeof(float) * kv_heads * 32768);
+    float* vZero = (float*)malloc(sizeof(float) * kv_heads * 32768);
     for (int h = 0; h < kv_heads; h++) {
         for (int s2 = 0; s2 < seq; s2++) {
             float mn = FLT_MAX;
@@ -4488,11 +4488,11 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
             }
             float ks = (mx - mn) / 15.0f;
             if (ks == 0.0f) ks = 1.0f;
-            kScale[h * seq + s2] = ks;
-            kZero[h * seq + s2] = -mn;
+            kScale[h * 32768 + s2] = ks;
+            kZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float kv = fp16_to_float(att_k[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((kv + kZero[h * seq + s2]) / ks);
+                int q = (int)rintf((kv + kZero[h * 32768 + s2]) / ks);
                 if (q < 0) q = 0;
                 if (q > 15) q = 15;
                 kq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -4510,11 +4510,11 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
             }
             float vs = (mx - mn) / 15.0f;
             if (vs == 0.0f) vs = 1.0f;
-            vScale[h * seq + s2] = vs;
-            vZero[h * seq + s2] = -mn;
+            vScale[h * 32768 + s2] = vs;
+            vZero[h * 32768 + s2] = -mn;
             for (int d = 0; d < dim; d++) {
                 float vv = fp16_to_float(att_v[(h * dim + d) * seq + s2]);
-                int q = (int)rintf((vv + vZero[h * seq + s2]) / vs);
+                int q = (int)rintf((vv + vZero[h * 32768 + s2]) / vs);
                 if (q < 0) q = 0;
                 if (q > 15) q = 15;
                 vq[s2 * rows + (h * dim + d)] = (uint8_t)q;
@@ -4524,8 +4524,8 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
     for (int r = 0; r < rows; r++) {
         int h = r / dim;
         for (int s2 = 0; s2 < seq; s2++) {
-            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * seq + s2] - kZero[h * seq + s2];
-            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * seq + s2] - vZero[h * seq + s2];
+            kf[r * seq + s2] = (float)kq[s2 * rows + r] * kScale[h * 32768 + s2] - kZero[h * 32768 + s2];
+            vf[r * seq + s2] = (float)vq[s2 * rows + r] * vScale[h * 32768 + s2] - vZero[h * 32768 + s2];
         }
     }
     float* out = (float*)calloc(heads * dim, sizeof(float));
@@ -4535,10 +4535,10 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
     buffer keyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer valueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vq, sizeof(uint8_t) * kvs, MEMORY_RAM);
     buffer queryBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, att_q, sizeof(float) * heads * dim, MEMORY_RAM);
-    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * seq, MEMORY_RAM);
-    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * seq, MEMORY_RAM);
+    buffer kScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer kZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vScaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vScale, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
+    buffer vZeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vZero, sizeof(float) * kv_heads * 32768, MEMORY_RAM);
     buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, partials, sizeof(float) * 528384, MEMORY_RAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * heads * dim, MEMORY_RAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);

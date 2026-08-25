@@ -52,8 +52,8 @@ void main() {
             uint kv = tid / 16;
             uint tok = tid % 16;
             uint base = (c * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + nBase + kv * 4;
-            float vs = vscale[kvh * param.ctxLen + c * TS + tok];
-            float vz = vzero[kvh * param.ctxLen + c * TS + tok];
+            float vs = vscale[kvh * MAXCTX + c * TS + tok];
+            float vz = vzero[kvh * MAXCTX + c * TS + tok];
             Vsub[kv][tok] = vec4(float(uint(value[base])), float(uint(value[base + 1])), float(uint(value[base + 2])), float(uint(value[base + 3]))) * vs - vz;
         }
         barrier();

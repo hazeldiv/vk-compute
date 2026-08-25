@@ -10,6 +10,7 @@ typedef struct model_state {
     buffer h;
     buffer act;
     buffer embOut;
+    buffer embStaged;
     buffer yGated;
     buffer attnOut;
     buffer qOut;
@@ -40,6 +41,7 @@ typedef struct model_state {
     buffer invRms;
     buffer attScores;
     buffer smSum;
+    buffer qkvRaw;
     buffer gAct;
     buffer uAct;
 } model_state;
