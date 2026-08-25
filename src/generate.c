@@ -278,13 +278,13 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         attBufs[ba++] = st->position;
         int push0[1] = {0};
         if (splitAttn) {
-            addOp(ops, n, model_shader("Att-SplitK", q), L, attBufs, ba, push0, 0, MODEL_HEADS, 32);
+            addOp(ops, n, model_shader("Att-SplitK2", q), L, attBufs, ba, push0, 0, MODEL_HEADS, 128);
 
             buffer attRedBufs[3];
             attRedBufs[0] = st->attPartial;
             attRedBufs[1] = st->attnOut;
             attRedBufs[2] = st->position;
-            addOp(ops, n, "Reduce-Att.spv", L, attRedBufs, 3, push0, 0, MODEL_HEADS * MODEL_HEAD_DIM / 256, 1);
+            addOp(ops, n, "Reduce-Att2.spv", L, attRedBufs, 3, push0, 0, MODEL_HEADS * MODEL_HEAD_DIM / 256, 1);
         } else {
             buffer fullBufs[10];
             int bf = 0;

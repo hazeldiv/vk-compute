@@ -1,0 +1,98 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 64
+#define LOOPS 4
+#define HEADS 16
+#define KV_HEADS 4
+#define HEAD_DIM 256
+#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
+#define NEG_INF -1e30
+#define ACC_BASE (MAXC * HEADS * 2)
+#define MAXC 128
+
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer keyBuffer { uint16_t key[]; };
+layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
+layout(set = 0, binding = 2) readonly buffer queryBuffer { vec4 query[]; };
+layout(set = 0, binding = 3) writeonly buffer PartialBuffer { float P[]; };
+layout(set = 0, binding = 4) readonly buffer PositionBuffer { uint position[]; };
+
+shared vec4 q_shared[HEAD_DIM / 4];
+shared float p_sh[TS];
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint h = gl_WorkGroupID.x;
+    uint c = gl_WorkGroupID.y;
+    uint kv_block_id = h / KV_HEADS;
+    uint kv_row_base = kv_block_id * HEAD_DIM;
+    uint context = position[0] + 1u;
+    uint num_tiles = (context + TS - 1u) / TS;
+
+    uint start_tile = c * LOOPS;
+
+    if (start_tile >= num_tiles) {
+        uint ml = c * HEADS + h;
+        P[ml * 2] = NEG_INF;
+        P[ml * 2 + 1] = 0.0;
+        uint ab = ACC_BASE + ml * HEAD_DIM + lane * 4;
+        P[ab] = 0.0; P[ab+1] = 0.0; P[ab+2] = 0.0; P[ab+3] = 0.0;
+        return;
+    }
+
+    q_shared[lane] = query[h * (HEAD_DIM / 4) + lane];
+    barrier();
+
+    float m_prev = NEG_INF;
+    float l_prev = 0.0;
+    vec4 acc = vec4(0.0);
+
+    uint end_tile = min(start_tile + LOOPS, num_tiles);
+    for (uint t = start_tile; t < end_tile; t++) {
+        uint s = t * TS + lane;
+        float score = NEG_INF;
+        if (s < context) {
+            uint base = s * KV_TOTAL_ROWS + kv_row_base;
+            vec4 score4 = vec4(0.0);
+            for (uint d = 0; d < HEAD_DIM / 4; d++) {
+                uint b = base + d * 4;
+                vec2 k01 = unpackHalf2x16(uint(key[b]) | (uint(key[b+1]) << 16));
+                vec2 k23 = unpackHalf2x16(uint(key[b+2]) | (uint(key[b+3]) << 16));
+                vec4 kv = vec4(k01.x, k01.y, k23.x, k23.y);
+                score4 += q_shared[d] * kv;
+            }
+            score = score4.x + score4.y + score4.z + score4.w;
+        }
+
+        float m_next = max(m_prev, subgroupMax(score));
+        float alpha = exp(m_prev - m_next);
+        float p = exp(score - m_next);
+        l_prev = l_prev * alpha + subgroupAdd(p);
+        acc *= alpha;
+        m_prev = m_next;
+
+        p_sh[lane] = p;
+        barrier();
+
+        uint db = kv_row_base + lane * 4;
+        uint cnt = min(context - t * TS, TS);
+        for (uint i = 0; i < cnt; i++) {
+            uint b = (t * TS + i) * KV_TOTAL_ROWS + db;
+            vec2 v01 = unpackHalf2x16(uint(value[b]) | (uint(value[b+1]) << 16));
+            vec2 v23 = unpackHalf2x16(uint(value[b+2]) | (uint(value[b+3]) << 16));
+            vec4 v = vec4(v01.x, v01.y, v23.x, v23.y);
+            acc += p_sh[i] * v;
+        }
+        barrier();
+    }
+
+    uint ml = c * HEADS + h;
+    P[ml * 2] = m_prev;
+    P[ml * 2 + 1] = l_prev;
+    uint ab = ACC_BASE + ml * HEAD_DIM + lane * 4;
+    P[ab] = acc.x; P[ab+1] = acc.y; P[ab+2] = acc.z; P[ab+3] = acc.w;
+}
