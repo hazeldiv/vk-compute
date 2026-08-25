@@ -173,27 +173,25 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         return;
     }
 
-    buffer ffnBufs[12];
-    int bf = 0;
-    ffnBufs[bf++] = st->h;
-    ffnBufs[bf++] = w->gammaF[L];
-    ffnBufs[bf++] = w->gate[L].data;
-    ffnBufs[bf++] = w->up[L].data;
-    ffnBufs[bf++] = st->act;
-    if (f != QUANT_FP16) {
-        ffnBufs[bf++] = w->gate[L].scale;
-        ffnBufs[bf++] = w->gate[L].zero;
-        ffnBufs[bf++] = w->up[L].scale;
-        ffnBufs[bf++] = w->up[L].zero;
-    }
-    ffnBufs[bf++] = st->invRms;
-    int push[] = {m, MODEL_FFN_N, MODEL_K};
     int pushP[] = {MODEL_K};
     buffer proBufs[2];
     proBufs[0] = st->h;
     proBufs[1] = st->invRms;
     addOp(ops, n, "RmsNorm-Prologue.spv", L, proBufs, 2, pushP, 1, m, 1);
-    if (f == QUANT_INT4) {
+
+    if (f == QUANT_FP16) {
+        buffer ffnBufs[6];
+        int bf = 0;
+        ffnBufs[bf++] = st->h;
+        ffnBufs[bf++] = w->gammaF[L];
+        ffnBufs[bf++] = w->gate[L].data;
+        ffnBufs[bf++] = w->up[L].data;
+        ffnBufs[bf++] = st->act;
+        ffnBufs[bf++] = st->invRms;
+        int push[] = {m, MODEL_FFN_N, MODEL_K};
+        addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
+              MODEL_FFN_N / 32, m / 16);
+    } else {
         buffer flatBufs[11];
         int bf2 = 0;
         flatBufs[bf2++] = st->h;
@@ -217,9 +215,6 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         cmbBufs[2] = st->act;
         int pushC[] = {m * MODEL_FFN_N};
         addOp(ops, n, "Swiglu-combine.spv", L, cmbBufs, 3, pushC, 1, (m * MODEL_FFN_N + 255) / 256, 1);
-    } else {
-        addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
-              MODEL_FFN_N / 32, m / 16);
     }
 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
