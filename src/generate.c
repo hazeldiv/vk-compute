@@ -371,19 +371,26 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
     return n;
 }
 
-static int compilePrefill(generator* g) {
+static int compilePrefill(generator* g, int m, int offset) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     operation* ops = g->prefillOps;
     int n = 0;
-    int m = g->maxM;
 
     buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
     int pushE[] = {m, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
     addOp(ops, &n, "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", -1, embedBufs, 11, pushE, 4, MODEL_PROJ_N / 16, m / 16);
 
+    int start = n;
     for (int L = 0; L < g->spec->layerCount; L++) {
         buildLayer(g, ops, &n, L, 1, m, 0);
+    }
+    for (int i = start; i < n; i++) {
+        if (strstr(ops[i].shader, "QKV-GEMM") != NULL) {
+            ops[i].pushConstants[3] = offset;
+        } else if (strstr(ops[i].shader, "Att-full-GEMM") != NULL) {
+            ops[i].pushConstants[0] = offset + m;
+        }
     }
 
     return n;
@@ -405,7 +412,7 @@ generator* createGenerator(session s, const model_config* spec, int maxM) {
     g.st = createState(s, spec, maxM);
     g.groupOpCount = compileDecodeGroup(&g, g.groupOps, 1);
     g.groupOpCountShort = compileDecodeGroup(&g, g.groupOpsShort, 0);
-    g.prefillOpCount = compilePrefill(&g);
+    g.prefillOpCount = compilePrefill(&g, g.maxM, 0);
     g.finalOpCount = compileFinal(&g);
     return &g;
 }
@@ -415,22 +422,42 @@ void destroyGenerator(generator* g) {
     destroyWeights(g->s, &g->w);
 }
 
+static void executeChunked(session s, operation* ops, int opCount) {
+    int done = 0;
+    while (done < opCount) {
+        int cnt = opCount - done;
+        if (cnt > 8) cnt = 8;
+        executeRecord(&s, ops + done, cnt);
+        executeSubmitNow(&s);
+        executeWaitLast(&s);
+        done += cnt;
+    }
+}
+
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     model_state* st = &g->st;
     int m = g->maxM;
 
-    memcpy(st->tokenIds.mappedMemory, tokens, sizeof(uint32_t) * m);
-
-    executeLogged(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)g->nextPos);
+    int done = 0;
+    int lastCur = 0;
+    while (done < nTokens) {
+        int cur = nTokens - done;
+        if (cur > m) cur = m;
+        memcpy(st->tokenIds.mappedMemory, tokens + done, sizeof(uint32_t) * cur);
+        g->prefillOpCount = compilePrefill(g, cur, done);
+        executeChunked(g->s, g->prefillOps, g->prefillOpCount);
+        done += cur;
+        lastCur = cur;
+    }
 
     float* hCpu = (float*)malloc(sizeof(float) * m * MODEL_K);
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->h, hCpu);
-    memcpy(st->lastRow.mappedMemory, hCpu + (nTokens - 1) * MODEL_K, sizeof(float) * MODEL_K);
+    memcpy(st->lastRow.mappedMemory, hCpu + (lastCur - 1) * MODEL_K, sizeof(float) * MODEL_K);
     free(hCpu);
 
     executeLogged(g->s, g->finalOps, g->finalOpCount, "prefill", (int)g->nextPos);
 
-    g->nextPos += (uint32_t)m;
+    g->nextPos += (uint32_t)nTokens;
 
     uint32_t results[4] = {0};
     readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->result, results);

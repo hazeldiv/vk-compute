@@ -46,7 +46,7 @@ static model_config spec = {
 
 void compute(void) {
     session s = createSession();
-    generator* g = createGenerator(s, &spec, MODEL_MAX_GEMM);
+    generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK);
 
     uint32_t prompt[MODEL_MAX_GEMM];
     for (int i = 0; i < MODEL_MAX_GEMM; i++) {
