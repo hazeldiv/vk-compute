@@ -3132,7 +3132,7 @@ void validateRmsNormSwigluFfnGEMM2INT4(session s, int M, int N, int K, float* in
          .dispatchX = M, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "RmsNorm-swiglu-ffn-GEMM2-INT4.spv", .buffers = {inputBuffer, gammaBuffer, gateBuffer, upBuffer, outBuffer, gateScale, gateZero, upScale, upZero, invRmsBuffer}, .bufferCount = 10,
          .pushConstants = {M, N, K}, .pushConstantCount = 3,
-         .dispatchX = N / 64, .dispatchY = M / 16, .dispatchZ = 1}
+         .dispatchX = N / 32, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
 

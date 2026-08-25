@@ -69,6 +69,8 @@ if (ly->attn.type == ATTENTION_FULL) {
     st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 528384);
     st.invRms = createZeroed(s, (int64_t)sizeof(float) * maxM);
     st.attScores = createZeroed(s, (int64_t)maxM * MODEL_MAX_CTX * 4 * 2);
+    st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
+    st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
 
     buffer bufs[] = {
         st.h, st.act, st.embOut, st.yGated, st.attnOut, st.qOut,
@@ -125,6 +127,8 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->attPartial);
     destroyBuffer(s.dev.device, st->invRms);
     destroyBuffer(s.dev.device, st->attScores);
+    destroyBuffer(s.dev.device, st->gAct);
+    destroyBuffer(s.dev.device, st->uAct);
 }
 
 void stateSetPosition(session s, model_state* st, uint32_t pos) {

@@ -125,7 +125,10 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
     bufs[b++] = st->invRms;
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
     int pushP[] = {MODEL_K};
-    addOp(ops, n, "RmsNorm-Prologue.spv", L, bufs, 2, pushP, 1, m, 1);
+    buffer proBufs[2];
+    proBufs[0] = st->h;
+    proBufs[1] = st->invRms;
+    addOp(ops, n, "RmsNorm-Prologue.spv", L, proBufs, 2, pushP, 1, m, 1);
     addOp(ops, n, model_shader("RmsNorm-LinearProj-GEMM2", q), L, bufs, b, push, 3,
           MODEL_PROJ_N / 32, m / 16);
 }
@@ -186,10 +189,34 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
     ffnBufs[bf++] = st->invRms;
     int push[] = {m, MODEL_FFN_N, MODEL_K};
     int pushP[] = {MODEL_K};
-    addOp(ops, n, "RmsNorm-Prologue.spv", L, ffnBufs, 2, pushP, 1, m, 1);
+    buffer proBufs[2];
+    proBufs[0] = st->h;
+    proBufs[1] = st->invRms;
+    addOp(ops, n, "RmsNorm-Prologue.spv", L, proBufs, 2, pushP, 1, m, 1);
     if (f == QUANT_INT4) {
-        addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
-              MODEL_FFN_N / 64, m / 16);
+        buffer flatBufs[11];
+        int bf2 = 0;
+        flatBufs[bf2++] = st->h;
+        flatBufs[bf2++] = w->gammaF[L];
+        flatBufs[bf2++] = w->gate[L].data;
+        flatBufs[bf2++] = w->up[L].data;
+        flatBufs[bf2++] = st->gAct;
+        flatBufs[bf2++] = st->uAct;
+        flatBufs[bf2++] = w->gate[L].scale;
+        flatBufs[bf2++] = w->gate[L].zero;
+        flatBufs[bf2++] = w->up[L].scale;
+        flatBufs[bf2++] = w->up[L].zero;
+        flatBufs[bf2++] = st->invRms;
+        int pushF[] = {m, MODEL_FFN_N, MODEL_K, MODEL_FFN_N};
+        addOp(ops, n, model_shader("RmsNorm-swiglu-flat-GEMM2", f), L, flatBufs, bf2, pushF, 4,
+              (MODEL_FFN_N * 2) / 32, m / 16);
+
+        buffer cmbBufs[3];
+        cmbBufs[0] = st->gAct;
+        cmbBufs[1] = st->uAct;
+        cmbBufs[2] = st->act;
+        int pushC[] = {m * MODEL_FFN_N};
+        addOp(ops, n, "Swiglu-combine.spv", L, cmbBufs, 3, pushC, 1, (m * MODEL_FFN_N + 255) / 256, 1);
     } else {
         addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
               MODEL_FFN_N / 32, m / 16);

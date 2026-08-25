@@ -1,0 +1,95 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define TN 32
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; uint off; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 gate[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { uvec4 up[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float gOut[]; };
+layout(set = 0, binding = 5) writeonly restrict buffer MatrixF { float uOut[]; };
+layout(set = 0, binding = 6) readonly restrict buffer MatrixG { vec4 scaleGate[]; };
+layout(set = 0, binding = 7) readonly restrict buffer MatrixH { vec4 zeroPointGate[]; };
+layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 scaleUp[]; };
+layout(set = 0, binding = 9) readonly restrict buffer MatrixJ { vec4 zeroPointUp[]; };
+layout(set = 0, binding = 10) readonly restrict buffer InvRms { float invRms[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TN];
+
+const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
+const uvec4 highShifts = uvec4(16, 20, 24, 28);
+
+vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
+    return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nBase = gl_WorkGroupID.x * TN;
+    bool upHalf = nBase >= dims.off;
+    uint lBase = nBase - (upHalf ? dims.off : 0u);
+    uint g = lBase / 256;
+
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+        }
+        if (tid < 32) {
+            uint c = tid;
+            uint sIdx = g * (dims.K / vec) + t * 4;
+            if (!upHalf) {
+                uvec4 raw = gate[(t / 2) * dims.N + lBase + c];
+                bool hi = ((t & 1) == 1);
+                uint r0 = hi ? raw.z : raw.x;
+                uint r1 = hi ? raw.w : raw.y;
+                Bsub[0][c] = unpackInt4x4(r0, lowShifts)  * scaleGate[sIdx+0] - zeroPointGate[sIdx+0];
+                Bsub[1][c] = unpackInt4x4(r0, highShifts) * scaleGate[sIdx+1] - zeroPointGate[sIdx+1];
+                Bsub[2][c] = unpackInt4x4(r1, lowShifts)  * scaleGate[sIdx+2] - zeroPointGate[sIdx+2];
+                Bsub[3][c] = unpackInt4x4(r1, highShifts) * scaleGate[sIdx+3] - zeroPointGate[sIdx+3];
+            } else {
+                uvec4 raw = up[(t / 2) * dims.N + lBase + c];
+                bool hi = ((t & 1) == 1);
+                uint r0 = hi ? raw.z : raw.x;
+                uint r1 = hi ? raw.w : raw.y;
+                Bsub[0][c] = unpackInt4x4(r0, lowShifts)  * scaleUp[sIdx+0] - zeroPointUp[sIdx+0];
+                Bsub[1][c] = unpackInt4x4(r0, highShifts) * scaleUp[sIdx+1] - zeroPointUp[sIdx+1];
+                Bsub[2][c] = unpackInt4x4(r1, lowShifts)  * scaleUp[sIdx+2] - zeroPointUp[sIdx+2];
+                Bsub[3][c] = unpackInt4x4(r1, highShifts) * scaleUp[sIdx+3] - zeroPointUp[sIdx+3];
+            }
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            acc0 += dot(a, Bsub[kv][col * 2]);
+            acc1 += dot(a, Bsub[kv][col * 2 + 1]);
+        }
+        barrier();
+    }
+
+    uint n0 = lBase + col * 2;
+    if (!upHalf) {
+        gOut[mGlobal * dims.N + n0]     = acc0;
+        gOut[mGlobal * dims.N + n0 + 1] = acc1;
+    } else {
+        uOut[mGlobal * dims.N + n0]     = acc0;
+        uOut[mGlobal * dims.N + n0 + 1] = acc1;
+    }
+}

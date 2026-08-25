@@ -1,0 +1,16 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform P { uint count; } p;
+
+layout(set = 0, binding = 0) readonly restrict buffer G { float g[]; };
+layout(set = 0, binding = 1) readonly restrict buffer U { float u[]; };
+layout(set = 0, binding = 2) writeonly restrict buffer A { float a[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= p.count) return;
+    float v = g[i];
+    a[i] = (v / (1.0 + exp2(-v * 1.44269504))) * u[i];
+}

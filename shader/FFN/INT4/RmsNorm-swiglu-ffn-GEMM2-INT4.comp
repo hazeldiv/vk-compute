@@ -2,7 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : require
 #define TS 16
-#define TN 64
+#define TN 32
 #define vec 4
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
@@ -41,12 +41,8 @@ void main() {
 
     float accGate0 = 0.0;
     float accGate1 = 0.0;
-    float accGate2 = 0.0;
-    float accGate3 = 0.0;
     float accUp0 = 0.0;
     float accUp1 = 0.0;
-    float accUp2 = 0.0;
-    float accUp3 = 0.0;
 
     for (uint t = 0; t < dims.K / TS; t++) {
         if (tid < 64) {
@@ -55,7 +51,7 @@ void main() {
             uint mg = gl_WorkGroupID.y * TS + m;
             Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
         }
-        if (tid < 64) {
+        if (tid < 32) {
             uint c = tid;
             uvec4 rawGate = gate[(t / 2) * dims.N + nBase + c];
             bool hi = ((t & 1) == 1);
@@ -65,8 +61,8 @@ void main() {
             BgSub[1][c] = unpackInt4x4(c0, highShifts) * scaleGate[g*(dims.K/vec)+t*4+1] - zeroPointGate[g*(dims.K/vec)+t*4+1];
             BgSub[2][c] = unpackInt4x4(c1, lowShifts)  * scaleGate[g*(dims.K/vec)+t*4+2] - zeroPointGate[g*(dims.K/vec)+t*4+2];
             BgSub[3][c] = unpackInt4x4(c1, highShifts) * scaleGate[g*(dims.K/vec)+t*4+3] - zeroPointGate[g*(dims.K/vec)+t*4+3];
-        } else if (tid < 128) {
-            uint c = tid - 64;
+        } else if (tid < 64) {
+            uint c = tid - 32;
             uvec4 rawUp = up[(t / 2) * dims.N + nBase + c];
             bool hi = ((t & 1) == 1);
             uint d0 = hi ? rawUp.z : rawUp.x;
@@ -80,21 +76,15 @@ void main() {
         #pragma unroll
         for (uint kv = 0; kv < 4; kv++) {
             vec4 a = Asub[kv][row];
-            accGate0 += dot(a, BgSub[kv][col * 4]);
-            accGate1 += dot(a, BgSub[kv][col * 4 + 1]);
-            accGate2 += dot(a, BgSub[kv][col * 4 + 2]);
-            accGate3 += dot(a, BgSub[kv][col * 4 + 3]);
-            accUp0   += dot(a, BuSub[kv][col * 4]);
-            accUp1   += dot(a, BuSub[kv][col * 4 + 1]);
-            accUp2   += dot(a, BuSub[kv][col * 4 + 2]);
-            accUp3   += dot(a, BuSub[kv][col * 4 + 3]);
+            accGate0 += dot(a, BgSub[kv][col * 2]);
+            accGate1 += dot(a, BgSub[kv][col * 2 + 1]);
+            accUp0   += dot(a, BuSub[kv][col * 2]);
+            accUp1   += dot(a, BuSub[kv][col * 2 + 1]);
         }
         barrier();
     }
 
-    uint n0 = nBase + col * 4;
+    uint n0 = nBase + col * 2;
     y[mGlobal * dims.N + n0]     = (accGate0 / (1.0 + exp2(-accGate0 * 1.44269504))) * accUp0;
     y[mGlobal * dims.N + n0 + 1] = (accGate1 / (1.0 + exp2(-accGate1 * 1.44269504))) * accUp1;
-    y[mGlobal * dims.N + n0 + 2] = (accGate2 / (1.0 + exp2(-accGate2 * 1.44269504))) * accUp2;
-    y[mGlobal * dims.N + n0 + 3] = (accGate3 / (1.0 + exp2(-accGate3 * 1.44269504))) * accUp3;
 }
