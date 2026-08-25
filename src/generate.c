@@ -68,8 +68,9 @@ static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor
     }
     bufs[b++] = residual;
     int k = (input.buffer == g->st.act.buffer) ? MODEL_FFN_N : MODEL_K;
+    int tn = (q == QUANT_INT4) ? 64 : 32;
     int push[] = {m, MODEL_K, k};
-    addOp(ops, n, model_shader("GEMM-ADD", q), L, bufs, b, push, 3, MODEL_K / 16, m / 16);
+    addOp(ops, n, model_shader("GEMM-ADD2", q), L, bufs, b, push, 3, MODEL_K / tn, m / 16);
 }
 
 static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -121,9 +122,12 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
         bufs[b++] = w->proj[L].scale;
         bufs[b++] = w->proj[L].zero;
     }
+    bufs[b++] = st->invRms;
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
-    addOp(ops, n, model_shader("RmsNorm-LinearProj-GEMM", q), L, bufs, b, push, 3,
-          MODEL_PROJ_N / 16, m / 16);
+    int pushP[] = {MODEL_K};
+    addOp(ops, n, "RmsNorm-Prologue.spv", L, bufs, 2, pushP, 1, m, 1);
+    addOp(ops, n, model_shader("RmsNorm-LinearProj-GEMM2", q), L, bufs, b, push, 3,
+          MODEL_PROJ_N / 32, m / 16);
 }
 
 static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -166,7 +170,7 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         return;
     }
 
-    buffer ffnBufs[11];
+    buffer ffnBufs[12];
     int bf = 0;
     ffnBufs[bf++] = st->h;
     ffnBufs[bf++] = w->gammaF[L];
@@ -179,9 +183,17 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         ffnBufs[bf++] = w->up[L].scale;
         ffnBufs[bf++] = w->up[L].zero;
     }
+    ffnBufs[bf++] = st->invRms;
     int push[] = {m, MODEL_FFN_N, MODEL_K};
-    addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM", f), L, ffnBufs, bf, push, 3,
-          MODEL_FFN_N / 16, m / 16);
+    int pushP[] = {MODEL_K};
+    addOp(ops, n, "RmsNorm-Prologue.spv", L, ffnBufs, 2, pushP, 1, m, 1);
+    if (f == QUANT_INT4) {
+        addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
+              MODEL_FFN_N / 64, m / 16);
+    } else {
+        addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
+              MODEL_FFN_N / 32, m / 16);
+    }
 
     addGemmAdd(g, ops, n, L, &w->down[L], st->act, st->h, st->h, f, m);
 }
@@ -422,7 +434,7 @@ void destroyGenerator(generator* g) {
     destroyWeights(g->s, &g->w);
 }
 
-static void executeChunked(session s, operation* ops, int opCount) {
+static void executeChunked(session s, operation* ops, int opCount, const char* phase, int token) {
     int done = 0;
     while (done < opCount) {
         int cnt = opCount - done;
@@ -430,6 +442,7 @@ static void executeChunked(session s, operation* ops, int opCount) {
         executeRecord(&s, ops + done, cnt);
         executeSubmitNow(&s);
         executeWaitLast(&s);
+        logLastFrame(&s, ops + done, cnt, phase, token);
         done += cnt;
     }
 }
@@ -445,7 +458,7 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
         if (cur > m) cur = m;
         memcpy(st->tokenIds.mappedMemory, tokens + done, sizeof(uint32_t) * cur);
         g->prefillOpCount = compilePrefill(g, cur, done);
-        executeChunked(g->s, g->prefillOps, g->prefillOpCount);
+        executeChunked(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)(g->nextPos + done));
         done += cur;
         lastCur = cur;
     }

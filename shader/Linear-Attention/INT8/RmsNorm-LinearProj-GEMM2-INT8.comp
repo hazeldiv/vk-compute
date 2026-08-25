@@ -1,0 +1,88 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define TN 32
+#define vec 4
+#define K_OFF 2048
+#define V_OFF 4096
+#define G_OFF 8192
+#define A_OFF 12288
+#define B_OFF 12304
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 w[]; };
+layout(set = 0, binding = 3) writeonly restrict buffer MatrixD { float qOut[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float kOut[]; };
+layout(set = 0, binding = 5) writeonly restrict buffer MatrixF { float vOut[]; };
+layout(set = 0, binding = 6) writeonly restrict buffer MatrixG { float gOut[]; };
+layout(set = 0, binding = 7) writeonly restrict buffer MatrixH { float aOut[]; };
+layout(set = 0, binding = 8) writeonly restrict buffer MatrixI { float bOut[]; };
+layout(set = 0, binding = 9) readonly restrict buffer MatrixJ { vec4 scale[]; };
+layout(set = 0, binding = 10) readonly restrict buffer MatrixK { vec4 zeroPoint[]; };
+layout(set = 0, binding = 11) readonly restrict buffer InvRms { float invRms[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 Bsub[4][TN];
+
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes);
+}
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nBase = gl_WorkGroupID.x * TN;
+    uint g = nBase / 256;
+
+    float acc0 = 0.0;
+    float acc1 = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+        }
+        if (tid < 32) {
+            uvec4 raw = w[t * dims.N + nBase + tid];
+            Bsub[0][tid] = unpackUint8x4(raw.x) * scale[g*(dims.K/vec)+t*4+0] - zeroPoint[g*(dims.K/vec)+t*4+0];
+            Bsub[1][tid] = unpackUint8x4(raw.y) * scale[g*(dims.K/vec)+t*4+1] - zeroPoint[g*(dims.K/vec)+t*4+1];
+            Bsub[2][tid] = unpackUint8x4(raw.z) * scale[g*(dims.K/vec)+t*4+2] - zeroPoint[g*(dims.K/vec)+t*4+2];
+            Bsub[3][tid] = unpackUint8x4(raw.w) * scale[g*(dims.K/vec)+t*4+3] - zeroPoint[g*(dims.K/vec)+t*4+3];
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            acc0 += dot(a, Bsub[kv][col * 2]);
+            acc1 += dot(a, Bsub[kv][col * 2 + 1]);
+        }
+        barrier();
+    }
+
+    uint n0 = nBase + col * 2;
+    uint ng = n0;
+    if (ng < K_OFF)         qOut[mGlobal * 2048 + ng] = acc0;
+    else if (ng < V_OFF)    kOut[mGlobal * 2048 + (ng - K_OFF)] = acc0;
+    else if (ng < G_OFF)    vOut[mGlobal * 4096 + (ng - V_OFF)] = acc0;
+    else if (ng < A_OFF)    gOut[mGlobal * 4096 + (ng - G_OFF)] = acc0;
+    else if (ng < B_OFF)    aOut[mGlobal * 16 + (ng - A_OFF)] = acc0;
+    else                    bOut[mGlobal * 16 + (ng - B_OFF)] = acc0;
+    ng = n0 + 1;
+    if (ng < K_OFF)         qOut[mGlobal * 2048 + ng] = acc1;
+    else if (ng < V_OFF)    kOut[mGlobal * 2048 + (ng - K_OFF)] = acc1;
+    else if (ng < G_OFF)    vOut[mGlobal * 4096 + (ng - V_OFF)] = acc1;
+    else if (ng < A_OFF)    gOut[mGlobal * 4096 + (ng - G_OFF)] = acc1;
+    else if (ng < B_OFF)    aOut[mGlobal * 16 + (ng - A_OFF)] = acc1;
+    else                    bOut[mGlobal * 16 + (ng - B_OFF)] = acc1;
+}

@@ -1,0 +1,70 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define TS 16
+#define TN 32
+#define vec 4
+
+layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+
+layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
+layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };
+layout(set = 0, binding = 2) readonly restrict buffer MatrixC { uvec4 gate[]; };
+layout(set = 0, binding = 3) readonly restrict buffer MatrixD { uvec4 up[]; };
+layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float y[]; };
+layout(set = 0, binding = 5) readonly restrict buffer InvRms { float invRms[]; };
+
+shared vec4 Asub[4][TS];
+shared vec4 BgSub[4][TN];
+shared vec4 BuSub[4][TN];
+
+void main() {
+    uint row = gl_LocalInvocationID.y;
+    uint col = gl_LocalInvocationID.x;
+    uint tid = row * TS + col;
+    uint mGlobal = gl_WorkGroupID.y * TS + row;
+    uint nBase = gl_WorkGroupID.x * TN;
+
+    float accGate0 = 0.0;
+    float accGate1 = 0.0;
+    float accUp0 = 0.0;
+    float accUp1 = 0.0;
+
+    for (uint t = 0; t < dims.K / TS; t++) {
+        if (tid < 64) {
+            uint m = tid / 4;
+            uint kv = tid % 4;
+            uint mg = gl_WorkGroupID.y * TS + m;
+            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+        }
+        if (tid < 64) {
+            uint block = tid / 32;
+            uint c = tid % 32;
+            uvec4 rg = gate[(t * 2 + block) * dims.N + nBase + c];
+            BgSub[block * 2][c]     = vec4(unpackHalf2x16(rg.x), unpackHalf2x16(rg.y));
+            BgSub[block * 2 + 1][c] = vec4(unpackHalf2x16(rg.z), unpackHalf2x16(rg.w));
+        } else if (tid < 128) {
+            uint block = (tid - 64) / 32;
+            uint c = (tid - 64) % 32;
+            uvec4 ru = up[(t * 2 + block) * dims.N + nBase + c];
+            BuSub[block * 2][c]     = vec4(unpackHalf2x16(ru.x), unpackHalf2x16(ru.y));
+            BuSub[block * 2 + 1][c] = vec4(unpackHalf2x16(ru.z), unpackHalf2x16(ru.w));
+        }
+        barrier();
+        #pragma unroll
+        for (uint kv = 0; kv < 4; kv++) {
+            vec4 a = Asub[kv][row];
+            accGate0 += dot(a, BgSub[kv][col * 2]);
+            accGate1 += dot(a, BgSub[kv][col * 2 + 1]);
+            accUp0   += dot(a, BuSub[kv][col * 2]);
+            accUp1   += dot(a, BuSub[kv][col * 2 + 1]);
+        }
+        barrier();
+    }
+
+    uint n0 = nBase + col * 2;
+    y[mGlobal * dims.N + n0]     = (accGate0 / (1.0 + exp2(-accGate0 * 1.44269504))) * accUp0;
+    y[mGlobal * dims.N + n0 + 1] = (accGate1 / (1.0 + exp2(-accGate1 * 1.44269504))) * accUp1;
+}

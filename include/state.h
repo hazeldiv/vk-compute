@@ -37,6 +37,7 @@ typedef struct model_state {
     buffer ffnPartial;
     buffer linprojPartial;
     buffer attPartial;
+    buffer invRms;
 } model_state;
 
 model_state createState(session s, const model_config* spec, int maxM);
