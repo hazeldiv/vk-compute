@@ -16,6 +16,7 @@ layout(push_constant) uniform Dimensions {
     uint M;
     uint N;
     uint K;
+    uint gOffset;
     uint kOffset;
     uint vOffset;
 } param;
@@ -36,6 +37,9 @@ layout(set = 0, binding = 10) buffer kZeroBuffer { float kZero[]; };
 layout(set = 0, binding = 11) buffer vScaleBuffer { float vScale[]; };
 layout(set = 0, binding = 12) buffer vZeroBuffer { float vZero[]; };
 layout(set = 0, binding = 13) buffer PositionBuffer { uint position[]; };
+layout(set = 0, binding = 14) readonly buffer qGammaBuffer { float qGamma[]; };
+layout(set = 0, binding = 15) readonly buffer kGammaBuffer { float kGamma[]; };
+layout(set = 0, binding = 16) buffer gAttnBuffer { float gAttn[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -144,6 +148,11 @@ void main() {
 
     uint cacheSlot = pos * (param.vOffset - param.kOffset);
 
+    if (globalCol >= param.gOffset && globalCol < param.kOffset) {
+        gAttn[globalCol - param.gOffset] = acc;
+        return;
+    }
+
     if (globalCol >= param.vOffset) {
         uint row = globalCol - param.vOffset;
         uint kvHead = gl_WorkGroupID.x - param.vOffset / TS;
@@ -170,7 +179,8 @@ void main() {
     float rms2 = sqrt((shared_sum2 / float(HEAD_DIM)) + EPSILON);
     float inv_rms2 = 1.0 / rms2;
 
-    rope_shared[col] = acc * inv_rms2;
+    float normGamma = (globalCol < param.gOffset) ? qGamma[col] : kGamma[col];
+    rope_shared[col] = acc * inv_rms2 * normGamma;
     barrier();
 
     float angle = float(pos) * theta[col & (HALF - 1u)];

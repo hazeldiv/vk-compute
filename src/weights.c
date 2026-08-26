@@ -222,6 +222,17 @@ model_weights createWeights(session s, const model_config* spec) {
         free(gF);
 
         if (ly->attn.type == ATTENTION_FULL) {
+            float* qn = getData(88001 + L, 1, MODEL_HEAD_DIM);
+            float* kn = getData(89001 + L, 1, MODEL_HEAD_DIM);
+            w.qNorm[L] = createBuffer(s.dev.device, s.dev.physicalDevice, qn, sizeof(float) * MODEL_HEAD_DIM, MEMORY_VRAM);
+            countBuffer("qNorm", L, w.qNorm[L]);
+            w.kNorm[L] = createBuffer(s.dev.device, s.dev.physicalDevice, kn, sizeof(float) * MODEL_HEAD_DIM, MEMORY_VRAM);
+            countBuffer("kNorm", L, w.kNorm[L]);
+            free(qn);
+            free(kn);
+        }
+
+        if (ly->attn.type == ATTENTION_FULL) {
             w.proj[L] = createTensor(s, "proj", L, 82001 + L * 10, MODEL_K, MODEL_QKV_N, q, 1.0f);
             w.out[L] = createTensor(s, "out", L, 83001 + L * 10, MODEL_K, MODEL_K, q, 1.0f);
         } else if (ly->attn.type == ATTENTION_DELTA) {
@@ -255,6 +266,8 @@ void destroyWeights(session s, model_weights* w) {
         destroyTensor(s, &w->down[L]);
         destroyBuffer(s.dev.device, w->gammaIn[L]);
         destroyBuffer(s.dev.device, w->gammaF[L]);
+        if (w->qNorm[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, w->qNorm[L]);
+        if (w->kNorm[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, w->kNorm[L]);
     }
     destroyBuffer(s.dev.device, w->theta);
     destroyBuffer(s.dev.device, w->gammaFinal);

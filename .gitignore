@@ -1,6 +1,10 @@
 .claude
 .vscode
 .opencode
+tools/pruner/__pycache__
+tools/pruner/.venv
+tools
+data
 bin
 build
 model

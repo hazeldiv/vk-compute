@@ -13,6 +13,7 @@ typedef struct model_state {
     buffer embStaged;
     buffer yGated;
     buffer attnOut;
+    buffer gAttn;
     buffer qOut;
     buffer qProj;
     buffer kProj;

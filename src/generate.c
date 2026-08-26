@@ -248,7 +248,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         addOp(ops, n, model_shader("RmsNorm-QKV-GEMM2", q), L, qkvGBufs, bq2, pushQ, 3,
               MODEL_QKV_N / tnQkv, m / 16);
 
-        buffer ropeGBufs[9];
+        buffer ropeGBufs[13];
         int brg = 0;
         ropeGBufs[brg++] = st->qkvRaw;
         ropeGBufs[brg++] = st->qOut;
@@ -261,9 +261,12 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             ropeGBufs[brg++] = st->vZero[L];
         }
         ropeGBufs[brg++] = w->theta;
-        int pushRG[] = {MODEL_QKV_N, MODEL_Q_OFF, MODEL_V_OFF, offset};
-        addOp(ops, n, model_shader("Rope-GEMM", q), L, ropeGBufs, brg, pushRG, 4,
-              MODEL_HEADS + 2 * MODEL_KV_HEADS, m);
+        ropeGBufs[brg++] = w->qNorm[L];
+        ropeGBufs[brg++] = w->kNorm[L];
+        ropeGBufs[brg++] = st->gAttn;
+        int pushRG[] = {MODEL_QKV_N, MODEL_G_OFF, MODEL_K_OFF, MODEL_V_OFF, offset};
+        addOp(ops, n, model_shader("Rope-GEMM", q), L, ropeGBufs, brg, pushRG, 5,
+              2 * MODEL_HEADS + 2 * MODEL_KV_HEADS, m);
 
         int pushA[] = {ctx, offset, m, 0};
 
@@ -294,6 +297,13 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         pvBufs[bp++] = st->attnOut;
         pvBufs[bp++] = st->smSum;
         addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, (m / 16) * 4);
+
+        buffer gateBufs[2];
+        gateBufs[0] = st->gAttn;
+        gateBufs[1] = st->attnOut;
+        int pushGate[] = {m * MODEL_Q_OFF};
+        addOp(ops, n, "Gate-Sigmoid.spv", L, gateBufs, 2, pushGate, 1,
+              (m * MODEL_Q_OFF + 255) / 256, 1);
     } else {
         buffer splitBufs[6];
         int bs = 0;
@@ -309,7 +319,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         addOp(ops, n, model_shader("RmsNorm-QKV-SplitK", q), L, splitBufs, bs, push, 3,
               MODEL_QKV_N / 256, 4);
 
-        buffer ropeBufs[10];
+        buffer ropeBufs[13];
         int br = 0;
         ropeBufs[br++] = st->qkvPartial;
         ropeBufs[br++] = st->qOut;
@@ -323,9 +333,12 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         }
         ropeBufs[br++] = w->theta;
         ropeBufs[br++] = st->position;
-        int pushRope[] = {MODEL_QKV_N, MODEL_Q_OFF, MODEL_V_OFF};
-        addOp(ops, n, model_shader("Reduce-Rope", q), L, ropeBufs, br, pushRope, 3,
-              MODEL_HEADS + 2 * MODEL_KV_HEADS, 1);
+        ropeBufs[br++] = w->qNorm[L];
+        ropeBufs[br++] = w->kNorm[L];
+        ropeBufs[br++] = st->gAttn;
+        int pushRope[] = {MODEL_QKV_N, MODEL_G_OFF, MODEL_K_OFF, MODEL_V_OFF};
+        addOp(ops, n, model_shader("Reduce-Rope", q), L, ropeBufs, br, pushRope, 4,
+              2 * MODEL_HEADS + 2 * MODEL_KV_HEADS, 1);
 
         buffer attBufs[10];
         int ba = 0;
@@ -365,6 +378,13 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             fullBufs[bf++] = st->position;
             addOp(ops, n, model_shader("Att-full", q), L, fullBufs, bf, push0, 0, MODEL_HEADS, 1);
         }
+
+        buffer gateBufs[2];
+        gateBufs[0] = st->gAttn;
+        gateBufs[1] = st->attnOut;
+        int pushGate[] = {MODEL_Q_OFF};
+        addOp(ops, n, "Gate-Sigmoid.spv", L, gateBufs, 2, pushGate, 1,
+              (MODEL_Q_OFF + 255) / 256, 1);
     }
 
     addGemmAdd(g, ops, n, L, &w->out[L], st->attnOut, st->h, st->h, q, m);

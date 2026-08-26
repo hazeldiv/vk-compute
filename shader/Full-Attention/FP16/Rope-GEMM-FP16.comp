@@ -9,6 +9,7 @@ layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Params {
     uint N;
+    uint gOffset;
     uint kOffset;
     uint vOffset;
     uint tokBase;
@@ -19,6 +20,9 @@ layout(set = 0, binding = 1) buffer qOutBuffer { float qOut[]; };
 layout(set = 0, binding = 2) buffer kCacheBuffer { uint16_t kCache[]; };
 layout(set = 0, binding = 3) buffer vCacheBuffer { uint16_t vCache[]; };
 layout(set = 0, binding = 4) readonly restrict buffer thetaBuffer { float theta[]; };
+layout(set = 0, binding = 5) readonly restrict buffer qGammaBuffer { float qGamma[]; };
+layout(set = 0, binding = 6) readonly restrict buffer kGammaBuffer { float kGamma[]; };
+layout(set = 0, binding = 7) buffer gAttnBuffer { float gAttn[]; };
 
 shared float acc_shared[TS];
 shared float rope_shared[TS];
@@ -34,10 +38,44 @@ void main() {
     uint token = param.tokBase + row;
     uint cacheSlot = token * (param.vOffset - param.kOffset);
 
+    uint qHeads = param.gOffset / HEAD_DIM;
+    uint gHeads = (param.kOffset - param.gOffset) / HEAD_DIM;
+    uint kHeadBase = qHeads + gHeads;
+    uint vHeadBase = kHeadBase + (param.vOffset - param.kOffset) / HEAD_DIM;
+
     float acc = raw[row * param.N + globalCol];
 
-    if (globalCol >= param.vOffset) {
+    if (head >= vHeadBase) {
         vCache[cacheSlot + (globalCol - param.vOffset)] = uint16_t(packHalf2x16(vec2(acc)));
+        return;
+    }
+    if (head >= kHeadBase) {
+        acc_shared[col] = acc;
+        barrier();
+        if (col == 0) {
+            float final_sum = 0.0;
+            for (uint i = 0; i < TS; i++) {
+                final_sum += acc_shared[i] * acc_shared[i];
+            }
+            shared_sum2 = final_sum;
+        }
+        barrier();
+        float inv_rms2 = 1.0 / sqrt((shared_sum2 / float(HEAD_DIM)) + EPSILON);
+        rope_shared[col] = acc * inv_rms2 * kGamma[col];
+        barrier();
+        float angle = float(token) * theta[col & (HALF - 1u)];
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        if (col < HALF) {
+            acc = rope_shared[col] * cos_a - rope_shared[col + HALF] * sin_a;
+        } else {
+            acc = rope_shared[col - HALF] * sin_a + rope_shared[col] * cos_a;
+        }
+        kCache[cacheSlot + (globalCol - param.kOffset)] = uint16_t(packHalf2x16(vec2(acc)));
+        return;
+    }
+    if (head >= qHeads) {
+        gAttn[row * param.gOffset + (head - qHeads) * HEAD_DIM + col] = acc;
         return;
     }
 
@@ -54,7 +92,7 @@ void main() {
     barrier();
     float inv_rms2 = 1.0 / sqrt((shared_sum2 / float(HEAD_DIM)) + EPSILON);
 
-    rope_shared[col] = acc * inv_rms2;
+    rope_shared[col] = acc * inv_rms2 * qGamma[col];
     barrier();
 
     float angle = float(token) * theta[col & (HALF - 1u)];
@@ -66,9 +104,5 @@ void main() {
         acc = rope_shared[col - HALF] * sin_a + rope_shared[col] * cos_a;
     }
 
-    if (globalCol < param.kOffset) {
-        qOut[row * param.kOffset + globalCol] = acc;
-    } else {
-        kCache[cacheSlot + (globalCol - param.kOffset)] = uint16_t(packHalf2x16(vec2(acc)));
-    }
+    qOut[row * param.gOffset + globalCol] = acc;
 }

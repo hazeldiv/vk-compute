@@ -22,6 +22,8 @@ typedef struct model_weights {
     buffer gammaFinal;
     buffer gammaIn[MODEL_LAYERS];
     buffer gammaF[MODEL_LAYERS];
+    buffer qNorm[MODEL_LAYERS];
+    buffer kNorm[MODEL_LAYERS];
     tensor proj[MODEL_LAYERS];
     tensor out[MODEL_LAYERS];
     tensor gate[MODEL_LAYERS];
