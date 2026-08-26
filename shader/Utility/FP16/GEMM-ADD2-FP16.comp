@@ -14,8 +14,23 @@ layout(set = 0, binding = 1) readonly restrict buffer MatrixB { uvec4 B[]; };
 layout(set = 0, binding = 2) writeonly restrict buffer MatrixC { float C[]; };
 layout(set = 0, binding = 3) readonly restrict buffer MatrixR { float R[]; };
 
-shared vec4 Asub[4][TS];
-shared vec4 Bsub[4][TN];
+shared vec4 Asub[2][4][TS];
+shared vec4 Bsub[2][4][TN];
+
+void loadTiles(uint t, uint buf, uint tid) {
+    if (tid < 64) {
+        uint m = tid / 4;
+        uint kv = tid % 4;
+        Asub[buf][kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
+    }
+    if (tid < 64) {
+        uint block = tid / 32;
+        uint c = tid % 32;
+        uvec4 raw = B[(t * 2 + block) * dims.N + gl_WorkGroupID.x * TN + c];
+        Bsub[buf][block * 2][c]     = vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y));
+        Bsub[buf][block * 2 + 1][c] = vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
+    }
+}
 
 void main() {
     uint row = gl_LocalInvocationID.y;
@@ -27,25 +42,17 @@ void main() {
     float acc0 = 0.0;
     float acc1 = 0.0;
 
-    for (uint t = 0; t < dims.K / TS; t++) {
-        if (tid < 64) {
-            uint m = tid / 4;
-            uint kv = tid % 4;
-            Asub[kv][m] = A[(gl_WorkGroupID.y * TS + m) * (dims.K / vec) + t * 4 + kv];
-        }
-        if (tid < 64) {
-            uint block = tid / 32;
-            uint c = tid % 32;
-            uvec4 raw = B[(t * 2 + block) * dims.N + nBase + c];
-            Bsub[block * 2][c]     = vec4(unpackHalf2x16(raw.x), unpackHalf2x16(raw.y));
-            Bsub[block * 2 + 1][c] = vec4(unpackHalf2x16(raw.z), unpackHalf2x16(raw.w));
-        }
-        barrier();
+    uint numTiles = dims.K / TS;
+    loadTiles(0, 0u, tid);
+    barrier();
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1u;
+        if (t + 1 < numTiles) loadTiles(t + 1, cur ^ 1u, tid);
         #pragma unroll
         for (uint kv = 0; kv < 4; kv++) {
-            vec4 a = Asub[kv][row];
-            acc0 += dot(a, Bsub[kv][col * 2]);
-            acc1 += dot(a, Bsub[kv][col * 2 + 1]);
+            vec4 a = Asub[cur][kv][row];
+            acc0 += dot(a, Bsub[cur][kv][col * 2]);
+            acc1 += dot(a, Bsub[cur][kv][col * 2 + 1]);
         }
         barrier();
     }

@@ -64,14 +64,16 @@ vk-compute/
     │   ├── Reduce-GEMV-ADD.comp         # split-K reduce + residual add
     │   └── ArgMax-Reduce.comp           # final argmax over per-workgroup maxes
     ├── Full-Attention/         # QKV projection + RoPE + full attention
-    │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-*, RmsNorm-QKV-SplitK-*, Reduce-Rope-*
+    │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-* (legacy fused), RmsNorm-QKV-SplitK-*, Reduce-Rope-*
+    │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-GEMM2-* + Rope-GEMM-* (prefill, split passes)
     │   ├── FP16/ INT8/ INT4/   # Att-full-* (decode), Att-SplitK2-* (decode, split-K)
     │   ├── FP16/ INT8/ INT4/   # Att-QK2-*, Att-PV2-* (prefill, unfused)
-    │   ├── Att-Softmax.comp    # prefill softmax pass (fp16 score buffer)
+    │   ├── Att-Softmax.comp    # prefill softmax pass (fp16 score buffer + smSum reciprocals)
     │   └── Reduce-Att2.comp    # decode split-K attention reduce
     ├── Linear-Attention/       # gated delta-net
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-LinearProj-SplitK-* (decode),
     │   │                       # RmsNorm-LinearProj-GEMM2-* (prefill)
+    │   ├── Embed-Gather.comp   # prefill embedding pre-fetch (tied lm-head column gather)
     │   ├── GatedDeltaNet.comp  GatedDeltaNet-GEMM.comp   (precision-agnostic)
     │   └── Reduce-LinearProj.comp       # LinearProj split-K reduce (6-way routing)
     ├── FFN/                    # swiglu feed-forward
@@ -165,26 +167,28 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 
 - Input x: row-major `[M][K]` float, vec4 index `m*(K/4) + kvec`.
 - Outputs: row-major `[M][N]` float.
-- KV cache: `[token][row]` — fp16 (`uint16_t` + `packHalf2x16`) for FP16/INT8, or `uint8` + per-(kv-head, token) scale/zero for INT4.
+- KV cache: `[token][row]` — fp16 (`uint16_t` + `packHalf2x16`) for FP16/INT8, or `uint8` + per-(kv-head, token) scale/zero for INT4. Quantized scale/zero live at the **fixed** stride `kvh * MODEL_MAX_CTX + token` in every writer and reader (see gotcha 15).
 - RoPE theta: `theta[i] = 1e6^(-i/(dim/2))`, length `dim/2 = 128`.
 
 ### 4.5 Push constants
 
 - Generic GEMM/GEMV/FFN/LinearProj: `{M, N, K}`.
-- QKV GEMV: `{M, N, K, kOffset, vOffset}` — position comes from the shared position buffer. QKV GEMM: `{M, N, K, tokenIdx, kOffset, vOffset}` (tokenIdx = chunk base for RoPE; the shader writes the new context length to the position buffer).
+- QKV GEMV: `{M, N, K, kOffset, vOffset}` — position comes from the shared position buffer. Legacy QKV GEMM: `{M, N, K, tokenIdx, kOffset, vOffset}` (wrote the new context length to the position buffer — no longer used by the engine). Prefill `RmsNorm-QKV-GEMM2-*`: `{M, N, K}` (raw projection only). `Rope-GEMM-*`: `{N, kOffset, vOffset, tokBase}` (tokBase = chunk-absolute first token; the position buffer is **not** touched by prefill shaders — `runPrefill` sets it host-side once via `stateSetPosition` before `finalOps`).
 - Attention decode (`Att-full-*` / `Att-SplitK2-*`): no push constants — context_length = position buffer + 1. Attention prefill (`Att-QK2-*` / `Att-Softmax` / `Att-PV2-*`): `{ctxLen, qOff, mRows, headBase}` (ctxLen = chunk-absolute context, qOff = chunk base for the causal limit `qOff + mGlobal`). Legacy `Att-full-GEMM-*`: `{context_length}`.
 - GEMM2 prefill kernels: `RmsNorm-swiglu-flat-GEMM2-*` `{M, N, K, off}` (off = FFN gate/up boundary for `upHalf` routing); `RmsNorm-swiglu-ffn-GEMM2-*` / `RmsNorm-LinearProj-GEMM2-*` / `GEMM-ADD2-*` `{M, N, K}`; `RmsNorm-Prologue` `{K}`.
 - GatedDeltaNet: `{M}` (GEMM) or `{N_V, N_QK, DIM}` (decode).
 - LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize, doIncrement, passIdx}` for ArgMax-Reduce (doIncrement=1 bumps the position buffer by 1 after a generated token; passIdx tags the write slot for the double-buffered decode groups).
-- Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
+- Embed-Gather: `{V}` (vocab stride of the tied lm head). Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
 - Split-K decode reduce passes: `Reduce-GEMV-ADD` `{N, chunks}` (N = K, chunks = 4); `Reduce-LinearProj` `{N}`; `Reduce-Att2` / `Reduce-Rope` no push constants (N from geometry).
 
 ### 4.6 Dispatch geometry
 
 - GEMV shaders: `dispatchX = N/256` (one workgroup of 256 threads per 256 output columns), M=1.
 - GEMM shaders: `dispatchX = N/16`, `dispatchY = M/16` (each workgroup computes a 16×16 output tile).
-- GEMM2 shaders: `dispatchX = N/TN` (TN=32, or 64 for INT4 GEMM-ADD2), `dispatchY = M/16`; each workgroup computes a 16×TN output tile.
+- GEMM2 shaders: `dispatchX = N/TN` (TN=32, or 64 for INT4 GEMM-ADD2 / INT4 QKV-GEMM2), `dispatchY = M/16`; each workgroup computes a 16×TN output tile.
 - Flattened swiglu (gate|up in one grid): `dispatchX = 2*N/TN` (N=FFN_N, `upHalf = nBase >= off`), `dispatchY = M/16`.
+- Rope-GEMM: `dispatchX = heads + 2*kv_heads` (24 head workgroups), `dispatchY = M` (one row per workgroup, 256 threads).
+- Embed-Gather: `dispatchX = M`, 256 threads (each row gathers its K floats from the tied lm-head column).
 - QKV GEMM: `dispatchX = 24` (heads), `dispatchY = M/16` (head-wide 16×256 tile).
 - Attention prefill (QK2): `dispatchX = ctxLen/64` (64-token KV tiles), `dispatchY = (M/16)*4` (m-tiles × head-quads); Softmax: `dispatchX = M`, `dispatchY = 4`; PV2: `dispatchX = 4`, `dispatchY = (M/16)*4`.
 - Attention decode: `Att-full` `dispatchX = heads`; `Att-SplitK2` `dispatchX = heads`, `dispatchY = 128` (K-chunks of 4 tiles).
@@ -544,9 +548,9 @@ void main() {
 
 Workgroup = one head (256 columns). RMSNorm over K → project `N = 6144` columns (q 0..4095, k 4096..5119, v 5120..6143) → for q/k heads: per-head RMSNorm over 256 cols, then **RoPE**: `angle = pos * theta[col%128]`, first half `a·cos − b·sin`, second half `a·sin + b·cos` (a/b from opposite halves) → q written to `qOut`, k/v stored to the KV cache at slot `pos * (vOffset − kOffset)`. INT4 additionally quantizes k/v per (head, token) with min/max over the 256 cols and writes scale/zero. **Position source:** the write slot and RoPE index come from a shared `uint[1]` position buffer (last binding) instead of push constants — the value is the current context length (how many tokens are already cached).
 
-#### `RmsNorm-QKV-GEMM-*` (prefill, head-wide tile)
+#### `RmsNorm-QKV-GEMM-*` (prefill, head-wide tile — **legacy, unwired**)
 
-Workgroup = (head, 16-token block); output tile = 16 tokens × 256 columns; the 16×16 k-tiling from §7.1 inside. The k/v cache slot is `(tokenIdx + mGlobal) * cacheRows` and RoPE uses `tokenIdx + mGlobal` (`tokenIdx` = chunk base, kept as a push constant so layers in the same chunk stay consistent). After the projections, the first workgroup's thread 0 writes the new context length to the shared position buffer: `position[0] = tokenIdx + M` — an **absolute** write, so every layer writing the same value is idempotent (last-write-wins is harmless; `execute()` barriers serialize it). Full FP16 source:
+Superseded by the `RmsNorm-QKV-GEMM2-*` + `Rope-GEMM-*` pair (§7.6); kept compiled for the validation harness (`validateQkvRopeGEMM*`). Workgroup = (head, 16-token block); output tile = 16 tokens × 256 columns; the 16×16 k-tiling from §7.1 inside. The k/v cache slot is `(tokenIdx + mGlobal) * cacheRows` and RoPE uses `tokenIdx + mGlobal` (`tokenIdx` = chunk base, kept as a push constant so layers in the same chunk stay consistent). After the projections, the first workgroup's thread 0 writes the new context length to the shared position buffer: `position[0] = tokenIdx + M` — an **absolute** write, so every layer writing the same value is idempotent (last-write-wins is harmless; `execute()` barriers serialize it). Full FP16 source:
 
 ```glsl
 #version 450
@@ -1068,35 +1072,48 @@ One 64-thread workgroup per token row. Each lane strided-sums `dot(v,v)` over th
 
 #### `GEMM-ADD2-*` (prefill, down/out projections with residual)
 
-`C = A·B + R` with `TN = 64` (INT4) / `32` (INT8, FP16). Each thread owns 4 output columns (4 vec4 accumulators). B-load for INT4: `tid < 64` threads load 64 columns × one `uvec4` per k-tile (parity-selected nibble half), dequantized with `scale/zero` indexed `g*(K/4) + t*4 + kv`. The residual `R` is read once at the end, not accumulated per tile. Used by `addGemmAdd` for the FFN down projection (`k = FFN_N` when the input is `act`) and the attention `out` projection (`k = K`). When `m == 1` (decode) `addGemmAdd` routes to the split-K GEMV path instead.
+`C = A·B + R`. INT4 uses `TN = 64` with 4 accumulators/thread; INT8/FP16 use `TN = 32` with 2. **All three variants are ping-pong double-buffered**: k-tiles for `t+1` are loaded into the alternate `Asub[2][4][TS]` / `Bsub[2][4][TN]` LDS set while tile `t` computes, halving the barriers (one per tile instead of two). B-load for INT4: `tid < 64` threads load 64 columns × one `uvec4` per k-tile (parity-selected nibble half), dequantized with `scale/zero` indexed `g*(K/4) + t*4 + kv`. The residual `R` is read once at the end, not accumulated per tile. Used by `addGemmAdd` for the FFN down projection (`k = FFN_N` when the input is `act`) and the attention `out` projection (`k = K`). When `m == 1` (decode) `addGemmAdd` routes to the split-K GEMV path instead. Ping-pong measured −2.4% (INT4), −1.4% (INT8), −0.2% (FP16).
+
+#### `RmsNorm-QKV-GEMM2-*` + `Rope-GEMM-*` (prefill, split QKV projection)
+
+The fused prefill QKV-GEMM (head-wide 256-wide B tiles, RoPE inside) was split into two passes sharing a raw-projection scratch buffer `st->qkvRaw` (`maxM × MODEL_QKV_N` floats):
+
+- **`RmsNorm-QKV-GEMM2-{FP16,INT8,INT4}`** — prologue-style register-blocked GEMM (`TN = 64`/4 accs for INT4, `TN = 32`/2 accs otherwise) computing the *raw* q/k/v projections into `qkvRaw`; no norms, no RoPE, no cache writes. Bindings: `x, gammaIn, w, [scale, zero], qkvRaw, invRms`; push `{M, N, K}`.
+- **`Rope-GEMM-{FP16,INT8,INT4}`** — grid `(heads + 2*kv_heads, M)`, 256 threads; each workgroup reads one token row of one head from `qkvRaw[row*N + head*256 + col]`. V heads store straight to the cache (fp16 pack, or `uint8` + scale/zero at the fixed slot `kvh*MODEL_MAX_CTX + token`); q/k heads apply per-head RMSNorm over the 256 columns then RoPE with `angle = (tokBase + row) * theta[col & 127]` and write q to `qOut` / k to the cache. Push `{N, kOffset, vOffset, tokBase}`.
+
+This cut the QKV chain from ~24.6 s to ~8.7 s per 16k prompt (fused avg ≈96 ms/call → GEMM2 ≈25–42 ms + Rope ≈0.3–0.8 ms). It also removed the prefill's dependence on the position buffer entirely (see §8.2).
 
 #### `RmsNorm-LinearProj-GEMM2-*` (prefill, delta-net input projection)
 
-Prologue + GEMM2 with `N = 12320`, `TN = 32`. Writes directly into the six routed output buffers (q/k/v/g/a/b) via the per-column stride layout `[m][qk*N_QK*DIM + d]`, `[m][qk]`, etc. (same routing as the old fused shader).
+Prologue + GEMM2 with `N = 12320`, `TN = 32`. Writes directly into the six routed output buffers (q/k/v/g/a/b) via the per-column stride layout `[m][qk*N_QK*DIM + d]`, `[m][qk]`, etc. (same routing as the old fused shader). A ping-pong probe on this family **regressed** (+1.5% INT4) — small-N grids don't have enough parallelism to hide the prefetch (gotcha 16).
+
+#### `Embed-Gather.comp` (prefill, layer-0 embedding pre-fetch)
+
+Replaces `Embed-RmsNorm-LinearProj-GEMM-FP16` in the engine prefill: the tied-lm-head column fetch is hoisted into its own precision-agnostic gather pass. Grid `(M, 1)`, 256 threads; each thread gathers vec4 chunks `i = col, col+256, …` of the embedding row `tokenIds[row]`: vec4 index `i` reads `lm[(i/2)*V + tok]`, even `i` unpacks `.x,.y`, odd `i` unpacks `.z,.w`. Writes the fp32 row to **both** `st->embStaged` and `st->embOut` (the residual copy). Bindings: `tokenIds, lm, embStaged, embOut`; push `{V}`; ~0.42 ms/call. The projection then runs as plain `RmsNorm-Prologue` + `RmsNorm-LinearProj-GEMM2-FP16` over the contiguous `embStaged` (via `addLinearProj(..., st->embStaged)`), avoiding the column-major strided fetch inside the GEMM: embed path 8.5 s → ~2.1 s per 16k prompt.
 
 #### `RmsNorm-swiglu-ffn-GEMM2-FP16` (prefill, FP16 swiglu — kept dual-matrix)
 
-Prologue + dual B tiles (`gate` and `up`, `TN = 32`), silu applied inside the kernel: `y = silu(gateResult) * upResult`. This is the **FP16** variant; INT4/INT8 were replaced by the flat kernel below.
+Prologue + dual B tiles (`gate` and `up`, `TN = 32`), silu applied inside the kernel: `y = silu(gateResult) * upResult`. This is the **FP16** variant; INT4/INT8 were replaced by the flat kernel below. Also ping-pong double-buffered (`Asub[2][4][TS]`, `BgSub[2][4][TN]`, `BuSub[2][4][TN]`) — 91.5 → 89.7 ms/call.
 
 #### `RmsNorm-swiglu-flat-GEMM2-INT4/INT8` + `Swiglu-combine.comp` (prefill, flattened swiglu)
 
-The INT4/INT8 swiglu kernels. The grid is flattened over `2×FFN_N` columns: workgroup x-tile `nBase < off` computes gate columns, `nBase >= off` computes up columns (`off = FFN_N`, routed by `upHalf`). Each workgroup loads from **one** weight matrix (gate or up) with a single-matrix B-loader — no dual-matrix staging, no silu inside the inner loop. Output goes to `st->gAct` / `st->uAct` (fp32, `maxM×FFN_N`). `Swiglu-combine.comp` (256 threads, `dispatchX = m*N/256`) then computes `act = silu(gAct) * uAct` elementwise (~0.5–0.7 ms per call; total < 1 s per 16k prompt). FP16 was measured *slower* flat (103.8 vs 91.4 ms) and keeps the dual kernel.
+The INT4/INT8 swiglu kernels. The grid is flattened over `2×FFN_N` columns: workgroup x-tile `nBase < off` computes gate columns, `nBase >= off` computes up columns (`off = FFN_N`, routed by `upHalf`). Each workgroup loads from **one** weight matrix (gate or up) with a single-matrix B-loader — no dual-matrix staging, no silu inside the inner loop. Output goes to `st->gAct` / `st->uAct` (fp32, `maxM×FFN_N`). Both flat kernels are ping-pong double-buffered over k-tiles (~−1..2%; INT4 110.6 ms, INT8 107.4 ms at M=512). `Swiglu-combine.comp` (256 threads, `dispatchX = m*N/256`) then computes `act = silu(gAct) * uAct` elementwise (~0.5–0.7 ms per call; total < 1 s per 16k prompt). FP16 was measured *slower* flat (103.8 vs 91.4 ms) and keeps the dual kernel; TN=64 and TS=32 probes on the flat kernels regressed +50–70% and were reverted (gotcha 16).
 
 #### `Att-QK2-*` / `Att-Softmax.comp` / `Att-PV2-*` (prefill, unfused attention)
 
 Attention was split into three passes over a persistent fp16 score buffer `st->attScores` (`maxM × MAX_CTX × 4` bytes per head-quad row, 134 MB at M=512):
 
 - **QK2** (`Att-QK2-*`): workgroup = (head-quad, m-tile); 16 q-tokens × 64 kv-tokens; TN=64 B tiles over the head dim, K staged per head-quad lane; causal limit `limit = qOff + mGlobal` is **chunk-absolute** (correct across chunked prefill; the legacy `Att-full-GEMM-*` masked with the chunk-local row and under-attended history). Writes `NEG_INF` outside the causal range into the fp16 score buffer.
-- **Softmax**: 256 threads per (m-tile, head-quad) row; strided max → `subgroupMax` → cross-subgroup max via 4 shared slots, then `exp(s - gmax)` in place and `* 1/total`.
-- **PV2**: workgroup = (head-quad, m-tile, v-tile); p-tile staged as `p_sh[16][17]` (padded LDS to avoid bank conflicts), V staged per kv-token; 16 threads each accumulate 16 output dims per token (`oacc += p_sh[row][kk] * Vsub[col][kk]`), 64 threads per tile — padded `Vsub[TS][TS+1]` staging. Quantized INT4/INT8 V dequantized during staging.
+- **Softmax**: 256 threads per (m-tile, head-quad) row; strided max → `subgroupMax` → cross-subgroup max via 4 shared slots, then `exp(s - gmax)` in place. The final normalize sweep was **folded into PV2**: Softmax writes `smSum[hL*param.mRows + row] = 1/total` (binding 1) and PV2's epilogue scales each accumulator (`oacc *= smSum[hL*mRows + mGlobal]`; binding 3 for FP16, binding 5 for INT8/INT4). This removed a third full pass over the score buffer: softmax pool 3.2 s → ~0.5 s.
+- **PV2**: workgroup = (head-quad, m-tile, v-tile); p-tile staged as `p_sh[16][17]` (padded LDS to avoid bank conflicts), V staged per kv-token; 16 threads each accumulate 16 output dims per token (`oacc += p_sh[row][kk] * Vsub[col][kk]`), 64 threads per tile — padded `Vsub[TS][TS+1]` staging. Quantized INT4/INT8 V dequantized during staging; epilogue multiplies by the softmax reciprocal from `smSum`.
 
-Whole-attention cost dropped 48.7 s → 13.2 s for a 16k prompt (QK2 ~6.9 s, Softmax ~3.2 s, PV2 ~3.1 s).
+Whole-attention cost dropped 48.7 s → ~10.4 s for a 16k prompt (QK2 ≈ 8.2 s, SM ≈ 0.5 s, PV2 ≈ 1.7 s).
 
 #### Decode split-K family (M=1)
 
 - **`GEMV-SplitK-*` + `Reduce-GEMV-ADD.comp`**: the K dimension is split across `dispatchY = 4` workgroups (256 threads each, strided k-tiles), partial sums written to `st->gemvPartial[chunk*N + col]`; `Reduce-GEMV-ADD` sums the 4 partials and adds the residual (`C[g] = Σ_z P[z*N+g] + R[g]`). Used by `addGemvSplit` for attention-out and FFN-down when `m == 1`.
 - **`RmsNorm-up-ffn-SplitK-*` + `FFN-Down-SplitK-*`**: decode FFN flattened like the prefill flat kernel — one shader computes `silu(gate)·up` over `2×FFN_N` columns (routing via `nBase >= off`, push `{M,N,K,off}`), writing `st->ffnPartial`; `FFN-Down-SplitK` then GEMVs the down matrix over the partial (which `Reduce-GEMV-ADD` reduces into `h`).
-- **`RmsNorm-QKV-SplitK-*` + `Reduce-Rope-*`**: split-K QKV projection to `st->qkvPartial`, then a per-head reduce that applies per-head RMSNorm + RoPE and stores q/k/v to cache (replaces the old fused `RmsNorm-QKV-*`).
+- **`RmsNorm-QKV-SplitK-*` + `Reduce-Rope-*`**: split-K QKV projection to `st->qkvPartial`, then a per-head reduce that applies per-head RMSNorm + RoPE and stores q/k/v to cache (replaces the old fused `RmsNorm-QKV-*`). Quantized scale/zero are written at the fixed slot `kvHead * MODEL_MAX_CTX + pos`.
 - **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 12320 columns into the six q/k/v/g/a/b output buffers.
 - **`Att-SplitK2-*` + `Reduce-Att2.comp`** (decode attention, ctx ≥ 256): `Att-SplitK2` splits the KV sequence into up to `MAXC = 128` chunks of 4 KV-tiles (LOOPS=4, 64-token tiles); each workgroup runs an online-softmax over its chunk and writes `{max, sum, acc[HEAD_DIM]}` per (chunk, head) into `st->attPartial`; `Reduce-Att2` re-normalizes across chunks (`w = exp(P[ml*2] - m)`). Below 256 tokens the engine uses `Att-full-*` (single workgroup, online softmax, §7.2).
 
@@ -1111,7 +1128,7 @@ The engine compiles the model into `operation` arrays at startup and executes th
 `addOp` appends a fully-formed `operation` (shader name, buffers, push constants, dispatch). The layer builders (`buildFfn`, `buildAttention`, `buildDelta`, `buildLinearProj`, `buildLmHead`) emit the op sequences from §7.6. `createGenerator` pre-compiles four arrays:
 
 - **`groupOps` / `groupOpsShort`** — decode group: `DECODE_GROUP = 4` tokens × (Embed-LinearProj → 32 layers → lm-head). The two variants differ only in attention: split-K (`Att-SplitK2`+`Reduce-Att2`) vs `Att-full`, selected by `ATT_SPLIT_THRESHOLD = 256` on the current context length.
-- **`prefillOps`** — one chunk of `maxM` tokens (`MODEL_PREFILL_CHUNK`): Embed-LinearProj-GEMM → 32 layers → (no lm head).
+- **`prefillOps`** — one chunk of `maxM` tokens (`MODEL_PREFILL_CHUNK`): Embed-Gather → RmsNorm-Prologue → LinearProj-GEMM2-FP16 (over `st->embStaged`) → 32 layers → (no lm head).
 - **`finalOps`** — lm head over `st->lastRow` (the last prefill row copied back to host and re-uploaded), `doIncrement = 0`.
 
 ### 8.2 Chunked prefill (`runPrefill`, `compilePrefill`, `executeChunked`)
@@ -1119,7 +1136,7 @@ The engine compiles the model into `operation` arrays at startup and executes th
 The prompt is processed in chunks of `MODEL_PREFILL_CHUNK` (512) tokens:
 
 1. Copy the chunk's token ids into `st->tokenIds` (mapped RAM).
-2. `compilePrefill(g, cur, offset)` re-emits the whole prefill op list for the chunk's actual row count `cur` (layers get `m = cur`, so dispatchY shrinks for the tail chunk) and **patches offsets**: QKV-GEMM `push[3] = offset` (tokenIdx for RoPE), and `Att-QK2` / `Att-Softmax` / `Att-PV2` get `push[0] = offset + m` (ctxLen) and `push[1] = offset` (qOff, causal base).
+2. `compilePrefill(g, cur, offset)` re-emits the whole prefill op list for the chunk's actual row count `cur` (layers get `m = cur`, so dispatchY shrinks for the tail chunk). Chunk offsets are threaded **at build time** — `buildLayer` / `buildAttention` take the chunk's absolute token base and emit it directly into push constants (`Rope-GEMM tokBase`, attention `{ctxLen = offset + m, qOff = offset}`); there is no post-compile patch loop. Prefill shaders never touch the position buffer; after the last chunk's ops are recorded, `runPrefill` sets it host-side via `stateSetPosition(g->s, &g->st, nextPos + nTokens)` before `finalOps` executes.
 3. `executeChunked` submits the op list in slices of ≤ 8 ops, waiting between slices — this keeps GPU work below the Windows TDR threshold (`TdrDelay = 8 s`; an over-long slice yields `VkResult -4` = `VK_ERROR_DEVICE_LOST`) and produces a per-op timing log in `log` mode.
 4. After the last chunk, the last processed row is copied from `st->h` to `st->lastRow` (host round-trip, only once per prefill), and `finalOps` selects the first generated token.
 
@@ -1127,7 +1144,7 @@ The prompt is processed in chunks of `MODEL_PREFILL_CHUNK` (512) tokens:
 
 - Prefill returns `results[0]` (first token id). Decode then runs `maxNewTokens - 1` more tokens in groups of `DECODE_GROUP = 4`.
 - The op lists are **double-buffered**: while group `u` executes, group `u+1` is recorded (the current token is written into `tokenIds[0]` after each group's result readback). Two separate op arrays (`groupOps` vs a shadow copy of the group ops compiled with `passIdx`-tagged lm-head write slots) are alternated each iteration, so the prior group's commands are still in flight when the next group is recorded.
-- The group's `ArgMax-Reduce` increments the shared position buffer once per token (`doIncrement = 1`); the prefill QKV-GEMM writes it absolutely (`tokenIdx + M`), and the lm-head final pass runs with `doIncrement = 0` — together these keep the position counter correct across the prefill→decode transition (see gotcha 8).
+- The group's `ArgMax-Reduce` increments the shared position buffer once per token (`doIncrement = 1`); prefill never touches it on the GPU (`runPrefill` sets it host-side after the last chunk), and the lm-head final pass runs with `doIncrement = 0` — together these keep the position counter correct across the prefill→decode transition (see gotcha 8).
 
 ### 8.4 Timing log (`log` mode)
 
@@ -1144,13 +1161,15 @@ The prompt is processed in chunks of `MODEL_PREFILL_CHUNK` (512) tokens:
 5. **Windows make quirks:** recipes run through `cmd.exe` — `mkdir`/`if exist` paths must use backslashes (`/` is treated as a switch prefix), and shader folder names must not contain spaces (make word-splits `$(wildcard)` output).
 6. **KV cache layout is `[token][row]`** (transposed relative to the host `[row][seq]`), so attention shaders index `cache[token*rows + row]`.
 7. **Workgroup-wide barriers need every thread present.** For GEMV shaders with a partial last workgroup (N not divisible by 256), out-of-range threads must not early-return — they still run the loop/barriers and carry a `-inf` (`uintBitsToFloat(0xFF800000u)`) accumulator so they can never win the argmax reduction.
-8. **Position buffer write rules (multi-layer safety).** The shared `uint[1]` position buffer must be updated with *absolute* values only: the QKV GEMM writes `tokenIdx + M` (identical from every layer → idempotent), and the per-token `+1` lives **only** in `ArgMax-Reduce` (single dispatch, gated by `doIncrement`). A read-modify-write `+= M` in a per-layer shader would inflate the counter N× per prefill chunk, and an unconditional `+1` in the lm-head step would corrupt the prefill→first-decode transition (the lm head runs at prefill end too, so `doIncrement=0` keeps the GEMM-written `M` intact).
+8. **Position buffer write rules (multi-layer safety).** The shared `uint[1]` position buffer must be updated exactly once per phase transition: decode's per-token `+1` lives **only** in `ArgMax-Reduce` (single dispatch, gated by `doIncrement`), and prefill sets it host-side (`stateSetPosition`) after the last chunk — no prefill shader writes it at all now. Historically the fused QKV GEMM wrote it absolutely (`tokenIdx + M`, idempotent across layers); a read-modify-write `+= M` in any per-layer shader would inflate the counter N× per prefill chunk, and an unconditional `+1` in the lm-head step would corrupt the prefill→first-decode transition.
 9. **`float atomicAdd` on SSBO is a no-op** on this driver stack. Split-K float accumulation must use `atomicCompSwap` CAS (or the two-pass partial+reduce pattern used here).
 10. **The `RmsNorm-Prologue` output binding is `invRms`, not gamma.** A bug bound `{h, gammaF}`/`{h, gammaIn}` and wrote invRms into the weight gamma while `st->invRms` stayed 0 — every GEMM2 projection computed zeros end-to-end (silently, because the demo collapses to token 0 and the validators use their own wiring). Timings were unaffected (same FLOPs). Fix: `proBufs[] = {st->h, st->invRms}`.
 11. **Causal masks must use chunk-absolute indices in chunked prefill.** `Att-full-GEMM-*` masked with the chunk-local row (`kvTok <= row`), under-attending history; the QK2 kernels use `limit = qOff + mGlobal`.
 12. **Build from the repo root.** Running `make` from `bin/` silently no-ops (no Makefile there), leaving a stale `main.exe`/SPVs that pass silently. After `model.h` edits, `make clean` first (headers aren't dep-tracked). If shader files were restored with `Copy-Item`, delete the stale `bin/shader/<name>.spv` — timestamps are preserved and the rebuild is skipped.
 13. **Chunked execution avoids TDR.** Submitting one giant prefill command buffer (16k tokens) exceeds the Windows 8 s TDR budget (`VK_ERROR_DEVICE_LOST = -4`). Slice submissions to ≤ 8 ops with a wait between slices.
-14. **Long-running jobs can transiently crash in `0xC0000005` during weight load** (weight file ~2 GB); retrying the run succeeds — not a code bug, worth re-running before debugging.
+14. **Long-running jobs can transiently crash in `0xC0000005` during weight load** (weight file ~2 GB); retrying the run succeeds — not a code bug, worth re-running before debugging. Validation runs can also transiently produce NaN/garbage in one shader; two consecutive green vals = real pass.
+15. **Quantized KV-cache scale/zero need a context-independent stride.** Writers originally used `kvh*(pos+1)+pos` / `kvh*(tokenIdx+M)+absTok` — a stride that grows with the current context — while readers assumed whatever the *current* chunk's stride was, so every token written by an earlier chunk had its scale read from the wrong slot once the cache grew (silently, and masked by the zero-token demo signature). Fix: fixed stride `kvh * MODEL_MAX_CTX + token` in all writers (`Rope-GEMM`, `Reduce-Rope`) and readers (`Att-QK2/PV2/SplitK2/full` INT8+INT4), with validator fixtures updated to match.
+16. **GCN4 tile geometry for the GEMM2 family: smaller workgroups win.** TN=64 or TS=32 (1024-thread) variants regress +50–70% despite halving barrier count — occupancy/latency-hiding dominates. Ping-pong k-tile prefetch (one barrier per tile, prefetch into the alternate LDS set) gives a reliable but small −1..2% **only when grid.x is wide** (FFN/ADD2 shapes); on narrow-N kernels (LinearProj N=12320, QKV) it regressed or washed out.
 
 ---
 

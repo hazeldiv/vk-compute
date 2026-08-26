@@ -21,14 +21,46 @@ layout(set = 0, binding = 8) readonly restrict buffer MatrixI { vec4 scaleUp[]; 
 layout(set = 0, binding = 9) readonly restrict buffer MatrixJ { vec4 zeroPointUp[]; };
 layout(set = 0, binding = 10) readonly restrict buffer InvRms { float invRms[]; };
 
-shared vec4 Asub[4][TS];
-shared vec4 Bsub[4][TN];
+shared vec4 Asub[2][4][TS];
+shared vec4 Bsub[2][4][TN];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
 const uvec4 highShifts = uvec4(16, 20, 24, 28);
 
 vec4 unpackInt4x4(uint packedComponent, uvec4 shiftOffsets) {
     return vec4(uvec4(packedComponent) >> shiftOffsets & uvec4(0xF));
+}
+
+void loadTiles(uint t, uint buf, uint tid, uint lBase, uint upHalf, uint g, uint mRow0) {
+    if (tid < 64) {
+        uint m = tid / 4;
+        uint kv = tid % 4;
+        uint mg = mRow0 + m;
+        Asub[buf][kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+    }
+    if (tid < 32) {
+        uint c = tid;
+        uint sIdx = g * (dims.K / vec) + t * 4;
+        if (upHalf == 0u) {
+            uvec4 raw = gate[(t / 2) * dims.N + lBase + c];
+            bool hi = ((t & 1) == 1);
+            uint r0 = hi ? raw.z : raw.x;
+            uint r1 = hi ? raw.w : raw.y;
+            Bsub[buf][0][c] = unpackInt4x4(r0, lowShifts)  * scaleGate[sIdx+0] - zeroPointGate[sIdx+0];
+            Bsub[buf][1][c] = unpackInt4x4(r0, highShifts) * scaleGate[sIdx+1] - zeroPointGate[sIdx+1];
+            Bsub[buf][2][c] = unpackInt4x4(r1, lowShifts)  * scaleGate[sIdx+2] - zeroPointGate[sIdx+2];
+            Bsub[buf][3][c] = unpackInt4x4(r1, highShifts) * scaleGate[sIdx+3] - zeroPointGate[sIdx+3];
+        } else {
+            uvec4 raw = up[(t / 2) * dims.N + lBase + c];
+            bool hi = ((t & 1) == 1);
+            uint r0 = hi ? raw.z : raw.x;
+            uint r1 = hi ? raw.w : raw.y;
+            Bsub[buf][0][c] = unpackInt4x4(r0, lowShifts)  * scaleUp[sIdx+0] - zeroPointUp[sIdx+0];
+            Bsub[buf][1][c] = unpackInt4x4(r0, highShifts) * scaleUp[sIdx+1] - zeroPointUp[sIdx+1];
+            Bsub[buf][2][c] = unpackInt4x4(r1, lowShifts)  * scaleUp[sIdx+2] - zeroPointUp[sIdx+2];
+            Bsub[buf][3][c] = unpackInt4x4(r1, highShifts) * scaleUp[sIdx+3] - zeroPointUp[sIdx+3];
+        }
+    }
 }
 
 void main() {
@@ -40,46 +72,23 @@ void main() {
     bool upHalf = nBase >= dims.off;
     uint lBase = nBase - (upHalf ? dims.off : 0u);
     uint g = lBase / 256;
+    uint uh = upHalf ? 1u : 0u;
+    uint mRow0 = gl_WorkGroupID.y * TS;
 
     float acc0 = 0.0;
     float acc1 = 0.0;
 
-    for (uint t = 0; t < dims.K / TS; t++) {
-        if (tid < 64) {
-            uint m = tid / 4;
-            uint kv = tid % 4;
-            uint mg = gl_WorkGroupID.y * TS + m;
-            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
-        }
-        if (tid < 32) {
-            uint c = tid;
-            uint sIdx = g * (dims.K / vec) + t * 4;
-            if (!upHalf) {
-                uvec4 raw = gate[(t / 2) * dims.N + lBase + c];
-                bool hi = ((t & 1) == 1);
-                uint r0 = hi ? raw.z : raw.x;
-                uint r1 = hi ? raw.w : raw.y;
-                Bsub[0][c] = unpackInt4x4(r0, lowShifts)  * scaleGate[sIdx+0] - zeroPointGate[sIdx+0];
-                Bsub[1][c] = unpackInt4x4(r0, highShifts) * scaleGate[sIdx+1] - zeroPointGate[sIdx+1];
-                Bsub[2][c] = unpackInt4x4(r1, lowShifts)  * scaleGate[sIdx+2] - zeroPointGate[sIdx+2];
-                Bsub[3][c] = unpackInt4x4(r1, highShifts) * scaleGate[sIdx+3] - zeroPointGate[sIdx+3];
-            } else {
-                uvec4 raw = up[(t / 2) * dims.N + lBase + c];
-                bool hi = ((t & 1) == 1);
-                uint r0 = hi ? raw.z : raw.x;
-                uint r1 = hi ? raw.w : raw.y;
-                Bsub[0][c] = unpackInt4x4(r0, lowShifts)  * scaleUp[sIdx+0] - zeroPointUp[sIdx+0];
-                Bsub[1][c] = unpackInt4x4(r0, highShifts) * scaleUp[sIdx+1] - zeroPointUp[sIdx+1];
-                Bsub[2][c] = unpackInt4x4(r1, lowShifts)  * scaleUp[sIdx+2] - zeroPointUp[sIdx+2];
-                Bsub[3][c] = unpackInt4x4(r1, highShifts) * scaleUp[sIdx+3] - zeroPointUp[sIdx+3];
-            }
-        }
-        barrier();
+    uint numTiles = dims.K / TS;
+    loadTiles(0, 0u, tid, lBase, uh, g, mRow0);
+    barrier();
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1u;
+        if (t + 1 < numTiles) loadTiles(t + 1, cur ^ 1u, tid, lBase, uh, g, mRow0);
         #pragma unroll
         for (uint kv = 0; kv < 4; kv++) {
-            vec4 a = Asub[kv][row];
-            acc0 += dot(a, Bsub[kv][col * 2]);
-            acc1 += dot(a, Bsub[kv][col * 2 + 1]);
+            vec4 a = Asub[cur][kv][row];
+            acc0 += dot(a, Bsub[cur][kv][col * 2]);
+            acc1 += dot(a, Bsub[cur][kv][col * 2 + 1]);
         }
         barrier();
     }

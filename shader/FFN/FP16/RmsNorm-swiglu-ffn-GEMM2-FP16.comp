@@ -16,9 +16,31 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { uvec4 up[]; };
 layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float y[]; };
 layout(set = 0, binding = 5) readonly restrict buffer InvRms { float invRms[]; };
 
-shared vec4 Asub[4][TS];
-shared vec4 BgSub[4][TN];
-shared vec4 BuSub[4][TN];
+shared vec4 Asub[2][4][TS];
+shared vec4 BgSub[2][4][TN];
+shared vec4 BuSub[2][4][TN];
+
+void loadTiles(uint t, uint buf, uint tid) {
+    if (tid < 64) {
+        uint m = tid / 4;
+        uint kv = tid % 4;
+        uint mg = gl_WorkGroupID.y * TS + m;
+        Asub[buf][kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
+    }
+    if (tid < 64) {
+        uint block = tid / 32;
+        uint c = tid % 32;
+        uvec4 rg = gate[(t * 2 + block) * dims.N + gl_WorkGroupID.x * TN + c];
+        BgSub[buf][block * 2][c]     = vec4(unpackHalf2x16(rg.x), unpackHalf2x16(rg.y));
+        BgSub[buf][block * 2 + 1][c] = vec4(unpackHalf2x16(rg.z), unpackHalf2x16(rg.w));
+    } else if (tid < 128) {
+        uint block = (tid - 64) / 32;
+        uint c = (tid - 64) % 32;
+        uvec4 ru = up[(t * 2 + block) * dims.N + gl_WorkGroupID.x * TN + c];
+        BuSub[buf][block * 2][c]     = vec4(unpackHalf2x16(ru.x), unpackHalf2x16(ru.y));
+        BuSub[buf][block * 2 + 1][c] = vec4(unpackHalf2x16(ru.z), unpackHalf2x16(ru.w));
+    }
+}
 
 void main() {
     uint row = gl_LocalInvocationID.y;
@@ -32,34 +54,19 @@ void main() {
     float accUp0 = 0.0;
     float accUp1 = 0.0;
 
-    for (uint t = 0; t < dims.K / TS; t++) {
-        if (tid < 64) {
-            uint m = tid / 4;
-            uint kv = tid % 4;
-            uint mg = gl_WorkGroupID.y * TS + m;
-            Asub[kv][m] = x[mg * (dims.K / vec) + t * 4 + kv] * gamma[t * 4 + kv] * invRms[mg];
-        }
-        if (tid < 64) {
-            uint block = tid / 32;
-            uint c = tid % 32;
-            uvec4 rg = gate[(t * 2 + block) * dims.N + nBase + c];
-            BgSub[block * 2][c]     = vec4(unpackHalf2x16(rg.x), unpackHalf2x16(rg.y));
-            BgSub[block * 2 + 1][c] = vec4(unpackHalf2x16(rg.z), unpackHalf2x16(rg.w));
-        } else if (tid < 128) {
-            uint block = (tid - 64) / 32;
-            uint c = (tid - 64) % 32;
-            uvec4 ru = up[(t * 2 + block) * dims.N + nBase + c];
-            BuSub[block * 2][c]     = vec4(unpackHalf2x16(ru.x), unpackHalf2x16(ru.y));
-            BuSub[block * 2 + 1][c] = vec4(unpackHalf2x16(ru.z), unpackHalf2x16(ru.w));
-        }
-        barrier();
+    uint numTiles = dims.K / TS;
+    loadTiles(0, 0u, tid);
+    barrier();
+    for (uint t = 0; t < numTiles; t++) {
+        uint cur = t & 1u;
+        if (t + 1 < numTiles) loadTiles(t + 1, cur ^ 1u, tid);
         #pragma unroll
         for (uint kv = 0; kv < 4; kv++) {
-            vec4 a = Asub[kv][row];
-            accGate0 += dot(a, BgSub[kv][col * 2]);
-            accGate1 += dot(a, BgSub[kv][col * 2 + 1]);
-            accUp0   += dot(a, BuSub[kv][col * 2]);
-            accUp1   += dot(a, BuSub[kv][col * 2 + 1]);
+            vec4 a = Asub[cur][kv][row];
+            accGate0 += dot(a, BgSub[cur][kv][col * 2]);
+            accGate1 += dot(a, BgSub[cur][kv][col * 2 + 1]);
+            accUp0   += dot(a, BuSub[cur][kv][col * 2]);
+            accUp1   += dot(a, BuSub[cur][kv][col * 2 + 1]);
         }
         barrier();
     }
