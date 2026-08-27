@@ -428,11 +428,11 @@ static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int
     model_weights* w = &g->w;
 
     buffer lmBufs[] = {*input, w->lmHead, st->maxValue, st->maxIndex, w->gammaFinal};
-    int pushL[] = {1, MODEL_VOCAB, MODEL_K};
-    addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (MODEL_VOCAB + 255) / 256, 1);
+    int pushL[] = {1, g->vocab, MODEL_K};
+    addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (g->vocab + 255) / 256, 1);
 
     buffer redBufs[] = {st->maxValue, st->maxIndex, st->result, st->position, st->tokenIds};
-    int pushR[] = {MODEL_VOCAB, doIncrement, passIdx};
+    int pushR[] = {g->vocab, doIncrement, passIdx};
     addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 5, pushR, 3, 1, 1);
 }
 
@@ -443,7 +443,7 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
 
     for (int p = 0; p < DECODE_GROUP; p++) {
         buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->gProj, st->aProj, st->bProj, st->embOut};
-        int pushE[] = {1, MODEL_PROJ_N, MODEL_K, MODEL_VOCAB};
+        int pushE[] = {1, MODEL_PROJ_N, MODEL_K, g->vocab};
         addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
         for (int L = 0; L < g->spec->layerCount; L++) {
@@ -466,7 +466,7 @@ static int compilePrefill(generator* g, int m, int offset) {
     gatherBufs[1] = w->embed;
     gatherBufs[2] = st->embStaged;
     gatherBufs[3] = st->embOut;
-    int pushG[] = {MODEL_VOCAB};
+    int pushG[] = {g->vocab};
     addOp(ops, &n, "Embed-Gather.spv", -1, gatherBufs, 4, pushG, 1, m, 1);
 
     addLinearProj(g, ops, &n, 0, 1, m, st->embStaged);
@@ -484,14 +484,17 @@ static int compileFinal(generator* g) {
     return n;
 }
 
-generator* createGenerator(session s, const model_config* spec, int maxM) {
+generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx) {
     static generator g;
     memset(&g, 0, sizeof(generator));
     g.s = s;
     g.spec = spec;
     g.maxM = maxM;
-    g.w = createWeights(s, spec);
-    g.st = createState(s, spec, maxM);
+    g.eos = eos;
+    g.maxCtx = maxCtx;
+    g.w = createWeights(s, spec, weightDir, customHead, customEmbed);
+    g.vocab = g.w.vocab;
+    g.st = createState(s, spec, maxM, g.vocab);
     g.groupOpCount = compileDecodeGroup(&g, g.groupOps, 1);
     g.groupOpCountShort = compileDecodeGroup(&g, g.groupOpsShort, 0);
     g.prefillOpCount = compilePrefill(&g, g.maxM, 0);
@@ -549,19 +552,17 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     return results[0];
 }
 
-void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens) {
-    FILE* out = fopen("generated.bin", "wb");
+uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, uint32_t* out, int* outCount) {
+    int limit = g->maxCtx - nPrompt;
+    if (limit < 1) limit = 1;
+    if (maxNewTokens > limit) maxNewTokens = limit;
 
-    uint64_t tPrefill = GetTickCount64();
     uint32_t token = runPrefill(g, prompt, nPrompt);
-    uint64_t prefillMs = GetTickCount64() - tPrefill;
-    double prefillSpeed = prefillMs > 0 ? (double)(nPrompt * 1000) / prefillMs : 0.0;
-    printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", 0, token, stateReadPosition(g->s, &g->st), prefillSpeed);
-    if (out) fwrite(&token, sizeof(uint32_t), 1, out);
-    if (token == MODEL_EOS) {
-        if (out) fclose(out);
-        closeTimingLog();
-        return;
+    int count = 1;
+    out[0] = token;
+    if (token == (uint32_t)g->eos || maxNewTokens <= 1) {
+        *outCount = count;
+        return token;
     }
 
     int decodeTokens = maxNewTokens - 1;
@@ -576,8 +577,6 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
     executeRecord(&g->s, curOps, curCount);
     executeSubmitNow(&g->s);
 
-    uint64_t t0 = GetTickCount64();
-    int printed = 0;
     int eos = 0;
     int units = fullGroups + (rem > 0 ? 1 : 0);
     for (int u = 0; u < units && !eos; u++) {
@@ -591,19 +590,14 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
         uint32_t tokens[DECODE_GROUP];
         executeRecord(&g->s, nextOps, next * (nextCount / DECODE_GROUP));
         executeWaitLast(&g->s);
-        logLastFrame(&g->s, curOps, cur * (curCount / DECODE_GROUP), "decode", (int)g->nextPos);
         readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.result, tokens);
         ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = tokens[cur - 1];
         executeSubmitNow(&g->s);
         g->nextPos += cur;
 
-        for (int j = 0; j < cur; j++) {
-            int i = ++printed;
-            uint64_t ms = GetTickCount64() - t0;
-            double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
-            printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, tokens[j], stateReadPosition(g->s, &g->st), speed);
-            if (out) fwrite(&tokens[j], sizeof(uint32_t), 1, out);
-            if (tokens[j] == MODEL_EOS) {
+        for (int j = 0; j < cur && count < maxNewTokens; j++) {
+            out[count++] = tokens[j];
+            if (tokens[j] == (uint32_t)g->eos) {
                 eos = 1;
                 break;
             }
@@ -614,6 +608,18 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
         curCount = nextCount;
     }
     executeWaitLast(&g->s);
-    if (out) fclose(out);
-    closeTimingLog();
+    *outCount = count;
+    return token;
+}
+
+void resetGenerator(generator* g) {
+    int count = 0;
+    buffer states[MODEL_LAYERS];
+    for (int L = 0; L < g->spec->layerCount; L++) {
+        if (g->spec->layers[L].attn.type == ATTENTION_DELTA) {
+            states[count++] = g->st.stateS[L];
+        }
+    }
+    createTransferAndCopy(g->s.dev.device, g->s.dev.queue, states, count);
+    g->nextPos = 0;
 }

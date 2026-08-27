@@ -10,7 +10,7 @@ static buffer createZeroed(session s, int64_t size) {
     return b;
 }
 
-model_state createState(session s, const model_config* spec, int maxM) {
+model_state createState(session s, const model_config* spec, int maxM, int vocab) {
     model_state st = {0};
     st.maxM = maxM;
     int mn = maxM * MODEL_K;
@@ -41,9 +41,9 @@ if (ly->attn.type == ATTENTION_FULL) {
                 st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
                 st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
                 st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
-                printf("Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
+                fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
             } else {
-                printf("Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
+                fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
                 st.kCache[L] = createZeroed(s, cacheBytes * 2);
                 st.vCache[L] = createZeroed(s, cacheBytes * 2);
             }
@@ -60,7 +60,7 @@ if (ly->attn.type == ATTENTION_FULL) {
     float* lastInit = (float*)calloc(MODEL_K, sizeof(float));
     st.lastRow = createBuffer(s.dev.device, s.dev.physicalDevice, lastInit, (int64_t)sizeof(float) * MODEL_K, MEMORY_RAM);
     free(lastInit);
-    int numGroups = (MODEL_VOCAB + 255) / 256;
+    int numGroups = (vocab + 255) / 256;
     st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups);
     st.maxIndex = createZeroed(s, (int64_t)sizeof(uint32_t) * numGroups);
     st.result = createZeroed(s, sizeof(uint32_t) * 4);

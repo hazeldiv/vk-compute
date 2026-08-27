@@ -5,6 +5,7 @@
 #include "buffer.h"
 #include "data.h"
 #include "model.h"
+#include "safetensors.h"
 
 typedef struct tensor {
     buffer data;
@@ -33,9 +34,10 @@ typedef struct model_weights {
     buffer aLog[MODEL_LAYERS];
     buffer dtBias[MODEL_LAYERS];
     buffer attnNorm[MODEL_LAYERS];
+    int vocab;
 } model_weights;
 
-model_weights createWeights(session s, const model_config* spec);
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed);
 void destroyWeights(session s, model_weights* w);
 
 #endif

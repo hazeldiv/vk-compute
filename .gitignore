@@ -3,6 +3,8 @@
 .opencode
 tools/pruner/__pycache__
 tools/pruner/.venv
+__pycache__
+.venv
 tools
 data
 bin

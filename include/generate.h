@@ -24,11 +24,15 @@ typedef struct generator {
     operation finalOps[MODEL_MAX_OPS];
     int finalOpCount;
     uint32_t nextPos;
+    int vocab;
+    int eos;
+    int maxCtx;
 } generator;
 
-generator* createGenerator(session s, const model_config* spec, int maxM);
+generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
-void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens);
+uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, uint32_t* out, int* outCount);
+void resetGenerator(generator* g);
 
 #endif

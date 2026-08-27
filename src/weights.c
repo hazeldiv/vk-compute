@@ -10,7 +10,6 @@ static int64_t weightBytes = 0;
 
 #define TENSOR_CACHE_MAX 256
 #define TENSOR_FILE_MAGIC 0x54454E53
-#define WT_DIR "../model/Qwen3.5-9B-weight/"
 #define CACHE_DIR "weights"
 
 typedef struct {
@@ -161,9 +160,9 @@ static cachedTensor* tensorBuild(const char* path, const char* name, QuantType q
 
 static void countBuffer(const char* name, int layer, buffer b) {
     weightBytes += b.size;
-    printf("%s[%d]: %lld bytes (%.2f MB) | Total: %lld bytes (%.2f MB)\n",
-           name, layer, (long long)b.size, (double)b.size / (1024.0 * 1024.0),
-           (long long)weightBytes, (double)weightBytes / (1024.0 * 1024.0));
+    fprintf(stderr, "%s[%d]: %lld bytes (%.2f MB) | Total: %lld bytes (%.2f MB)\n",
+            name, layer, (long long)b.size, (double)b.size / (1024.0 * 1024.0),
+            (long long)weightBytes, (double)weightBytes / (1024.0 * 1024.0));
 }
 
 static tensor createTensor(session s, const char* name, int layer, int rows, int cols, QuantType q, float wscale, const float* mat) {
@@ -262,11 +261,10 @@ static float* buildEngineMatrix(const safetensors* sf, const char** hfNames, int
     return eng;
 }
 
-static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, const char* name, buffer* out) {
+static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, const char* name, int V, buffer* out) {
     int K = MODEL_K;
-    int V = MODEL_VOCAB;
     char path[160];
-    snprintf(path, sizeof(path), CACHE_DIR "/%s_FP16.bin", name);
+    snprintf(path, sizeof(path), CACHE_DIR "/%s_%d_FP16.bin", name, V);
     cachedTensor* ct = tensorLoadFile(path, name, QUANT_FP16, K, V, (V + 255) / 256);
     if (ct == NULL) {
         const sa_tensor* t = require(sf, hfName);
@@ -306,25 +304,27 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     return b;
 }
 
-model_weights createWeights(session s, const model_config* spec) {
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed) {
     model_weights w = {0};
     weightBytes = 0;
     cacheClear();
     _mkdir(CACHE_DIR);
 
-    const char* shards[4] = {
-        WT_DIR "model.safetensors-00001-of-00004.safetensors",
-        WT_DIR "model.safetensors-00002-of-00004.safetensors",
-        WT_DIR "model.safetensors-00003-of-00004.safetensors",
-        WT_DIR "model.safetensors-00004-of-00004.safetensors"
-    };
-    const char* embedPath = WT_DIR "embed_tokens.81920.safetensors";
-    const char* lmHeadPath = WT_DIR "lm_head.81920.safetensors";
+    char p1[320], p2[320], p3[320], p4[320];
+    snprintf(p1, sizeof(p1), "%s/model.safetensors-00001-of-00004.safetensors", weightDir);
+    snprintf(p2, sizeof(p2), "%s/model.safetensors-00002-of-00004.safetensors", weightDir);
+    snprintf(p3, sizeof(p3), "%s/model.safetensors-00003-of-00004.safetensors", weightDir);
+    snprintf(p4, sizeof(p4), "%s/model.safetensors-00004-of-00004.safetensors", weightDir);
+    const char* shards[4] = {p1, p2, p3, p4};
 
     safetensors sf, sfEmb, sfLm;
     if (safetensors_open(&sf, shards, 4) != 0) fatal("shard open failed");
-    if (safetensors_open(&sfEmb, &embedPath, 1) != 0) fatal("embedding open failed");
-    if (safetensors_open(&sfLm, &lmHeadPath, 1) != 0) fatal("lm head open failed");
+
+    int customVocab = (customHead != NULL && customEmbed != NULL);
+    if (customVocab) {
+        if (safetensors_open(&sfLm, &customHead, 1) != 0) fatal("custom lm head open failed");
+        if (safetensors_open(&sfEmb, &customEmbed, 1) != 0) fatal("custom embedding open failed");
+    }
 
     float* theta = (float*)malloc(sizeof(float) * (MODEL_HEAD_DIM / 2));
     for (int i = 0; i < MODEL_HEAD_DIM / 2; i++) {
@@ -336,8 +336,15 @@ model_weights createWeights(session s, const model_config* spec) {
 
     w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", MODEL_K, "gammaFinal", -1);
 
-    loadEmbedLike(s, &sfEmb, "model.language_model.embed_tokens.weight", "embed", &w.embed);
-    loadEmbedLike(s, &sfLm, "lm_head.weight", "lmHead", &w.lmHead);
+    const safetensors* sfHead = customVocab ? &sfLm : &sf;
+    const safetensors* sfEmbUse = customVocab ? &sfEmb : &sf;
+    const sa_tensor* headT = require(sfHead, "lm_head.weight");
+    if (headT->ndim < 2) fatal("lm head not a matrix");
+    int V = (int)headT->shape[0];
+    w.vocab = V;
+
+    loadEmbedLike(s, sfHead, "lm_head.weight", "lmHead", V, &w.lmHead);
+    loadEmbedLike(s, sfEmbUse, "model.language_model.embed_tokens.weight", "embed", V, &w.embed);
 
     char n1[256], n2[256], n3[256], n4[256];
 
@@ -410,10 +417,11 @@ model_weights createWeights(session s, const model_config* spec) {
             snprintf(upName, sizeof(upName), "up_%d", L);
             snprintf(downName, sizeof(downName), "down_%d", L);
 
-            lname(n1, sizeof(n1), L, "mlp.gate_proj.weight");
             const char* gn[1] = {n1};
             int cols = 0;
+            lname(n1, sizeof(n1), L, "mlp.gate_proj.weight");
             float* mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
+            if (cols != MODEL_FFN_N) fatal("gate width mismatch");
             w.gate[L] = createTensor(s, gateName, L, MODEL_K, MODEL_FFN_N, f, 1.0f, mat);
             free(mat);
 
@@ -431,14 +439,16 @@ model_weights createWeights(session s, const model_config* spec) {
     }
 
     safetensors_close(&sf);
-    safetensors_close(&sfEmb);
-    safetensors_close(&sfLm);
+    if (customVocab) {
+        safetensors_close(&sfLm);
+        safetensors_close(&sfEmb);
+    }
     cacheClear();
 
-    printf("total weights: %lld bytes (%.2f MB, %.2f GB)\n",
-           (long long)weightBytes,
-           (double)weightBytes / (1024.0 * 1024.0),
-           (double)weightBytes / (1024.0 * 1024.0 * 1024.0));
+    fprintf(stderr, "total weights: %lld bytes (%.2f MB, %.2f GB)\n",
+            (long long)weightBytes,
+            (double)weightBytes / (1024.0 * 1024.0),
+            (double)weightBytes / (1024.0 * 1024.0 * 1024.0));
 
     return w;
 }

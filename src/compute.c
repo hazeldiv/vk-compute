@@ -1,6 +1,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <io.h>
+#include <fcntl.h>
 #include "session.h"
 #include "model.h"
 #include "generate.h"
@@ -9,76 +12,91 @@ static model_config spec = {
     .name = "qwen3.5-9b",
     .layerCount = 32,
     .layers = {
-        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_FP16}}, // 1
-        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 2
-        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 3
-        {.attn = {ATTENTION_FULL,  QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 4
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 5
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 6
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 7
-        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 8
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 9
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 10
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 11
-        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 12
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 13
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 14
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 15
-        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 16
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 17
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 18
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 19
-        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 20
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 21
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 22
-        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 23
-        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 24
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 25
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}}, // 26
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 27
-        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 28
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 29
-        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 30
-        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}}, // 31
-        {.attn = {ATTENTION_FULL,  QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_FP16}}, // 32
+        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_FP16}},
+        {.attn = {ATTENTION_DELTA, QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_FULL,  QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT4}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT4}},
+        {.attn = {ATTENTION_FULL,  QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_DELTA, QUANT_INT8}, .ffn = {FFN_SWIGLU, QUANT_INT8}},
+        {.attn = {ATTENTION_FULL,  QUANT_FP16}, .ffn = {FFN_SWIGLU, QUANT_FP16}},
     },
     .embedQ = QUANT_FP16,
     .lmHeadQ = QUANT_FP16,
 };
 
-void compute(int argc, char** argv) {
-    int maxNewTokens = (argc > 2) ? atoi(argv[2]) : 128;
+static const char* argval(int argc, char** argv, const char* name, const char* def) {
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], name) == 0) return argv[i + 1];
+    }
+    return def;
+}
 
-    FILE* pf = fopen("prompt.bin", "rb");
-    if (!pf) {
-        fprintf(stderr, "prompt.bin not found; run tools/tokenize.py first\n");
-        return;
-    }
-    fseek(pf, 0, SEEK_END);
-    long bytes = ftell(pf);
-    fseek(pf, 0, SEEK_SET);
-    if (bytes <= 0 || (bytes % (long)sizeof(uint32_t)) != 0) {
-        fprintf(stderr, "prompt.bin is empty or malformed\n");
-        fclose(pf);
-        return;
-    }
-    int nPrompt = (int)(bytes / (long)sizeof(uint32_t));
-    uint32_t* prompt = (uint32_t*)malloc(bytes);
-    if (fread(prompt, 1, bytes, pf) != (size_t)bytes) {
-        fprintf(stderr, "failed to read prompt.bin\n");
-        fclose(pf);
-        free(prompt);
-        return;
-    }
-    fclose(pf);
-    printf("prompt: %d tokens, max new: %d\n", nPrompt, maxNewTokens);
+void serverMain(int argc, char** argv) {
+    const char* weightDir = argval(argc, argv, "--weights", "../model/Qwen3.5-9B-weight");
+    const char* vocabHead = argval(argc, argv, "--vocab-head", NULL);
+    const char* vocabEmbed = argval(argc, argv, "--vocab-embed", NULL);
+    int eos = atoi(argval(argc, argv, "--eos", "248044"));
+    int maxCtx = atoi(argval(argc, argv, "--max-ctx", "32768"));
+    int maxNew = atoi(argval(argc, argv, "--max-new", "128"));
+    if (maxNew < 1) maxNew = 1;
+
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
 
     session s = createSession();
-    generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK);
+    generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK, weightDir, vocabHead, vocabEmbed, eos, maxCtx);
 
-    runGenerate(g, prompt, nPrompt, maxNewTokens);
+    uint32_t* prompt = NULL;
+    int promptCap = 0;
+    uint32_t* out = (uint32_t*)malloc(sizeof(uint32_t) * maxNew);
 
+    for (;;) {
+        uint32_t n = 0;
+        if (fread(&n, sizeof(uint32_t), 1, stdin) != 1) break;
+        if (n == 0) break;
+        if ((int)n > promptCap) {
+            prompt = (uint32_t*)realloc(prompt, sizeof(uint32_t) * n);
+            promptCap = (int)n;
+        }
+        if (fread(prompt, sizeof(uint32_t), n, stdin) != n) break;
+
+        resetGenerator(g);
+        int count = 0;
+        generateTokens(g, prompt, (int)n, maxNew, out, &count);
+
+        uint32_t m = (uint32_t)count;
+        fwrite(&m, sizeof(uint32_t), 1, stdout);
+        fwrite(out, sizeof(uint32_t), count, stdout);
+        fflush(stdout);
+    }
+
+    free(prompt);
+    free(out);
     destroyGenerator(g);
     destroySession(s);
-    free(prompt);
 }
