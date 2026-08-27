@@ -29,6 +29,10 @@ typedef struct model_weights {
     tensor gate[MODEL_LAYERS];
     tensor up[MODEL_LAYERS];
     tensor down[MODEL_LAYERS];
+    buffer conv[MODEL_LAYERS];
+    buffer aLog[MODEL_LAYERS];
+    buffer dtBias[MODEL_LAYERS];
+    buffer attnNorm[MODEL_LAYERS];
 } model_weights;
 
 model_weights createWeights(session s, const model_config* spec);

@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "session.h"
 #include "model.h"
 #include "generate.h"
@@ -44,17 +46,39 @@ static model_config spec = {
     .lmHeadQ = QUANT_FP16,
 };
 
-void compute(void) {
+void compute(int argc, char** argv) {
+    int maxNewTokens = (argc > 2) ? atoi(argv[2]) : 128;
+
+    FILE* pf = fopen("prompt.bin", "rb");
+    if (!pf) {
+        fprintf(stderr, "prompt.bin not found; run tools/tokenize.py first\n");
+        return;
+    }
+    fseek(pf, 0, SEEK_END);
+    long bytes = ftell(pf);
+    fseek(pf, 0, SEEK_SET);
+    if (bytes <= 0 || (bytes % (long)sizeof(uint32_t)) != 0) {
+        fprintf(stderr, "prompt.bin is empty or malformed\n");
+        fclose(pf);
+        return;
+    }
+    int nPrompt = (int)(bytes / (long)sizeof(uint32_t));
+    uint32_t* prompt = (uint32_t*)malloc(bytes);
+    if (fread(prompt, 1, bytes, pf) != (size_t)bytes) {
+        fprintf(stderr, "failed to read prompt.bin\n");
+        fclose(pf);
+        free(prompt);
+        return;
+    }
+    fclose(pf);
+    printf("prompt: %d tokens, max new: %d\n", nPrompt, maxNewTokens);
+
     session s = createSession();
     generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK);
 
-    uint32_t prompt[MODEL_MAX_GEMM];
-    for (int i = 0; i < MODEL_MAX_GEMM; i++) {
-        prompt[i] = (uint32_t)((i * 1237 + 555) % MODEL_VOCAB);
-    }
-
-    runGenerate(g, prompt, MODEL_MAX_GEMM, 128);
+    runGenerate(g, prompt, nPrompt, maxNewTokens);
 
     destroyGenerator(g);
     destroySession(s);
+    free(prompt);
 }

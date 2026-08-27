@@ -2,7 +2,7 @@
 #include <string.h>
 #include "dispatch.h"
 
-void compute(void);
+void compute(int argc, char** argv);
 void validation(void);
 
 int main(int argc, char** argv) {
@@ -10,7 +10,7 @@ int main(int argc, char** argv) {
         validation();
     } else {
         setTimingEnabled(argc > 1 && strcmp(argv[1], "log") == 0);
-        compute();
+        compute(argc, argv);
     }
     return 0;
 }

@@ -550,11 +550,19 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
 }
 
 void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens) {
+    FILE* out = fopen("generated.bin", "wb");
+
     uint64_t tPrefill = GetTickCount64();
     uint32_t token = runPrefill(g, prompt, nPrompt);
     uint64_t prefillMs = GetTickCount64() - tPrefill;
     double prefillSpeed = prefillMs > 0 ? (double)(nPrompt * 1000) / prefillMs : 0.0;
     printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", 0, token, stateReadPosition(g->s, &g->st), prefillSpeed);
+    if (out) fwrite(&token, sizeof(uint32_t), 1, out);
+    if (token == MODEL_EOS) {
+        if (out) fclose(out);
+        closeTimingLog();
+        return;
+    }
 
     int decodeTokens = maxNewTokens - 1;
     int fullGroups = decodeTokens / DECODE_GROUP;
@@ -570,8 +578,9 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
 
     uint64_t t0 = GetTickCount64();
     int printed = 0;
+    int eos = 0;
     int units = fullGroups + (rem > 0 ? 1 : 0);
-    for (int u = 0; u < units; u++) {
+    for (int u = 0; u < units && !eos; u++) {
         int cur = (u == fullGroups) ? rem : DECODE_GROUP;
         int next = ((rem > 0) && (u + 1 == fullGroups)) ? rem : DECODE_GROUP;
 
@@ -593,6 +602,11 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
             uint64_t ms = GetTickCount64() - t0;
             double speed = ms > 0 ? (double)(i * 1000) / ms : 0.0;
             printf("gen[%d]: %u | pos: %u | speed: %.2f token/s\n", i, tokens[j], stateReadPosition(g->s, &g->st), speed);
+            if (out) fwrite(&tokens[j], sizeof(uint32_t), 1, out);
+            if (tokens[j] == MODEL_EOS) {
+                eos = 1;
+                break;
+            }
         }
 
         curSplit = nextSplit;
@@ -600,5 +614,6 @@ void runGenerate(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTo
         curCount = nextCount;
     }
     executeWaitLast(&g->s);
+    if (out) fclose(out);
     closeTimingLog();
 }

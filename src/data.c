@@ -184,6 +184,105 @@ QuantizedData getDataINT4(int seed, int M, int N) {
     return q;
 }
 
+float bf16_to_float(uint16_t h) {
+    uint32_t u = ((uint32_t)h) << 16;
+    float f;
+    memcpy(&f, &u, sizeof(f));
+    return f;
+}
+
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+QuantizedData quantizeDataINT8(const float* A, int M, int N) {
+    QuantizedData q = {0};
+    q.M = M;
+    q.N = N;
+    q.group_size = 256;
+    q.type = QUANT_INT8;
+
+    int blocks_per_row = (N + q.group_size - 1) / q.group_size;
+    int blocks_count = M * blocks_per_row;
+
+    q.data = (uint8_t*)malloc(sizeof(uint8_t) * M * N);
+    q.scale = (float*)malloc(sizeof(float) * blocks_count);
+    q.z = (float*)malloc(sizeof(float) * blocks_count);
+
+    for (int i = 0; i < M; i++) {
+        for (int bj = 0; bj < blocks_per_row; bj++) {
+            float min_val = 1e9f;
+            float max_val = -1e9f;
+            int base_j = bj * q.group_size;
+            for (int k = 0; k < q.group_size; k++) {
+                int j = base_j + k;
+                if (j >= N) break;
+                float val = A[i * N + j];
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+            }
+            int block_idx = bj * M + i;
+            q.scale[block_idx] = (max_val - min_val) / 255.0f;
+            q.z[block_idx] = -min_val;
+
+            for (int k = 0; k < q.group_size; k++) {
+                int j = base_j + k;
+                if (j >= N) break;
+                float v = clampf((A[i * N + j] + q.z[block_idx]) / q.scale[block_idx], 0.0f, 255.0f);
+                q.data[i * N + j] = (uint8_t)roundf(v);
+            }
+        }
+    }
+
+    return q;
+}
+
+QuantizedData quantizeDataINT4(const float* A, int M, int N) {
+    QuantizedData q = {0};
+    q.M = M;
+    q.N = N;
+    q.group_size = 256;
+    q.type = QUANT_INT4;
+
+    int blocks_per_row = (N + q.group_size - 1) / q.group_size;
+    int blocks_count = M * blocks_per_row;
+
+    q.data = (uint8_t*)malloc(sizeof(uint8_t) * M * N / 2);
+    q.scale = (float*)malloc(sizeof(float) * blocks_count);
+    q.z = (float*)malloc(sizeof(float) * blocks_count);
+
+    for (int i = 0; i < M; i++) {
+        for (int bj = 0; bj < blocks_per_row; bj++) {
+            float min_val = 1e9f;
+            float max_val = -1e9f;
+            int base_j = bj * q.group_size;
+            for (int k = 0; k < q.group_size; k++) {
+                int j = base_j + k;
+                if (j >= N) break;
+                float val = A[i * N + j];
+                if (val < min_val) min_val = val;
+                if (val > max_val) max_val = val;
+            }
+            int block_idx = bj * M + i;
+            q.scale[block_idx] = (max_val - min_val) / 15.0f;
+            q.z[block_idx] = -min_val;
+
+            for (int k = 0; k < q.group_size; k += 2) {
+                int j0 = base_j + k;
+                int j1 = base_j + k + 1;
+                uint8_t v0 = (uint8_t)clampf(roundf((A[i * N + j0] + q.z[block_idx]) / q.scale[block_idx]), 0.0f, 15.0f);
+                uint8_t v1 = (j1 < N) ? (uint8_t)clampf(roundf((A[i * N + j1] + q.z[block_idx]) / q.scale[block_idx]), 0.0f, 15.0f) : 0;
+                int packed_idx = i * (N / 2) + (bj * q.group_size + k) / 2;
+                q.data[packed_idx] = ((v0 & 0x0F) << 4) | (v1 & 0x0F);
+            }
+        }
+    }
+
+    return q;
+}
+
 void transpose(const float* src, float* dest, int m, int n) {
     for (int i = 0; i < m; i++) {
         for (int j = 0; j < n; j++) {
