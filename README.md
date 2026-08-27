@@ -58,34 +58,29 @@ errors in stderr.
 > Note: `demoWeight/*.bin` are generated/loaded automatically (gitignored via
 > `bin/`). Real Qwen weights are NOT shipped in this repo.
 
-## Running a real LLM (Qwen3.5-9B) via Vulkan + llama.cpp
+## Running a real LLM (Qwen3.5-9B) — pure Vulkan
 
-For *real* Qwen text output (tokenizer + real weights), use `llama.cpp` built
-with the **Vulkan backend** and a GGUF of Qwen3.5-9B. This is the production
-path (vk-compute itself is a research engine and does not yet provide a
-safetensors->internal converter / tokenizer).
+The engine itself is **100% Vulkan** (C + GLSL compute shaders, no third-party
+inference runtime). Everything runs on the Radeon GPU through Vulkan compute
+pipelines.
 
-```bash
-# 1. Build llama.cpp with Vulkan (MSYS2 UCRT64 + Vulkan SDK in path):
-cmake -S . -B build-vulkan -DGGML_VULKAN=ON -DGGML_CUDA=OFF -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-vulkan --target llama-cli llama-server -j 8
+To run the *real* Qwen3.5-9B weights (not the synthetic demo), two components
+still need to be built **in this repo, using only Vulkan**:
 
-# 2. Copy MSYS2 runtime DLLs next to the exe (same list as above).
+1. **Safetensors → `demoWeight/*.bin` converter** — loads Qwen's real
+   `model.safetensors` shards and writes them in the engine's internal format
+   (`transpose_block16`, per-group-256 INT4/INT8/FP16). The `.bin` file format
+   is already decoded/verified (see `_setup/bin_probe.py` / `roundtrip.py`).
+2. **Tokenizer** — plug Qwen's `tokenizer.json` into the decode loop so output
+   ids become text.
 
-# 3. Download a GGUF:
-#    huggingface-cli download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-Q4_K_M.gguf
+No llama.cpp, no GGUF, no external runtime — the weights travel through this
+engine's own Vulkan kernels only.
 
-# 4. Chat interactively (all layers on GPU):
-D:\llama.cpp\build-vulkan\bin\llama-cli.exe -m D:\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf -c 4096 -ngl 99
-
-# 5. If "OutOfDeviceMemory" on an 8 GB card, shrink the KV cache:
-llama-cli.exe -m ...\Qwen3.5-9B-Q4_K_M.gguf -c 4096 -ngl 99
-```
-
-Notes:
-- `-ngl 99` offloads every layer to Vulkan/GPU. Dropping it falls back to CPU.
-- `-c 4096` keeps the KV cache small enough to fit 5.6 GB model + cache in ~8 GB VRAM.
-- Simpler/faster: just `ollama run qwen3.5:9b` if you prefer an one-liner.
+> Status: the `.bin` format is understood and verified (round-trip exact). The
+> converter + tokenizer are the next build step in this branch. The syntethic
+> demo path already proves the Vulkan pipeline (prefill ~85 tok/s, decode
+> ~12 tok/s on RX 6600-class).
 
 ## Repository layout
 
