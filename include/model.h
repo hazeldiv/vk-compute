@@ -6,7 +6,7 @@
 #define MODEL_LAYERS 32
 #define MODEL_K 4096
 #define MODEL_QKV_N 10240
-#define MODEL_PROJ_N 12320
+#define MODEL_PROJ_N 12352
 #define MODEL_FFN_N 12288
 #define MODEL_HEADS 16
 #define MODEL_KV_HEADS 4

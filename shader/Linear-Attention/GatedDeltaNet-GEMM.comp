@@ -40,8 +40,8 @@ void main() {
 
         if (tid == 0) {
             for (uint m = 0; m < TS; m++) {
-                float a = aRaw[(mBase + m) * 16 + qk];
-                float b = bRaw[(mBase + m) * 16 + qk];
+                float a = aRaw[(mBase + m) * 32 + h];
+                float b = bRaw[(mBase + m) * 32 + h];
                 alpha_sh[m] = 1.0 / (1.0 + exp(a));
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
             }

@@ -36,8 +36,8 @@ void main() {
 
     float vv = V[h * HEAD_DIM + r];
     float gv = G[h * HEAD_DIM + r];
-    float a_raw = aRaw[qk];
-    float b_raw = bRaw[qk];
+    float a_raw = aRaw[h];
+    float b_raw = bRaw[h];
 
     if (i < HEAD_DIM / 4) {
         uint b = qk * HEAD_DIM + i * 4;

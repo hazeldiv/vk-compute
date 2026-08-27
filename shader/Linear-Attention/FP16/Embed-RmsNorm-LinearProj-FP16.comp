@@ -10,7 +10,7 @@
 #define V_OFF 4096
 #define G_OFF 8192
 #define A_OFF 12288
-#define B_OFF 12304
+#define B_OFF 12320
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 

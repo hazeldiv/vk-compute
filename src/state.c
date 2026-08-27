@@ -27,8 +27,8 @@ model_state createState(session s, const model_config* spec, int maxM) {
     st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM));
     st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM));
     st.gProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM));
-    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_QK);
-    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_QK);
+    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V);
+    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V);
 
     for (int L = 0; L < spec->layerCount; L++) {
         const layer* ly = &spec->layers[L];

@@ -863,8 +863,8 @@ Replaces the `x` input with a token-id lookup: the token id(s) (a `uint` buffer,
 
 - **Bindings (GEMV and GEMM):** `0 = tokenIds (uint[])`, `1 = lm (uvec4[], transposed lm head [K][vocab])`, `2 = gamma (vec4[])`, `3 = w (uvec4[], transposed w_in [K][12320])`, `4..9 = q/k/v/g/a/b out (float[])`. Push constants `{M, N, K, V}`.
 - **Embedding fetch:** vec4 index `i` (0..1023) reads `lm[(i/2)*V + tok]`; even `i` takes `unpackHalf2x16(raw.x), unpackHalf2x16(raw.y)`, odd `i` takes `.z,.w` (each `uvec4` = 2 vec4 k-rows of a column).
-- **GEMV (`Embed-RmsNorm-LinearProj-FP16.comp`):** 256 threads/col, subgroup RMSNorm sum identical to `RmsNorm-LinearProj-FP16`; `dispatchX = (12320+255)/256 = 49`.
-- **GEMM (`Embed-RmsNorm-LinearProj-GEMM-FP16.comp`):** 16×16 tiled clone of `RmsNorm-LinearProj-GEMM-FP16`; per-token embedding fetched by `tokenIds[mGlobal]` in both the sum-sq pass and the A-tile staging; `dispatchX = 12320/16 = 770`, `dispatchY = M/16`.
+- **GEMV (`Embed-RmsNorm-LinearProj-FP16.comp`):** 256 threads/col, subgroup RMSNorm sum identical to `RmsNorm-LinearProj-FP16`; `dispatchX = (12352+255)/256 = 49`.
+- **GEMM (`Embed-RmsNorm-LinearProj-GEMM-FP16.comp`):** 16×16 tiled clone of `RmsNorm-LinearProj-GEMM-FP16`; per-token embedding fetched by `tokenIds[mGlobal]` in both the sum-sq pass and the A-tile staging; `dispatchX = 12352/16 = 772`, `dispatchY = M/16`.
 
 Note the lm-head column fetch is strided by `V` uvec4s (column-major access into a 640 MB buffer), so the GEMM variant is slower than the plain `x`-input GEMM (~150 ms vs ~45 ms at M=64) — a layout artifact of tied embeddings, not a correctness issue.
 
@@ -1117,7 +1117,7 @@ Whole-attention cost dropped 48.7 s → ~10.4 s for a 16k prompt (QK2 ≈ 8.2 s,
 - **`GEMV-SplitK-*` + `Reduce-GEMV-ADD.comp`**: the K dimension is split across `dispatchY = 4` workgroups (256 threads each, strided k-tiles), partial sums written to `st->gemvPartial[chunk*N + col]`; `Reduce-GEMV-ADD` sums the 4 partials and adds the residual (`C[g] = Σ_z P[z*N+g] + R[g]`). Used by `addGemvSplit` for attention-out and FFN-down when `m == 1`.
 - **`RmsNorm-up-ffn-SplitK-*` + `FFN-Down-SplitK-*`**: decode FFN flattened like the prefill flat kernel — one shader computes `silu(gate)·up` over `2×FFN_N` columns (routing via `nBase >= off`, push `{M,N,K,off}`), writing `st->ffnPartial`; `FFN-Down-SplitK` then GEMVs the down matrix over the partial (which `Reduce-GEMV-ADD` reduces into `h`).
 - **`RmsNorm-QKV-SplitK-*` + `Reduce-Rope-*`**: split-K QKV projection to `st->qkvPartial`, then a per-head reduce that routes by column ranges — g (raw to `gAttn`), q/k (RMSNorm scaled by learned `q_norm`/`k_norm` + RoPE), v (raw) — and stores q/k/v to cache (replaces the old fused `RmsNorm-QKV-*`). Quantized scale/zero are written at the fixed slot `kvHead * MODEL_MAX_CTX + pos`.
-- **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 12320 columns into the six q/k/v/g/a/b output buffers.
+- **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 12352 columns into the six q/k/v/g/a/b output buffers.
 - **`Att-SplitK2-*` + `Reduce-Att2.comp`** (decode attention, ctx ≥ 256): `Att-SplitK2` splits the KV sequence into up to `MAXC = 128` chunks of 4 KV-tiles (LOOPS=4, 64-token tiles); each workgroup runs an online-softmax over its chunk and writes `{max, sum, acc[HEAD_DIM]}` per (chunk, head) into `st->attPartial`; `Reduce-Att2` re-normalizes across chunks (`w = exp(P[ml*2] - m)`). Below 256 tokens the engine uses `Att-full-*` (single workgroup, online softmax, §7.2).
 
 ---

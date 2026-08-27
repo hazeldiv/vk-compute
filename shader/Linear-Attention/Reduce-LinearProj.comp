@@ -18,7 +18,7 @@ layout(set = 0, binding = 6) buffer bOutBuffer { float bOut[]; };
 #define V_OFF 4096
 #define G_OFF 8192
 #define A_OFF 12288
-#define B_OFF 12304
+#define B_OFF 12320
 
 void main() {
     uint globalCol = gl_GlobalInvocationID.x;

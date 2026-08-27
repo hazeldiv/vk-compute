@@ -8,7 +8,7 @@
 #define V_OFF 4096
 #define G_OFF 8192
 #define A_OFF 12288
-#define B_OFF 12304
+#define B_OFF 12320
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
@@ -81,13 +81,13 @@ void main() {
     else if (ng < V_OFF)    kOut[mGlobal * 2048 + (ng - K_OFF)] = acc0;
     else if (ng < G_OFF)    vOut[mGlobal * 4096 + (ng - V_OFF)] = acc0;
     else if (ng < A_OFF)    gOut[mGlobal * 4096 + (ng - G_OFF)] = acc0;
-    else if (ng < B_OFF)    aOut[mGlobal * 16 + (ng - A_OFF)] = acc0;
-    else                    bOut[mGlobal * 16 + (ng - B_OFF)] = acc0;
+    else if (ng < B_OFF)    aOut[mGlobal * 32 + (ng - A_OFF)] = acc0;
+    else                    bOut[mGlobal * 32 + (ng - B_OFF)] = acc0;
     ng = n0 + 1;
     if (ng < K_OFF)         qOut[mGlobal * 2048 + ng] = acc1;
     else if (ng < V_OFF)    kOut[mGlobal * 2048 + (ng - K_OFF)] = acc1;
     else if (ng < G_OFF)    vOut[mGlobal * 4096 + (ng - V_OFF)] = acc1;
     else if (ng < A_OFF)    gOut[mGlobal * 4096 + (ng - G_OFF)] = acc1;
-    else if (ng < B_OFF)    aOut[mGlobal * 16 + (ng - A_OFF)] = acc1;
-    else                    bOut[mGlobal * 16 + (ng - B_OFF)] = acc1;
+    else if (ng < B_OFF)    aOut[mGlobal * 32 + (ng - A_OFF)] = acc1;
+    else                    bOut[mGlobal * 32 + (ng - B_OFF)] = acc1;
 }
