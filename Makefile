@@ -19,17 +19,17 @@ SHADERS_OBJS := $(addprefix $(SHADER_OUT)/,$(notdir $(SHADERS:.comp=.spv)))
 all: ${SHADERS_OBJS} $(BIN_DIR)/$(TARGET)
 
 $(BIN_DIR)/$(TARGET): $(OBJS)
-	@if not exist $(BIN_DIR) mkdir $(BIN_DIR)
+	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 	@echo "Built successfully: $@.exe"
 	
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-	@if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 define COMPILE_SHADER
 $(SHADER_OUT)/$(notdir $(basename $(1))).spv: $(1)
-	@if not exist $(SHADER_OUT_W) mkdir $(SHADER_OUT_W)
+	@mkdir -p $(SHADER_OUT)
 	"$(VULKAN_SDK)/Bin/glslangValidator" -V --target-env vulkan1.1 "$(1)" -o $$@
 endef
 $(foreach f,$(SHADERS),$(eval $(call COMPILE_SHADER,$(f))))
@@ -40,5 +40,4 @@ run: all
 	@cd bin && main.exe
 
 clean:
-	@if exist $(BIN_DIR) rmdir /S /Q $(BIN_DIR)
-	@if exist $(BUILD_DIR) rmdir /S /Q $(BUILD_DIR)
+	@rm -rf $(BIN_DIR) $(BUILD_DIR)
