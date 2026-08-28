@@ -18,5 +18,5 @@ void main() {
         sum += dot(v, v);
     }
     sum = subgroupAdd(sum);
-    if (subgroupElect()) invRms[m] = inversesqrt(sum / float(dims.K) + 1e-5);
+    if (subgroupElect()) invRms[m] = inversesqrt(sum / float(dims.K) + 1e-6);
 }

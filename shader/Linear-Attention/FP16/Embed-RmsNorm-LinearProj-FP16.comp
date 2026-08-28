@@ -21,7 +21,7 @@ layout(push_constant) uniform Dimensions {
     uint V;
 } param;
 
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 layout(set = 0, binding = 0) readonly restrict buffer TokenBuffer { uint tokenIds[]; };
 layout(set = 0, binding = 1) readonly restrict buffer EmbedBuffer { uvec4 lm[]; };

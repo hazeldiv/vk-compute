@@ -223,7 +223,7 @@ Weights come from the HuggingFace safetensors shards (`model.safetensors-0000{N}
 4. The norm vectors (`input_layernorm`, `post_attention_layernorm`, final `norm`, `q_norm`/`k_norm` [256], delta `norm.weight` [128], `A_log`[32], `dt_bias`[32]) are loaded as small float buffers; `conv1d.weight` (`[8192×1×4]` → 8192 channels × 4 taps, channel-major `w0..w3` with `w0` = t−3 … `w3` = current) is loaded **FP32** and consumed by `Conv-SiLU.spv` (§7.3).
 5. Results are cached on disk in `bin/weights/<name>_<q>.bin` (the old `tensorLoadFile`/`tensorWriteFile` format) so the expensive quantize+transpose runs once. Cache names are per-layer (`proj_3_INT8`) and vocab-sized (`lmHead_81920_FP16`) — the earlier synthetic code keyed the cache by name only and would have aliased every layer to layer 0.
 
-**Untied embeddings**: `w.embed` (from `embed_tokens`) and `w.lmHead` (from `lm_head`) are separate buffers (`tie_word_embeddings: false`); the old code aliased them. RoPE theta base is `1e7` (`rope_theta`); the partial-RoPE factor (`0.25`) and `rms_norm_eps` (`1e-6`, the engine uses `1e-5`) are **not** yet corrected — see §13.
+**Untied embeddings**: `w.embed` (from `embed_tokens`) and `w.lmHead` (from `lm_head`) are separate buffers (`tie_word_embeddings: false`); the old code aliased them. RoPE theta base is `1e7` (`rope_theta`), partial-RoPE factor `0.25` (rotate 64 of 256 dims), and `rms_norm_eps = 1e-6` are all now matched.
 
 ---
 
@@ -1300,8 +1300,8 @@ This fits arithmetically but overflows at runtime — fragmentation from ~450 di
 ## 13. Known issues / not yet implemented
 
 1. **(Resolved)** Gated-deltaNet `A_log`/`dt_bias` exponential decay, the q/k L2-norm (eps 1e-6, q × 1/√128), the decayed-`vhat` delta rule, and the `in_proj_z` output gate (`rmsnorm(y)·norm.weight·silu(z)`) are all implemented (§7.3). Linear-attention layers are **HF-identical** to the Qwen3.5 9B block.
-2. **`rms_norm_eps` = `1e-5`** everywhere (shaders + `rms_norm_apply`), but the model config is `1e-6`.
-3. **Partial RoPE (`0.25`)**: the engine rotates the full head; the model rotates only 64 of 256 dims.
-4. **Final logit scaling** (if any) is not applied — verify against HF.
+2. **(Resolved)** `rms_norm_eps = 1e-6` everywhere (shaders + `rms_norm_apply`), matching the model config.
+3. **(Resolved)** Partial RoPE (`0.25`): the engine now rotates only 64 of 256 dims (`MODEL_ROTARY_DIM`, 32 freqs, θ base 1e7); dims 64..255 pass through.
+4. **(Resolved — no-op)** Qwen3.5 applies no final logit scaling: `logits = lm_head(rmsnorm(x))`, verified against the reference.
 5. **VRAM OOM** (§12) blocks a full end-to-end generation on the 8 GB card at `max_ctx = 32768`.
 6. **MTP and vision tensors are ignored** (text-only baseline).

@@ -8,7 +8,7 @@ layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
 layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
 
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 layout(set = 0, binding = 0) readonly restrict buffer MatrixA { vec4 x[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MatrixB { vec4 gamma[]; };

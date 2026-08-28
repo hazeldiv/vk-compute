@@ -24,7 +24,7 @@ layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float Y[]; };
 
 shared vec4 cache[d_model/4];
 shared float shared_sum;
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 void main() {
     uint col = gl_LocalInvocationID.x;

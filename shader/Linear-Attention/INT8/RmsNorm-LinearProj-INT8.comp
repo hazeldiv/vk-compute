@@ -20,7 +20,7 @@ layout(push_constant) uniform Dimensions {
     uint K;
 } param;
 
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 layout(set = 0, binding = 0) buffer DataBuffer { vec4 x[]; };
 layout(set = 0, binding = 1) readonly buffer GammaBuffer { vec4 gamma[]; };

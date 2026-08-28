@@ -155,7 +155,7 @@ static void report(const char* name, int idx, const float* out, const float* ref
 static void rms_norm_apply(const float* x, const float* g, float* xn, int k) {
     float sum = 0.0f;
     for (int i = 0; i < k; i++) sum += x[i] * x[i];
-    float rms = sqrtf(sum / (float)k + 1e-5f);
+    float rms = sqrtf(sum / (float)k + 1e-6f);
     float inv = 1.0f / rms;
     for (int i = 0; i < k; i++) xn[i] = x[i] * g[i] * inv;
 }
@@ -1535,7 +1535,7 @@ static void qkv_rope_ref(const float* proj, const float* theta, float* qref, flo
     for (int h = 0; h < num_heads; h++) {
         float sum = 0.0f;
         for (int i = 0; i < dim; i++) sum += proj[h * dim + i] * proj[h * dim + i];
-        float inv = 1.0f / (sqrtf(sum / (float)dim + 1e-5f));
+        float inv = 1.0f / (sqrtf(sum / (float)dim + 1e-6f));
         const float* gm = NULL;
         if (h < q_heads) gm = qgamma;
         else if (h >= k_head_base && h < v_head_base) gm = kgamma;

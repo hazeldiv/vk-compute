@@ -29,7 +29,7 @@ shared float acc_shared[TS];
 shared float rope_shared[TS];
 shared float shared_sum2;
 
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 void main() {
     uint col = gl_LocalInvocationID.x;

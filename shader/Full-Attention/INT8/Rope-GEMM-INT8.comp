@@ -38,7 +38,7 @@ shared float val_shared[TS];
 shared float qscale_sh;
 shared float qzero_sh;
 
-const float EPSILON = 1e-5;
+const float EPSILON = 1e-6;
 
 void quantizeParams(float v) {
     uint i = gl_LocalInvocationID.x;
