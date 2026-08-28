@@ -15,8 +15,13 @@ layout(set = 0, binding = 5) buffer StateBuffer { float S[]; };
 layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
 layout(set = 0, binding = 7) readonly restrict buffer ZBuffer { float z[]; };
 layout(set = 0, binding = 8) readonly restrict buffer WeightBuffer { float wnorm[]; };
+layout(set = 0, binding = 9) readonly restrict buffer ALogBuffer { float aLog[]; };
+layout(set = 0, binding = 10) readonly restrict buffer DtBiasBuffer { float dtBias[]; };
 
 shared float Ks[TS][DIM];
+shared float Qs[TS][DIM];
+shared float k_inv_sh[TS];
+shared float q_inv_sh[TS];
 shared float Dk[TS][TS];
 shared float Dq[TS][TS];
 shared float delta[TS][DIM];
@@ -45,7 +50,8 @@ void main() {
             for (uint m = 0; m < TS; m++) {
                 float a = aRaw[(mBase + m) * 32 + h];
                 float b = bRaw[(mBase + m) * 32 + h];
-                alpha_sh[m] = 1.0 / (1.0 + exp(a));
+                float g = -exp(aLog[h]) * log(1.0 + exp(a + dtBias[h]));
+                alpha_sh[m] = exp(g);
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
             }
             alpha_P[0] = 1.0;
@@ -58,18 +64,38 @@ void main() {
             uint m = i / DIM;
             uint d = i % DIM;
             Ks[m][d] = K[(mBase + m) * (16 * DIM) + qk * DIM + d];
+            Qs[m][d] = Q[(mBase + m) * (16 * DIM) + qk * DIM + d];
+        }
+        barrier();
+
+        if (tid < TS) {
+            float ksum = 0.0;
+            float qsum = 0.0;
+            for (uint d = 0; d < DIM; d++) {
+                ksum += Ks[tid][d] * Ks[tid][d];
+                qsum += Qs[tid][d] * Qs[tid][d];
+            }
+            k_inv_sh[tid] = inversesqrt(ksum + 1e-6);
+            q_inv_sh[tid] = inversesqrt(qsum + 1e-6) * (1.0 / sqrt(float(DIM)));
+        }
+        barrier();
+
+        for (uint i = tid; i < TS * DIM; i += TS * TS) {
+            uint m = i / DIM;
+            uint d = i % DIM;
+            Ks[m][d] = Ks[m][d] * k_inv_sh[m];
+            Qs[m][d] = Qs[m][d] * q_inv_sh[m];
         }
         barrier();
 
         {
             float dk = 0.0;
             float dq = 0.0;
-            uint qoff = (mBase + c) * (16 * DIM) + qk * DIM;
             for (uint d = 0; d < DIM; d += 4) {
                 vec4 kj = vec4(Ks[r][d], Ks[r][d + 1], Ks[r][d + 2], Ks[r][d + 3]);
                 vec4 km = vec4(Ks[c][d], Ks[c][d + 1], Ks[c][d + 2], Ks[c][d + 3]);
                 dk += dot(kj, km);
-                vec4 qm = vec4(Q[qoff + d], Q[qoff + d + 1], Q[qoff + d + 2], Q[qoff + d + 3]);
+                vec4 qm = vec4(Qs[c][d], Qs[c][d + 1], Qs[c][d + 2], Qs[c][d + 3]);
                 dq += dot(kj, qm);
             }
             Dk[r][c] = dk;
@@ -82,7 +108,6 @@ void main() {
                 uint i = tid;
                 float sk = 0.0;
                 float sq = 0.0;
-                uint qoff = (mBase + m) * (16 * DIM) + qk * DIM;
                 for (uint d = 0; d < DIM; d += 4) {
                     vec4 sv = vec4(S[h * (DIM * DIM) + i * DIM + d],
                                    S[h * (DIM * DIM) + i * DIM + d + 1],
@@ -90,7 +115,7 @@ void main() {
                                    S[h * (DIM * DIM) + i * DIM + d + 3]);
                     vec4 km = vec4(Ks[m][d], Ks[m][d + 1], Ks[m][d + 2], Ks[m][d + 3]);
                     sk += dot(sv, km);
-                    vec4 qm = vec4(Q[qoff + d], Q[qoff + d + 1], Q[qoff + d + 2], Q[qoff + d + 3]);
+                    vec4 qm = vec4(Qs[m][d], Qs[m][d + 1], Qs[m][d + 2], Qs[m][d + 3]);
                     sq += dot(sv, qm);
                 }
                 skv[i] = sk;
@@ -109,7 +134,7 @@ void main() {
                     qc += wj * Dq[j][m] * dj;
                 }
                 float vm = V[(mBase + m) * (32 * DIM) + h * DIM + i];
-                float dv = vm - alpha_P[m] * skv[i] - alpha_P[m] * p;
+                float dv = vm - alpha_P[m + 1] * skv[i] - alpha_P[m + 1] * p;
                 delta[m][i] = dv;
 
                 float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];

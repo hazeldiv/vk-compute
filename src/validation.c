@@ -1916,16 +1916,34 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     free(kvRef);
 }
 
-static void deltanet_ref(const float* proj, const float* wnorm, float* S, float* ygated, int n_qk, int n_v, int dim) {
-    const float* Q = proj;
-    const float* K = proj + n_qk * dim;
+static void deltanet_ref(float* proj, const float* aLog, const float* dtBias, const float* wnorm, float* S, float* ygated, int n_qk, int n_v, int dim) {
+    float* Q = proj;
+    float* K = proj + n_qk * dim;
     const float* V = proj + 2 * n_qk * dim;
     const float* Z = proj + 2 * n_qk * dim + n_v * dim;
     const float* A = Z + n_v * dim;
     const float* B = A + n_v;
+
+    float qscale = 1.0f / sqrtf((float)dim);
+    for (int qk = 0; qk < n_qk; qk++) {
+        float ksum = 0.0f;
+        float qsum = 0.0f;
+        for (int d = 0; d < dim; d++) {
+            ksum += K[qk * dim + d] * K[qk * dim + d];
+            qsum += Q[qk * dim + d] * Q[qk * dim + d];
+        }
+        float k_inv = 1.0f / sqrtf(ksum + 1e-6f);
+        float q_inv = (1.0f / sqrtf(qsum + 1e-6f)) * qscale;
+        for (int d = 0; d < dim; d++) {
+            K[qk * dim + d] *= k_inv;
+            Q[qk * dim + d] *= q_inv;
+        }
+    }
+
     for (int h = 0; h < n_v; h++) {
         int qk = h / 2;
-        float alpha = expf(-logf(1.0f + expf(A[h])));
+        float g = -expf(aLog[h]) * logf(1.0f + expf(A[h] + dtBias[h]));
+        float alpha = expf(g);
         float beta = 1.0f / (1.0f + expf(-B[h]));
         float* Sh = S + h * dim * dim;
         const float* Kh = K + qk * dim;
@@ -1937,7 +1955,7 @@ static void deltanet_ref(const float* proj, const float* wnorm, float* S, float*
         for (int i = 0; i < dim; i++) {
             float vhat = 0.0f;
             for (int j = 0; j < dim; j++) vhat += Sh[i * dim + j] * Kh[j];
-            delta[i] = Vh[i] - vhat;
+            delta[i] = Vh[i] - alpha * vhat;
         }
         for (int i = 0; i < dim; i++) {
             float y = 0.0f;
@@ -1976,11 +1994,13 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     gemv_ref_fp16(xn, w_inFP16, p1, proj_n, K);
     gemv_ref_fp16(xn2, w_inFP16, p2, proj_n, K);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, aLog, dtBias, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, aLog, dtBias, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_fp16(yg2, woFP16, ref, out_n, K);
 
@@ -2014,8 +2034,10 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
     buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    buffer aLogBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aLog, sizeof(float) * n_v, MEMORY_RAM);
+    buffer dtBiasBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dtBias, sizeof(float) * n_v, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer, aLogBuffer, dtBiasBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 17);
     free(twIn);
     free(twOut);
 
@@ -2023,7 +2045,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
@@ -2032,7 +2054,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
@@ -2046,12 +2068,14 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet FP16", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S FP16", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 15);
+    destroy_buffers(s, bufs, 17);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
     free(wn);
+    free(aLog);
+    free(dtBias);
     free(S);
     free(yg1);
     free(yg2);
@@ -2086,11 +2110,13 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     gemv_ref_int8(xn, &w_inINT8, p1, proj_n, K);
     gemv_ref_int8(xn2, &w_inINT8, p2, proj_n, K);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, aLog, dtBias, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, aLog, dtBias, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_int8(yg2, &woINT8, ref, out_n, K);
 
@@ -2128,8 +2154,10 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
     buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 19);
+    buffer aLogBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aLog, sizeof(float) * n_v, MEMORY_RAM);
+    buffer dtBiasBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dtBias, sizeof(float) * n_v, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer, aLogBuffer, dtBiasBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 21);
     free(twIn);
     free(twOut);
 
@@ -2137,7 +2165,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT8.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2146,7 +2174,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT8.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2160,12 +2188,14 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet INT8", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S INT8", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 19);
+    destroy_buffers(s, bufs, 21);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
     free(wn);
+    free(aLog);
+    free(dtBias);
     free(S);
     free(yg1);
     free(yg2);
@@ -2200,11 +2230,13 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     gemv_ref_int4(xn, &w_inINT4, p1, proj_n, K);
     gemv_ref_int4(xn2, &w_inINT4, p2, proj_n, K);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, aLog, dtBias, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, aLog, dtBias, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_int4(yg2, &woINT4, ref, out_n, K);
 
@@ -2242,8 +2274,10 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
     buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 19);
+    buffer aLogBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aLog, sizeof(float) * n_v, MEMORY_RAM);
+    buffer dtBiasBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dtBias, sizeof(float) * n_v, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer, aLogBuffer, dtBiasBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 21);
     free(twIn);
     free(twOut);
 
@@ -2251,7 +2285,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT4.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2260,7 +2294,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
         {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT4.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2274,12 +2308,14 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet INT4", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S INT4", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 19);
+    destroy_buffers(s, bufs, 21);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
     free(wn);
+    free(aLog);
+    free(dtBias);
     free(S);
     free(yg1);
     free(yg2);
@@ -2311,12 +2347,14 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_fp16(xn, w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, aLog, dtBias, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -2326,6 +2364,7 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
     float* qOut = (float*)calloc(M * n_qk * dim, sizeof(float));
     float* kOut = (float*)calloc(M * n_qk * dim, sizeof(float));
     float* vOut = (float*)calloc(M * n_v * dim, sizeof(float));
+    float* zOut = (float*)calloc(M * n_v * dim, sizeof(float));
     float* aOut = (float*)calloc(M * n_v, sizeof(float));
     float* bOut = (float*)calloc(M * n_v, sizeof(float));
     float* yGated = (float*)calloc(M * out_n, sizeof(float));
@@ -2344,21 +2383,25 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * n_qk * dim, MEMORY_VRAM);
     buffer kOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kOut, sizeof(float) * M * n_qk * dim, MEMORY_VRAM);
     buffer vOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vOut, sizeof(float) * M * n_v * dim, MEMORY_VRAM);
+    buffer zOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, zOut, sizeof(float) * M * n_v * dim, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * M * n_v, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * M * n_v, MEMORY_VRAM);
     buffer sBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, Sbuf, sizeof(float) * smat, MEMORY_VRAM);
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * M * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * M * out_n, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 12);
+    buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
+    buffer aLogBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aLog, sizeof(float) * n_v, MEMORY_RAM);
+    buffer dtBiasBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dtBias, sizeof(float) * n_v, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer, aLogBuffer, dtBiasBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 16);
     free(twIn);
     free(twOut);
 
     operation ops[] = {
-        {.shader = "RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 8,
+        {.shader = "RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
          .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet-GEMM.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet-GEMM.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {M}, .pushConstantCount = 1,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMM-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
@@ -2372,10 +2415,11 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
     report("GatedDeltaNet-GEMM FP16", 100, out, ref, M * out_n, ms);
     report("GatedDeltaNet-GEMM-S FP16", 100, Sbuf, S_ref, smat, ms);
 
-    destroy_buffers(s, bufs, 12);
+    destroy_buffers(s, bufs, 16);
     free(w_in_scaled);
     free(S_ref); free(yg_all); free(ref);
-    free(qOut); free(kOut); free(vOut); free(aOut); free(bOut);
+    free(wn); free(aLog); free(dtBias);
+    free(qOut); free(kOut); free(vOut); free(zOut); free(aOut); free(bOut);
     free(yGated); free(out); free(Sbuf);
 }
 
@@ -2403,12 +2447,14 @@ void validateGatedDeltaNetGEMMINT8(session s, int M, int K, float* input, float*
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_int8(xn, &w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, aLog, dtBias, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -2499,12 +2545,14 @@ void validateGatedDeltaNetGEMMINT4(session s, int M, int K, float* input, float*
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
     float* wn = getData(64051, 1, dim);
+    float* aLog = getData(64052, 1, n_v);
+    float* dtBias = getData(64053, 1, n_v);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_int4(xn, &w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, aLog, dtBias, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -5213,7 +5261,7 @@ void validation(void) {
     validateAttentionGEMMINT8(s, Mg, 16, 4, 256);
     // validateAttentionGEMMINT4(s, Mg, 16, 4, 256);
 
-    // validateGatedDeltaNetGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16, woFP16);
+    validateGatedDeltaNetGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16, woFP16);
     // validateGatedDeltaNetGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8, woINT8);
     // validateGatedDeltaNetGEMMINT4(s, Mg, K, inputM, gamma, w_inINT4, woINT4);
 

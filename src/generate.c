@@ -403,13 +403,13 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     int pushConv[] = {m};
     addOp(ops, n, "Conv-SiLU.spv", L, convBufs, 5, pushConv, 1, MODEL_ZQKV_N / 256, 1);
 
-    buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated, st->zProj, w->attnNorm[L]};
+    buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated, st->zProj, w->attnNorm[L], w->aLog[L], w->dtBias[L]};
     if (gemm) {
         int pushDn[] = {m};
-        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 9, pushDn, 1, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 11, pushDn, 1, MODEL_N_V, 1);
     } else {
         int pushDn[] = {MODEL_N_V, MODEL_N_QK, MODEL_DIM};
-        addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 9, pushDn, 3, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 11, pushDn, 3, MODEL_N_V, 1);
     }
 
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);

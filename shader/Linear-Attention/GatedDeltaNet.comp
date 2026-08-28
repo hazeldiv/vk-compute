@@ -21,12 +21,16 @@ layout(set = 0, binding = 5) buffer StateBuffer { vec4 S[]; };
 layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
 layout(set = 0, binding = 7) readonly restrict buffer ZBuffer { float z[]; };
 layout(set = 0, binding = 8) readonly restrict buffer WeightBuffer { float wnorm[]; };
+layout(set = 0, binding = 9) readonly restrict buffer ALogBuffer { float aLog[]; };
+layout(set = 0, binding = 10) readonly restrict buffer DtBiasBuffer { float dtBias[]; };
 
 shared vec4 k4[HEAD_DIM / 4];
 shared vec4 q4[HEAD_DIM / 4];
 shared float wave_kq[TS / 64];
 shared float pairV[TS];
 shared float pairY[TS];
+shared float k_inv;
+shared float q_inv;
 
 void main() {
     uint i = gl_LocalInvocationID.x;
@@ -46,7 +50,25 @@ void main() {
     }
     barrier();
 
-    float alpha = exp(-log(1.0 + exp(a_raw)));
+    if (i == 0u) {
+        float ksum = 0.0;
+        float qsum = 0.0;
+        for (uint j = 0; j < HEAD_DIM / 4; j++) {
+            ksum += dot(k4[j], k4[j]);
+            qsum += dot(q4[j], q4[j]);
+        }
+        k_inv = inversesqrt(ksum + 1e-6);
+        q_inv = inversesqrt(qsum + 1e-6) * (1.0 / sqrt(float(HEAD_DIM)));
+    }
+    barrier();
+    if (i < HEAD_DIM / 4) {
+        k4[i] = k4[i] * k_inv;
+        q4[i] = q4[i] * q_inv;
+    }
+    barrier();
+
+    float g = -exp(aLog[h]) * log(1.0 + exp(a_raw + dtBias[h]));
+    float alpha = exp(g);
     float beta = 1.0 / (1.0 + exp(-b_raw));
 
     uint e = i & 127u;
@@ -88,7 +110,7 @@ void main() {
 
     float vhat = vhat_partial + pairV[i ^ 1u];
     float y0 = y0_partial + pairY[i ^ 1u];
-    float delta = vv - vhat;
+    float delta = vv - alpha * vhat;
 
     float bd = beta * delta;
     for (uint j = 0; j < HEAD_DIM / 8; j++) {
