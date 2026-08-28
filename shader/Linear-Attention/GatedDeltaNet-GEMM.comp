@@ -9,11 +9,10 @@ layout(push_constant) uniform Dimensions { uint M; } param;
 layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
 layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
 layout(set = 0, binding = 2) readonly buffer VBuffer { float V[]; };
-layout(set = 0, binding = 3) readonly buffer GBuffer { float G[]; };
-layout(set = 0, binding = 4) readonly buffer ARawBuffer { float aRaw[]; };
-layout(set = 0, binding = 5) readonly buffer BRawBuffer { float bRaw[]; };
-layout(set = 0, binding = 6) buffer StateBuffer { float S[]; };
-layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
+layout(set = 0, binding = 3) readonly buffer ARawBuffer { float aRaw[]; };
+layout(set = 0, binding = 4) readonly buffer BRawBuffer { float bRaw[]; };
+layout(set = 0, binding = 5) buffer StateBuffer { float S[]; };
+layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
 
 shared float Ks[TS][DIM];
 shared float Dk[TS][TS];
@@ -110,8 +109,7 @@ void main() {
                 delta[m][i] = dv;
 
                 float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];
-                float gm = G[(mBase + m) * (32 * DIM) + h * DIM + i];
-                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym * (gm / (1.0 + exp(-gm)));
+                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym;
             }
             barrier();
         }

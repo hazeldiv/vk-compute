@@ -15,11 +15,10 @@ layout(push_constant) uniform Dimensions {
 layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
 layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
 layout(set = 0, binding = 2) readonly buffer VBuffer { float V[]; };
-layout(set = 0, binding = 3) readonly buffer GBuffer { float G[]; };
-layout(set = 0, binding = 4) readonly buffer ARawBuffer { float aRaw[]; };
-layout(set = 0, binding = 5) readonly buffer BRawBuffer { float bRaw[]; };
-layout(set = 0, binding = 6) buffer StateBuffer { vec4 S[]; };
-layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
+layout(set = 0, binding = 3) readonly buffer ARawBuffer { float aRaw[]; };
+layout(set = 0, binding = 4) readonly buffer BRawBuffer { float bRaw[]; };
+layout(set = 0, binding = 5) buffer StateBuffer { vec4 S[]; };
+layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
 
 shared vec4 k4[HEAD_DIM / 4];
 shared vec4 q4[HEAD_DIM / 4];
@@ -35,7 +34,6 @@ void main() {
     uint hlf = i & 1u;
 
     float vv = V[h * HEAD_DIM + r];
-    float gv = G[h * HEAD_DIM + r];
     float a_raw = aRaw[h];
     float b_raw = bRaw[h];
 
@@ -97,6 +95,6 @@ void main() {
 
     float y = alpha * y0 + beta * delta * kq_dot;
     if (hlf == 0u) {
-        yGated[h * HEAD_DIM + r] = y * (gv / (1.0 + exp(-gv)));
+        yGated[h * HEAD_DIM + r] = y;
     }
 }

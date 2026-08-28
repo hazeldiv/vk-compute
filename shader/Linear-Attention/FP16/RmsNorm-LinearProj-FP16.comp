@@ -8,9 +8,8 @@
 #define d_model 4096
 #define K_OFF 2048
 #define V_OFF 4096
-#define G_OFF 8192
-#define A_OFF 12288
-#define B_OFF 12320
+#define A_OFF 8192
+#define B_OFF 8224
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -28,9 +27,8 @@ layout(set = 0, binding = 2) readonly buffer weightBuffer { uvec4 w[]; };
 layout(set = 0, binding = 3) buffer qOutBuffer { float qOut[]; };
 layout(set = 0, binding = 4) buffer kOutBuffer { float kOut[]; };
 layout(set = 0, binding = 5) buffer vOutBuffer { float vOut[]; };
-layout(set = 0, binding = 6) buffer gOutBuffer { float gOut[]; };
-layout(set = 0, binding = 7) buffer aOutBuffer { float aOut[]; };
-layout(set = 0, binding = 8) buffer bOutBuffer { float bOut[]; };
+layout(set = 0, binding = 6) buffer aOutBuffer { float aOut[]; };
+layout(set = 0, binding = 7) buffer bOutBuffer { float bOut[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
@@ -85,10 +83,8 @@ void main() {
         qOut[globalCol] = acc;
     } else if (globalCol < V_OFF) {
         kOut[globalCol - K_OFF] = acc;
-    } else if (globalCol < G_OFF) {
-        vOut[globalCol - V_OFF] = acc;
     } else if (globalCol < A_OFF) {
-        gOut[globalCol - G_OFF] = acc;
+        vOut[globalCol - V_OFF] = acc;
     } else if (globalCol < B_OFF) {
         aOut[globalCol - A_OFF] = acc;
     } else {

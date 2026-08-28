@@ -5,9 +5,8 @@
 #define vec 4
 #define K_OFF 2048
 #define V_OFF 4096
-#define G_OFF 8192
-#define A_OFF 12288
-#define B_OFF 12320
+#define A_OFF 8192
+#define B_OFF 8224
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
@@ -22,10 +21,9 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixC { uvec4 w[]; };
 layout(set = 0, binding = 4) writeonly restrict buffer MatrixD { float qOut[]; };
 layout(set = 0, binding = 5) writeonly restrict buffer MatrixE { float kOut[]; };
 layout(set = 0, binding = 6) writeonly restrict buffer MatrixF { float vOut[]; };
-layout(set = 0, binding = 7) writeonly restrict buffer MatrixG { float gOut[]; };
-layout(set = 0, binding = 8) writeonly restrict buffer MatrixH { float aOut[]; };
-layout(set = 0, binding = 9) writeonly restrict buffer MatrixI { float bOut[]; };
-layout(set = 0, binding = 10) writeonly restrict buffer MatrixJ { float embOut[]; };
+layout(set = 0, binding = 7) writeonly restrict buffer MatrixH { float aOut[]; };
+layout(set = 0, binding = 8) writeonly restrict buffer MatrixI { float bOut[]; };
+layout(set = 0, binding = 9) writeonly restrict buffer MatrixJ { float embOut[]; };
 
 shared vec4 Asub[4][TS];
 shared vec4 Bsub[4][TS];
@@ -91,8 +89,7 @@ void main() {
 
     if (nGlobal < K_OFF)         qOut[mGlobal * 2048 + nGlobal] = acc;
     else if (nGlobal < V_OFF)    kOut[mGlobal * 2048 + (nGlobal - K_OFF)] = acc;
-    else if (nGlobal < G_OFF)    vOut[mGlobal * 4096 + (nGlobal - V_OFF)] = acc;
-    else if (nGlobal < A_OFF)    gOut[mGlobal * 4096 + (nGlobal - G_OFF)] = acc;
+    else if (nGlobal < A_OFF)    vOut[mGlobal * 4096 + (nGlobal - V_OFF)] = acc;
     else if (nGlobal < B_OFF)    aOut[mGlobal * 32 + (nGlobal - A_OFF)] = acc;
     else                         bOut[mGlobal * 32 + (nGlobal - B_OFF)] = acc;
 }
