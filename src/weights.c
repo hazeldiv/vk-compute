@@ -182,15 +182,15 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
         }
     }
 
-    t.data = createBuffer(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM);
+    t.data = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
     countBuffer(name, layer, t.data);
     if (q != QUANT_FP16) {
         char label[64];
         snprintf(label, sizeof(label), "%s-scale", name);
-        t.scale = createBuffer(s.dev.device, s.dev.physicalDevice, ct->scale, sizeof(float) * ct->scaleCount, MEMORY_VRAM);
+        t.scale = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->scale, sizeof(float) * ct->scaleCount, MEMORY_VRAM, label);
         countBuffer(label, layer, t.scale);
         snprintf(label, sizeof(label), "%s-zero", name);
-        t.zero = createBuffer(s.dev.device, s.dev.physicalDevice, ct->zero, sizeof(float) * ct->scaleCount, MEMORY_VRAM);
+        t.zero = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->zero, sizeof(float) * ct->scaleCount, MEMORY_VRAM, label);
         countBuffer(label, layer, t.zero);
     }
 
@@ -227,7 +227,7 @@ static float* loadVec(const safetensors* sf, const char* name, int len) {
 
 static buffer loadVecBuffer(session s, const safetensors* sf, const char* name, int len, const char* label, int layer) {
     float* v = loadVec(sf, name, len);
-    buffer b = createBuffer(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * len, MEMORY_VRAM);
+    buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * len, MEMORY_VRAM, label);
     countBuffer(label, layer, b);
     free(v);
     return b;
@@ -286,7 +286,7 @@ static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, 
         ct = cacheStore(name, QUANT_FP16, K, V, (uint8_t*)tw, K * V * 2, NULL, NULL, 0);
         tensorWriteFile(path, QUANT_FP16, K, V, ct->data, ct->dataBytes, NULL, NULL, 0);
     }
-    *out = createBuffer(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM);
+    *out = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
     countBuffer(name, -1, *out);
 }
 
@@ -298,7 +298,9 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     uint16_t* h = (uint16_t*)malloc(sizeof(uint16_t) * n);
     for (int64_t i = 0; i < n; i++) h[i] = float_to_fp16(v[i]);
     free(v);
-    buffer b = createBuffer(s.dev.device, s.dev.physicalDevice, h, sizeof(uint16_t) * n, MEMORY_VRAM);
+    char label[64];
+    snprintf(label, sizeof(label), "conv_%d", layer);
+    buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, h, sizeof(uint16_t) * n, MEMORY_VRAM, label);
     countBuffer("conv", layer, b);
     free(h);
     return b;
@@ -330,7 +332,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     for (int i = 0; i < MODEL_HEAD_DIM / 2; i++) {
         theta[i] = (float)pow(1e7, -((double)i) / (MODEL_HEAD_DIM / 2));
     }
-    w.theta = createBuffer(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_HEAD_DIM / 2), MEMORY_VRAM);
+    w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_HEAD_DIM / 2), MEMORY_VRAM, "theta");
     countBuffer("theta", -1, w.theta);
     free(theta);
 

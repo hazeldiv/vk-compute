@@ -11,5 +11,6 @@ typedef struct device {
 
 device createDevice();
 void destroyDevice(device dev);
+void dumpMemoryInfo(VkPhysicalDevice physicalDevice);
 
 #endif

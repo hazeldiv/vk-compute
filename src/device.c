@@ -54,3 +54,25 @@ void destroyDevice(device dev) {
     vkDestroyDevice(dev.device, NULL);
     vkDestroyInstance(dev.instance, NULL);
 }
+
+void dumpMemoryInfo(VkPhysicalDevice physicalDevice) {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &mp);
+
+    fprintf(stderr, "== memory heaps ==\n");
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++) {
+        fprintf(stderr, "  heap[%u]: %.0f MB  %s\n", i,
+                (double)mp.memoryHeaps[i].size / (1024.0 * 1024.0),
+                (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? "DEVICE_LOCAL" : "system");
+    }
+
+    fprintf(stderr, "== memory types ==\n");
+    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+        VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+        fprintf(stderr, "  type[%u] -> heap[%u] : %s%s%s%s\n", i, mp.memoryTypes[i].heapIndex,
+                (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "DEVICE_LOCAL " : "",
+                (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "HOST_VISIBLE " : "",
+                (f & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? "HOST_COHERENT " : "",
+                (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? "HOST_CACHED " : "");
+    }
+}

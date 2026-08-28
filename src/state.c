@@ -3,9 +3,9 @@
 #include <string.h>
 #include "state.h"
 
-static buffer createZeroed(session s, int64_t size) {
+static buffer createZeroed(session s, int64_t size, const char* name) {
     uint8_t* zeros = (uint8_t*)calloc(1, (size_t)size);
-    buffer b = createBuffer(s.dev.device, s.dev.physicalDevice, zeros, size, MEMORY_VRAM);
+    buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, zeros, size, MEMORY_VRAM, name);
     free(zeros);
     return b;
 }
@@ -15,66 +15,75 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
     st.maxM = maxM;
     int mn = maxM * MODEL_K;
 
-    st.h = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.act = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
-    st.embOut = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.embStaged = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.yGated = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.attnOut = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.gAttn = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_Q_OFF);
-    st.qOut = createZeroed(s, (int64_t)sizeof(float) * mn);
-    st.qProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM));
-    st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM));
-    st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM));
-    st.gProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM));
-    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V);
-    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V);
+    st.h = createZeroed(s, (int64_t)sizeof(float) * mn, "h");
+    st.act = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "act");
+    st.embOut = createZeroed(s, (int64_t)sizeof(float) * mn, "embOut");
+    st.embStaged = createZeroed(s, (int64_t)sizeof(float) * mn, "embStaged");
+    st.yGated = createZeroed(s, (int64_t)sizeof(float) * mn, "yGated");
+    st.attnOut = createZeroed(s, (int64_t)sizeof(float) * mn, "attnOut");
+    st.gAttn = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_Q_OFF, "gAttn");
+    st.qOut = createZeroed(s, (int64_t)sizeof(float) * mn, "qOut");
+    st.qProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "qProj");
+    st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "kProj");
+    st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "vProj");
+    st.gProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "gProj");
+    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "aProj");
+    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "bProj");
 
     for (int L = 0; L < spec->layerCount; L++) {
         const layer* ly = &spec->layers[L];
-if (ly->attn.type == ATTENTION_FULL) {
+        if (ly->attn.type == ATTENTION_FULL) {
             int64_t cacheBytes = (int64_t)MODEL_KV_ROWS * MODEL_MAX_CTX;
+            char nk[64], nv[64], nks[64], nkz[64], nvs[64], nvz[64];
+            snprintf(nk, sizeof(nk), "kCache_%d", L);
+            snprintf(nv, sizeof(nv), "vCache_%d", L);
+            snprintf(nks, sizeof(nks), "kScale_%d", L);
+            snprintf(nkz, sizeof(nkz), "kZero_%d", L);
+            snprintf(nvs, sizeof(nvs), "vScale_%d", L);
+            snprintf(nvz, sizeof(nvz), "vZero_%d", L);
             if (ly->attn.q != QUANT_FP16) {
-                st.kCache[L] = createZeroed(s, cacheBytes);
-                st.vCache[L] = createZeroed(s, cacheBytes);
-                st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
-                st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
-                st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
-                st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX);
+                st.kCache[L] = createZeroed(s, cacheBytes, nk);
+                st.vCache[L] = createZeroed(s, cacheBytes, nv);
+                st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nks);
+                st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nkz);
+                st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvs);
+                st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvz);
                 fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
             } else {
                 fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
-                st.kCache[L] = createZeroed(s, cacheBytes * 2);
-                st.vCache[L] = createZeroed(s, cacheBytes * 2);
+                st.kCache[L] = createZeroed(s, cacheBytes * 2, nk);
+                st.vCache[L] = createZeroed(s, cacheBytes * 2, nv);
             }
         } else if (ly->attn.type == ATTENTION_DELTA) {
-            st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_N_V * MODEL_DIM * MODEL_DIM);
+            char ns[64];
+            snprintf(ns, sizeof(ns), "stateS_%d", L);
+            st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_N_V * MODEL_DIM * MODEL_DIM, ns);
         }
     }
 
     uint32_t zero = 0;
-    st.position = createBuffer(s.dev.device, s.dev.physicalDevice, &zero, sizeof(uint32_t), MEMORY_RAM);
+    st.position = createBufferNamed(s.dev.device, s.dev.physicalDevice, &zero, sizeof(uint32_t), MEMORY_RAM, "position");
     uint32_t* tokenInit = (uint32_t*)calloc(maxM, sizeof(uint32_t));
-    st.tokenIds = createBuffer(s.dev.device, s.dev.physicalDevice, tokenInit, (int64_t)sizeof(uint32_t) * maxM, MEMORY_RAM);
+    st.tokenIds = createBufferNamed(s.dev.device, s.dev.physicalDevice, tokenInit, (int64_t)sizeof(uint32_t) * maxM, MEMORY_RAM, "tokenIds");
     free(tokenInit);
     float* lastInit = (float*)calloc(MODEL_K, sizeof(float));
-    st.lastRow = createBuffer(s.dev.device, s.dev.physicalDevice, lastInit, (int64_t)sizeof(float) * MODEL_K, MEMORY_RAM);
+    st.lastRow = createBufferNamed(s.dev.device, s.dev.physicalDevice, lastInit, (int64_t)sizeof(float) * MODEL_K, MEMORY_RAM, "lastRow");
     free(lastInit);
     int numGroups = (vocab + 255) / 256;
-    st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups);
-    st.maxIndex = createZeroed(s, (int64_t)sizeof(uint32_t) * numGroups);
-    st.result = createZeroed(s, sizeof(uint32_t) * 4);
-    st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_K);
-    st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N);
-    st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N);
-    st.linprojPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_PROJ_N);
-    st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 528384);
-    st.invRms = createZeroed(s, (int64_t)sizeof(float) * maxM);
-    st.attScores = createZeroed(s, (int64_t)maxM * MODEL_MAX_CTX * 4 * 2);
-    st.smSum = createZeroed(s, (int64_t)sizeof(float) * maxM * 4);
-    st.qkvRaw = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_QKV_N);
-    st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
-    st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N);
+    st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups, "maxValue");
+    st.maxIndex = createZeroed(s, (int64_t)sizeof(uint32_t) * numGroups, "maxIndex");
+    st.result = createZeroed(s, sizeof(uint32_t) * 4, "result");
+    st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_K, "gemvPartial");
+    st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N, "qkvPartial");
+    st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N, "ffnPartial");
+    st.linprojPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_PROJ_N, "linprojPartial");
+    st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 528384, "attPartial");
+    st.invRms = createZeroed(s, (int64_t)sizeof(float) * maxM, "invRms");
+    st.attScores = createZeroed(s, (int64_t)maxM * MODEL_MAX_CTX * 4 * 2, "attScores");
+    st.smSum = createZeroed(s, (int64_t)sizeof(float) * maxM * 4, "smSum");
+    st.qkvRaw = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_QKV_N, "qkvRaw");
+    st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "gAct");
+    st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "uAct");
 
     buffer bufs[] = {
         st.h, st.act, st.embOut, st.yGated, st.attnOut, st.gAttn, st.qOut,

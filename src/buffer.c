@@ -16,7 +16,10 @@ static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, VkMemoryRequirem
     return UINT32_MAX;
 }
 
-static void allocateBufferMemory(VkDevice device, VkPhysicalDevice physicalDevice, VkBuffer buffer, VkMemoryRequirements memReqs, VkMemoryPropertyFlags properties, VkDeviceMemory* memory) {
+static int64_t g_deviceLocalBytes = 0;
+static int64_t g_hostVisibleBytes = 0;
+
+static void allocateBufferMemory(VkDevice device, VkPhysicalDevice physicalDevice, VkBuffer buffer, VkMemoryRequirements memReqs, VkMemoryPropertyFlags properties, VkDeviceMemory* memory, const char* name) {
     uint32_t memoryTypeIndex = findMemoryType(physicalDevice, memReqs, properties);
     if (memoryTypeIndex == UINT32_MAX) {
         fprintf(stderr, "Error: Failed to find suitable memory type!\n");
@@ -27,16 +30,35 @@ static void allocateBufferMemory(VkDevice device, VkPhysicalDevice physicalDevic
     allocInfo.allocationSize = memReqs.size;
     allocInfo.memoryTypeIndex = memoryTypeIndex;
     if (vkAllocateMemory(device, &allocInfo, NULL, memory) != VK_SUCCESS) {
-        fprintf(stderr, "Error: Failed to allocate memory!\n");
+        int isDev = (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        fprintf(stderr,
+                "OOM: vkAllocateMemory failed for '%s' (%s, %.2f MB) | device_local=%.2f MB host_visible=%.2f MB\n",
+                name ? name : "(unnamed)",
+                isDev ? "DEVICE_LOCAL" : "HOST_VISIBLE",
+                (double)memReqs.size / (1024.0 * 1024.0),
+                (double)g_deviceLocalBytes / (1024.0 * 1024.0),
+                (double)g_hostVisibleBytes / (1024.0 * 1024.0));
         exit(EXIT_FAILURE);
     }
     vkBindBufferMemory(device, buffer, *memory, 0);
+    if (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+        g_deviceLocalBytes += memReqs.size;
+    } else if (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        g_hostVisibleBytes += memReqs.size;
+    }
 }
 
 buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* data, int64_t size, int memoryType) {
+    return createBufferNamed(device, physicalDevice, data, size, memoryType, NULL);
+}
+
+buffer createBufferNamed(VkDevice device, VkPhysicalDevice physicalDevice, void* data, int64_t size, int memoryType, const char* name) {
     buffer buf = {0};
     buf.memoryType = memoryType;
     buf.size = size;
+    if (name) {
+        snprintf(buf.name, sizeof(buf.name), "%s", name);
+    }
 
     VkBufferCreateInfo bufferInfo = {0};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -47,7 +69,7 @@ buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* data
     vkGetBufferMemoryRequirements(device, buf.buffer, &buf.memReqs);
 
     if (memoryType == MEMORY_RAM) {
-        allocateBufferMemory(device, physicalDevice, buf.buffer, buf.memReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf.memory);
+        allocateBufferMemory(device, physicalDevice, buf.buffer, buf.memReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf.memory, name);
         void* mappedMemory;
         vkMapMemory(device, buf.memory, 0, size, 0, &mappedMemory);
         memcpy(mappedMemory, data, size);
@@ -61,13 +83,13 @@ buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* data
         vkCreateBuffer(device, &stagingInfo, NULL, &buf.stagingBuffer);
         VkMemoryRequirements stagingMemReqs;
         vkGetBufferMemoryRequirements(device, buf.stagingBuffer, &stagingMemReqs);
-        allocateBufferMemory(device, physicalDevice, buf.stagingBuffer, stagingMemReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf.stagingMemory);
+        allocateBufferMemory(device, physicalDevice, buf.stagingBuffer, stagingMemReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buf.stagingMemory, name);
         void* mappedMemory;
         vkMapMemory(device, buf.stagingMemory, 0, size, 0, &mappedMemory);
         memcpy(mappedMemory, data, size);
         vkUnmapMemory(device, buf.stagingMemory);
 
-        allocateBufferMemory(device, physicalDevice, buf.buffer, buf.memReqs, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &buf.memory);
+        allocateBufferMemory(device, physicalDevice, buf.buffer, buf.memReqs, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &buf.memory, name);
     }
 
     return buf;

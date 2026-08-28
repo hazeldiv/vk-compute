@@ -14,9 +14,11 @@ typedef struct buffer {
     void* mappedMemory;
     int64_t size;
     int memoryType;
+    char name[64];
 } buffer;
 
 buffer createBuffer(VkDevice device, VkPhysicalDevice physicalDevice, void* data, int64_t size, int memoryType);
+buffer createBufferNamed(VkDevice device, VkPhysicalDevice physicalDevice, void* data, int64_t size, int memoryType, const char* name);
 void createTransferAndCopy(VkDevice device, VkQueue queue, buffer* buffers, int bufferCount);
 void readBuffer(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, buffer buf, void* output);
 void destroyBuffer(VkDevice device, buffer buf);

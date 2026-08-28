@@ -56,6 +56,12 @@ static const char* argval(int argc, char** argv, const char* name, const char* d
     return def;
 }
 
+void memInfo(void) {
+    session s = createSession();
+    dumpMemoryInfo(s.dev.physicalDevice);
+    destroySession(s);
+}
+
 void serverMain(int argc, char** argv) {
     const char* weightDir = argval(argc, argv, "--weights", "../model/Qwen3.5-9B-weight");
     const char* vocabHead = argval(argc, argv, "--vocab-head", NULL);
