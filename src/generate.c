@@ -70,7 +70,7 @@ static void addGemmAdd(generator* g, operation* ops, int* n, int L, const tensor
     int k = (input.buffer == g->st.act.buffer) ? MODEL_FFN_N : MODEL_K;
     int tn = (q == QUANT_INT4) ? 64 : 32;
     int push[] = {m, MODEL_K, k};
-    addOp(ops, n, model_shader("GEMM-ADD2", q), L, bufs, b, push, 3, MODEL_K / tn, m / 16);
+    addOp(ops, n, model_shader("GEMM-ADD2", q), L, bufs, b, push, 3, MODEL_K / tn, (m + 15) / 16);
 }
 
 static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm, int m, buffer input) {
@@ -126,11 +126,11 @@ bufs[b++] = input;
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
     int pushP[] = {MODEL_K};
     buffer proBufs[2];
-    proBufs[0] = st->h;
+    proBufs[0] = input;
     proBufs[1] = st->invRms;
     addOp(ops, n, "RmsNorm-Prologue.spv", L, proBufs, 2, pushP, 1, m, 1);
     addOp(ops, n, model_shader("RmsNorm-LinearProj-GEMM2", q), L, bufs, b, push, 3,
-          MODEL_PROJ_N / 32, m / 16);
+          MODEL_PROJ_N / 32, (m + 15) / 16);
 }
 
 static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int m) {
@@ -190,7 +190,7 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         ffnBufs[bf++] = st->invRms;
         int push[] = {m, MODEL_FFN_N, MODEL_K};
         addOp(ops, n, model_shader("RmsNorm-swiglu-ffn-GEMM2", f), L, ffnBufs, bf, push, 3,
-              MODEL_FFN_N / 32, m / 16);
+              MODEL_FFN_N / 32, (m + 15) / 16);
     } else {
         buffer flatBufs[11];
         int bf2 = 0;
@@ -207,7 +207,7 @@ static void buildFfn(generator* g, operation* ops, int* n, int L, int gemm, int 
         flatBufs[bf2++] = st->invRms;
         int pushF[] = {m, MODEL_FFN_N, MODEL_K, MODEL_FFN_N};
         addOp(ops, n, model_shader("RmsNorm-swiglu-flat-GEMM2", f), L, flatBufs, bf2, pushF, 4,
-              (MODEL_FFN_N * 2) / 32, m / 16);
+              (MODEL_FFN_N * 2) / 32, (m + 15) / 16);
 
         buffer cmbBufs[3];
         cmbBufs[0] = st->gAct;
@@ -246,7 +246,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         int tnQkv = (q == QUANT_INT4) ? 64 : 32;
         int pushQ[] = {m, MODEL_QKV_N, MODEL_K};
         addOp(ops, n, model_shader("RmsNorm-QKV-GEMM2", q), L, qkvGBufs, bq2, pushQ, 3,
-              MODEL_QKV_N / tnQkv, m / 16);
+              MODEL_QKV_N / tnQkv, (m + 15) / 16);
 
         buffer ropeGBufs[13];
         int brg = 0;
@@ -279,7 +279,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             qkBufs[bq++] = st->kZero[L];
         }
         qkBufs[bq++] = st->attScores;
-        addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, ctx / 64, (m / 16) * 4);
+        addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, ctx / 64, ((m + 15) / 16) * 4);
 
         buffer smBufs[2];
         smBufs[0] = st->attScores;
@@ -296,7 +296,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         }
         pvBufs[bp++] = st->attnOut;
         pvBufs[bp++] = st->smSum;
-        addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, (m / 16) * 4);
+        addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, ((m + 15) / 16) * 4);
 
         buffer gateBufs[2];
         gateBufs[0] = st->gAttn;

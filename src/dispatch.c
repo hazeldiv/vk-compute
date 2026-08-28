@@ -263,7 +263,7 @@ static void recordFrame(session* s, operation ops[], int opCount) {
             vkCmdPushConstants(cb, entry->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(int) * op->pushConstantCount, op->pushConstants);
         }
-        if (i > 0) {
+        {
             VkMemoryBarrier barrier = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                 .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,

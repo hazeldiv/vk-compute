@@ -38,6 +38,17 @@ static void fatal(const char* msg) {
     exit(1);
 }
 
+#define MAX_WEIGHT_BUFS 2560
+
+static buffer g_wbufs[MAX_WEIGHT_BUFS];
+static int g_wbufsCount = 0;
+
+static void registerWeightBuffer(buffer b) {
+    if (g_wbufsCount < MAX_WEIGHT_BUFS) {
+        g_wbufs[g_wbufsCount++] = b;
+    }
+}
+
 static cachedTensor* cacheFind(const char* name, QuantType q) {
     for (int i = 0; i < tensorCacheCount; i++) {
         if (tensorCache[i].q == q && strcmp(tensorCache[i].name, name) == 0) {
@@ -184,14 +195,17 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
 
     t.data = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
     countBuffer(name, layer, t.data);
+    registerWeightBuffer(t.data);
     if (q != QUANT_FP16) {
         char label[64];
         snprintf(label, sizeof(label), "%s-scale", name);
         t.scale = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->scale, sizeof(float) * ct->scaleCount, MEMORY_VRAM, label);
         countBuffer(label, layer, t.scale);
+        registerWeightBuffer(t.scale);
         snprintf(label, sizeof(label), "%s-zero", name);
         t.zero = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->zero, sizeof(float) * ct->scaleCount, MEMORY_VRAM, label);
         countBuffer(label, layer, t.zero);
+        registerWeightBuffer(t.zero);
     }
 
     return t;
@@ -229,6 +243,7 @@ static buffer loadVecBuffer(session s, const safetensors* sf, const char* name, 
     float* v = loadVec(sf, name, len);
     buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * len, MEMORY_VRAM, label);
     countBuffer(label, layer, b);
+    registerWeightBuffer(b);
     free(v);
     return b;
 }
@@ -288,6 +303,7 @@ static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, 
     }
     *out = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
     countBuffer(name, -1, *out);
+    registerWeightBuffer(*out);
 }
 
 static buffer loadConv(session s, const safetensors* sf, const char* name, int layer) {
@@ -299,6 +315,7 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     snprintf(label, sizeof(label), "conv_%d", layer);
     buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * n, MEMORY_VRAM, label);
     countBuffer("conv", layer, b);
+    registerWeightBuffer(b);
     free(v);
     return b;
 }
@@ -306,6 +323,7 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
 model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed) {
     model_weights w = {0};
     weightBytes = 0;
+    g_wbufsCount = 0;
     cacheClear();
     _mkdir(CACHE_DIR);
 
@@ -331,6 +349,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     }
     w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_ROTARY_DIM / 2), MEMORY_VRAM, "theta");
     countBuffer("theta", -1, w.theta);
+    registerWeightBuffer(w.theta);
     free(theta);
 
     w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", MODEL_K, "gammaFinal", -1);
@@ -443,6 +462,8 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
         safetensors_close(&sfEmb);
     }
     cacheClear();
+
+    createTransferAndCopy(s.dev.device, s.dev.queue, g_wbufs, g_wbufsCount);
 
     fprintf(stderr, "total weights: %lld bytes (%.2f MB, %.2f GB)\n",
             (long long)weightBytes,

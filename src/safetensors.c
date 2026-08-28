@@ -239,9 +239,14 @@ int safetensors_open(safetensors* sf, const char** paths, int count) {
             return -1;
         }
         hbuf[hlen] = '\0';
+        int before = sf->tensorCount;
         int rc = parse_header(sf, hbuf, (size_t)hlen, i);
         free(hbuf);
         if (rc != 0) return -1;
+        int64_t dataOffset = 8 + (int64_t)hlen;
+        for (int k = before; k < sf->tensorCount; k++) {
+            sf->tensors[k].offset += dataOffset;
+        }
     }
     sf->fileCount = count;
     return 0;
