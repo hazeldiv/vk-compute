@@ -11,6 +11,7 @@
 #define MODEL_HEADS 16
 #define MODEL_KV_HEADS 4
 #define MODEL_HEAD_DIM 256
+#define MODEL_ROTARY_DIM 64
 #define MODEL_N_QK 16
 #define MODEL_N_V 32
 #define MODEL_DIM 128

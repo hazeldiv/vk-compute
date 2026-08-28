@@ -7,7 +7,8 @@
 #define TS 16
 #define vec 4
 #define HEAD_DIM 256
-#define HALF 128
+#define ROTARY_DIM 64
+#define ROTARY_HALF 32
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
@@ -145,13 +146,17 @@ void main() {
     #pragma unroll
     for (uint j = 0; j < 16; j++) {
         uint d = col * 16 + j;
-        float angle = token * theta[d & (HALF - 1u)];
-        float cs = cos(angle);
-        float sn = sin(angle);
-        if (d < HALF)
-            norm_sh[row][d] = acc_sh[row][d] * cs - acc_sh[row][d + HALF] * sn;
-        else
-            norm_sh[row][d] = acc_sh[row][d - HALF] * sn + acc_sh[row][d] * cs;
+        if (d < ROTARY_DIM) {
+            float angle = token * theta[d & (ROTARY_HALF - 1u)];
+            float cs = cos(angle);
+            float sn = sin(angle);
+            if (d < ROTARY_HALF)
+                norm_sh[row][d] = acc_sh[row][d] * cs - acc_sh[row][d + ROTARY_HALF] * sn;
+            else
+                norm_sh[row][d] = acc_sh[row][d - ROTARY_HALF] * sn + acc_sh[row][d] * cs;
+        } else {
+            norm_sh[row][d] = acc_sh[row][d];
+        }
     }
     barrier();
 

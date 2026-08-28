@@ -3,7 +3,8 @@
 #extension GL_EXT_shader_16bit_storage : require
 #define TS 256
 #define HEAD_DIM 256
-#define HALF 128
+#define ROTARY_DIM 64
+#define ROTARY_HALF 32
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -63,13 +64,17 @@ void main() {
         float inv_rms2 = 1.0 / sqrt((shared_sum2 / float(HEAD_DIM)) + EPSILON);
         rope_shared[col] = acc * inv_rms2 * kGamma[col];
         barrier();
-        float angle = float(token) * theta[col & (HALF - 1u)];
-        float cos_a = cos(angle);
-        float sin_a = sin(angle);
-        if (col < HALF) {
-            acc = rope_shared[col] * cos_a - rope_shared[col + HALF] * sin_a;
+        if (col < ROTARY_DIM) {
+            float angle = float(token) * theta[col & (ROTARY_HALF - 1u)];
+            float cos_a = cos(angle);
+            float sin_a = sin(angle);
+            if (col < ROTARY_HALF) {
+                acc = rope_shared[col] * cos_a - rope_shared[col + ROTARY_HALF] * sin_a;
+            } else {
+                acc = rope_shared[col - ROTARY_HALF] * sin_a + rope_shared[col] * cos_a;
+            }
         } else {
-            acc = rope_shared[col - HALF] * sin_a + rope_shared[col] * cos_a;
+            acc = rope_shared[col];
         }
         kCache[cacheSlot + (globalCol - param.kOffset)] = uint16_t(packHalf2x16(vec2(acc)));
         return;
@@ -95,13 +100,17 @@ void main() {
     rope_shared[col] = acc * inv_rms2 * qGamma[col];
     barrier();
 
-    float angle = float(token) * theta[col & (HALF - 1u)];
-    float cos_a = cos(angle);
-    float sin_a = sin(angle);
-    if (col < HALF) {
-        acc = rope_shared[col] * cos_a - rope_shared[col + HALF] * sin_a;
+    if (col < ROTARY_DIM) {
+        float angle = float(token) * theta[col & (ROTARY_HALF - 1u)];
+        float cos_a = cos(angle);
+        float sin_a = sin(angle);
+        if (col < ROTARY_HALF) {
+            acc = rope_shared[col] * cos_a - rope_shared[col + ROTARY_HALF] * sin_a;
+        } else {
+            acc = rope_shared[col - ROTARY_HALF] * sin_a + rope_shared[col] * cos_a;
+        }
     } else {
-        acc = rope_shared[col - HALF] * sin_a + rope_shared[col] * cos_a;
+        acc = rope_shared[col];
     }
 
     qOut[row * param.gOffset + globalCol] = acc;

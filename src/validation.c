@@ -1522,6 +1522,8 @@ void validateAttentionGEMMINT4(session s, int seq, int heads, int kv_heads, int 
     free(ref);
 }
 
+#define QKV_ROPE_DIM 64
+
 static void qkv_rope_ref(const float* proj, const float* theta, float* qref, float* kref, float* vref, float* gref,
                          int n_total, int g_offset, int k_offset, int v_offset, int dim, int token,
                          const float* qgamma, const float* kgamma) {
@@ -1551,17 +1553,16 @@ static void qkv_rope_ref(const float* proj, const float* theta, float* qref, flo
         }
         int col = j % dim;
         int head = (j / dim) * dim;
-        float val;
-        if (col < dim / 2) {
-            float a = hn[j];
-            float b = hn[head + col + dim / 2];
-            float ang = token * theta[col];
-            val = a * cosf(ang) - b * sinf(ang);
-        } else {
-            float a = hn[head + col - dim / 2];
-            float b = hn[j];
-            float ang = token * theta[col - dim / 2];
-            val = a * sinf(ang) + b * cosf(ang);
+        float val = hn[j];
+        if (col < QKV_ROPE_DIM) {
+            float ang = token * theta[col & (QKV_ROPE_DIM / 2 - 1)];
+            float cs = cosf(ang);
+            float sn = sinf(ang);
+            if (col < QKV_ROPE_DIM / 2) {
+                val = hn[head + col] * cs - hn[head + col + QKV_ROPE_DIM / 2] * sn;
+            } else {
+                val = hn[head + col - QKV_ROPE_DIM / 2] * sn + hn[head + col] * cs;
+            }
         }
         if (j < g_offset) qref[j] = val;
         else kref[j - k_offset] = val;
@@ -1608,7 +1609,7 @@ void validateQkvRopeFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * k, MEMORY_RAM);
     buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * k, MEMORY_RAM);
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * k * n_total, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
@@ -1716,7 +1717,7 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total, MEMORY_RAM);
     buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.scale, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
@@ -1838,7 +1839,7 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total / 2, MEMORY_RAM);
     buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.scale, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.z, sizeof(float) * scaleCount, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
@@ -2754,7 +2755,7 @@ void validateQkvRopeSplitKFP16(session s, int K, int qkv_heads, int qkv_kv_heads
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * k * n_total, MEMORY_RAM);
     float* pinit = (float*)calloc(4 * n_total, sizeof(float));
     buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * rows * seq_len, MEMORY_VRAM);
@@ -2863,7 +2864,7 @@ void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
     float* pinit = (float*)calloc(4 * n_total, sizeof(float));
     buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
@@ -2987,7 +2988,7 @@ void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.z, sizeof(float) * scaleCount, MEMORY_RAM);
     float* pinit = (float*)calloc(4 * n_total, sizeof(float));
     buffer partialBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, pinit, sizeof(float) * 4 * n_total, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * rows * seq_len, MEMORY_VRAM);
@@ -3521,7 +3522,7 @@ void validateQkvRopeGEMMFP16(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * k, MEMORY_RAM);
     buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * k, MEMORY_RAM);
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * k * n_total, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint16_t) * M * rows, MEMORY_VRAM);
@@ -3611,7 +3612,7 @@ void validateQkvRopeGEMMINT8(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total, MEMORY_RAM);
     buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.scale, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT8.z, sizeof(float) * scaleCount, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
@@ -3715,7 +3716,7 @@ void validateQkvRopeGEMMINT4(session s, int K, int qkv_heads, int qkv_kv_heads, 
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * k * n_total / 2, MEMORY_RAM);
     buffer scaleBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.scale, sizeof(float) * scaleCount, MEMORY_RAM);
     buffer zeroBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_weightINT4.z, sizeof(float) * scaleCount, MEMORY_RAM);
-    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (dim / 2), MEMORY_RAM);
+    buffer thetaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qkv_theta, sizeof(float) * (QKV_ROPE_DIM / 2), MEMORY_RAM);
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * M * heads * dim, MEMORY_VRAM);
     buffer kCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
     buffer vCacheBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vCache, sizeof(uint8_t) * M * rows, MEMORY_VRAM);
@@ -5174,9 +5175,9 @@ void validation(void) {
     uint16_t* qkv_weightFP16 = getDataFP16(2468, K, qkv_n);
     QuantizedData qkv_weightINT8 = getDataINT8(2468, K, qkv_n);
     QuantizedData qkv_weightINT4 = getDataINT4(2468, K, qkv_n);
-    float* qkv_theta = (float*)malloc(sizeof(float) * (qkv_dim / 2));
-    for (int i = 0; i < qkv_dim / 2; i++) {
-        qkv_theta[i] = pow(1e6, -((double)i) / (qkv_dim / 2));
+    float* qkv_theta = (float*)malloc(sizeof(float) * (QKV_ROPE_DIM / 2));
+    for (int i = 0; i < QKV_ROPE_DIM / 2; i++) {
+        qkv_theta[i] = pow(1e6, -((double)i) / (QKV_ROPE_DIM / 2));
     }
 
     int w_in_n = 12352;

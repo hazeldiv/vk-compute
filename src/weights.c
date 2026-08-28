@@ -325,11 +325,11 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
         if (safetensors_open(&sfEmb, &customEmbed, 1) != 0) fatal("custom embedding open failed");
     }
 
-    float* theta = (float*)malloc(sizeof(float) * (MODEL_HEAD_DIM / 2));
-    for (int i = 0; i < MODEL_HEAD_DIM / 2; i++) {
-        theta[i] = (float)pow(1e7, -((double)i) / (MODEL_HEAD_DIM / 2));
+    float* theta = (float*)malloc(sizeof(float) * (MODEL_ROTARY_DIM / 2));
+    for (int i = 0; i < MODEL_ROTARY_DIM / 2; i++) {
+        theta[i] = (float)pow(1e7, -((double)i) / (MODEL_ROTARY_DIM / 2));
     }
-    w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_HEAD_DIM / 2), MEMORY_VRAM, "theta");
+    w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_ROTARY_DIM / 2), MEMORY_VRAM, "theta");
     countBuffer("theta", -1, w.theta);
     free(theta);
 
