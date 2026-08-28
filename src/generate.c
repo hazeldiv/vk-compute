@@ -93,34 +93,36 @@ static void addLinearProj(generator* g, operation* ops, int* n, int L, int gemm,
         addOp(ops, n, model_shader("RmsNorm-LinearProj-SplitK", q), L, bufs, b, push, 3,
               (MODEL_PROJ_N + 255) / 256, 4);
 
-        buffer rBufs[6];
+        buffer rBufs[7];
         rBufs[0] = st->linprojPartial;
         rBufs[1] = st->qProj;
         rBufs[2] = st->kProj;
         rBufs[3] = st->vProj;
-        rBufs[4] = st->aProj;
-        rBufs[5] = st->bProj;
+        rBufs[4] = st->zProj;
+        rBufs[5] = st->aProj;
+        rBufs[6] = st->bProj;
         int pushR[] = {MODEL_PROJ_N};
-        addOp(ops, n, "Reduce-LinearProj.spv", L, rBufs, 6, pushR, 1,
+        addOp(ops, n, "Reduce-LinearProj.spv", L, rBufs, 7, pushR, 1,
               (MODEL_PROJ_N + 255) / 256, 1);
         return;
     }
 
     buffer bufs[14];
     int b = 0;
-    bufs[b++] = input;
-    bufs[b++] = w->gammaIn[L];
-    bufs[b++] = w->proj[L].data;
-    bufs[b++] = st->qProj;
-    bufs[b++] = st->kProj;
-    bufs[b++] = st->vProj;
-    bufs[b++] = st->aProj;
-    bufs[b++] = st->bProj;
-    if (q != QUANT_FP16) {
-        bufs[b++] = w->proj[L].scale;
-        bufs[b++] = w->proj[L].zero;
-    }
-    bufs[b++] = st->invRms;
+bufs[b++] = input;
+        bufs[b++] = w->gammaIn[L];
+        bufs[b++] = w->proj[L].data;
+        bufs[b++] = st->qProj;
+        bufs[b++] = st->kProj;
+        bufs[b++] = st->vProj;
+        bufs[b++] = st->zProj;
+        bufs[b++] = st->aProj;
+        bufs[b++] = st->bProj;
+        if (q != QUANT_FP16) {
+            bufs[b++] = w->proj[L].scale;
+            bufs[b++] = w->proj[L].zero;
+        }
+        bufs[b++] = st->invRms;
     int push[] = {m, MODEL_PROJ_N, MODEL_K};
     int pushP[] = {MODEL_K};
     buffer proBufs[2];
@@ -401,13 +403,13 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     int pushConv[] = {m};
     addOp(ops, n, "Conv-SiLU.spv", L, convBufs, 5, pushConv, 1, MODEL_ZQKV_N / 256, 1);
 
-    buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated};
+    buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated, st->zProj, w->attnNorm[L]};
     if (gemm) {
         int pushDn[] = {m};
-        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 7, pushDn, 1, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 9, pushDn, 1, MODEL_N_V, 1);
     } else {
         int pushDn[] = {MODEL_N_V, MODEL_N_QK, MODEL_DIM};
-        addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 7, pushDn, 3, MODEL_N_V, 1);
+        addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 9, pushDn, 3, MODEL_N_V, 1);
     }
 
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
@@ -444,9 +446,9 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
     int n = 0;
 
     for (int p = 0; p < DECODE_GROUP; p++) {
-        buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->embOut};
+        buffer embedBufs[] = {st->tokenIds, w->embed, w->gammaIn[0], w->proj[0].data, st->qProj, st->kProj, st->vProj, st->zProj, st->aProj, st->bProj, st->embOut};
         int pushE[] = {1, MODEL_PROJ_N, MODEL_K, g->vocab};
-        addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 10, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
+        addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 4, (MODEL_PROJ_N + 255) / 256, 1);
 
         for (int L = 0; L < g->spec->layerCount; L++) {
             buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0, 0);

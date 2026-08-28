@@ -26,6 +26,7 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
     st.qProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "qProj");
     st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "kProj");
     st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "vProj");
+    st.zProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "zProj");
     st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "aProj");
     st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "bProj");
 
@@ -89,10 +90,10 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
 
     buffer bufs[] = {
         st.h, st.act, st.embOut, st.yGated, st.attnOut, st.gAttn, st.qOut,
-        st.qProj, st.kProj, st.vProj, st.aProj, st.bProj,
+        st.qProj, st.kProj, st.vProj, st.zProj, st.aProj, st.bProj,
         st.maxValue, st.maxIndex, st.result
     };
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 16);
     for (int L = 0; L < MODEL_LAYERS; L++) {
         if (st.kCache[L].buffer != VK_NULL_HANDLE) {
             buffer ks[] = {st.kCache[L], st.vCache[L], st.kScale[L], st.kZero[L], st.vScale[L], st.vZero[L]};
@@ -123,6 +124,7 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->qProj);
     destroyBuffer(s.dev.device, st->kProj);
     destroyBuffer(s.dev.device, st->vProj);
+    destroyBuffer(s.dev.device, st->zProj);
     destroyBuffer(s.dev.device, st->aProj);
     destroyBuffer(s.dev.device, st->bProj);
     for (int L = 0; L < MODEL_LAYERS; L++) {

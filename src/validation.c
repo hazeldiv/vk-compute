@@ -1916,11 +1916,12 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
     free(kvRef);
 }
 
-static void deltanet_ref(const float* proj, float* S, float* ygated, int n_qk, int n_v, int dim) {
+static void deltanet_ref(const float* proj, const float* wnorm, float* S, float* ygated, int n_qk, int n_v, int dim) {
     const float* Q = proj;
     const float* K = proj + n_qk * dim;
     const float* V = proj + 2 * n_qk * dim;
-    const float* A = proj + 2 * n_qk * dim + n_v * dim;
+    const float* Z = proj + 2 * n_qk * dim + n_v * dim;
+    const float* A = Z + n_v * dim;
     const float* B = A + n_v;
     for (int h = 0; h < n_v; h++) {
         int qk = h / 2;
@@ -1930,6 +1931,7 @@ static void deltanet_ref(const float* proj, float* S, float* ygated, int n_qk, i
         const float* Kh = K + qk * dim;
         const float* Qh = Q + qk * dim;
         const float* Vh = V + h * dim;
+        const float* Zh = Z + h * dim;
         float* yh = ygated + h * dim;
         float delta[128];
         for (int i = 0; i < dim; i++) {
@@ -1947,11 +1949,18 @@ static void deltanet_ref(const float* proj, float* S, float* ygated, int n_qk, i
                 Sh[i * dim + j] = alpha * Sh[i * dim + j] + beta * delta[i] * Kh[j];
             }
         }
+        float sum = 0.0f;
+        for (int i = 0; i < dim; i++) sum += yh[i] * yh[i];
+        float inv = 1.0f / sqrtf(sum / (float)dim + 1e-6f);
+        for (int i = 0; i < dim; i++) {
+            float zv = Zh[i];
+            yh[i] = yh[i] * inv * wnorm[i] * (zv / (1.0f + expf(-zv)));
+        }
     }
 }
 
 void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, float* gamma, uint16_t* w_inFP16, uint16_t* woFP16) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -1966,17 +1975,19 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     float* p2 = (float*)malloc(sizeof(float) * proj_n);
     gemv_ref_fp16(xn, w_inFP16, p1, proj_n, K);
     gemv_ref_fp16(xn2, w_inFP16, p2, proj_n, K);
+    float* wn = getData(64051, 1, dim);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_fp16(yg2, woFP16, ref, out_n, K);
 
     float* qOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* kOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* vOut = (float*)calloc(n_v * dim, sizeof(float));
+    float* zOut = (float*)calloc(n_v * dim, sizeof(float));
     float* aOut = (float*)calloc(n_v, sizeof(float));
     float* bOut = (float*)calloc(n_v, sizeof(float));
     float* yGated = (float*)calloc(out_n, sizeof(float));
@@ -1996,30 +2007,32 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer kOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer vOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
+    buffer zOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, zOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer sBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, Sbuf, sizeof(float) * smat, MEMORY_VRAM);
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 13);
+    buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wOutBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 15);
     free(twIn);
     free(twOut);
 
     operation ops[] = {
-        {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 8,
+        {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 8,
+        {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
@@ -2033,11 +2046,12 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet FP16", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S FP16", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 13);
+    destroy_buffers(s, bufs, 15);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
+    free(wn);
     free(S);
     free(yg1);
     free(yg2);
@@ -2045,6 +2059,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
     free(qOut);
     free(kOut);
     free(vOut);
+    free(zOut);
     free(aOut);
     free(bOut);
     free(yGated);
@@ -2053,7 +2068,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
 }
 
 void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, float* gamma, QuantizedData w_inINT8, QuantizedData woINT8) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -2070,17 +2085,19 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     float* p2 = (float*)malloc(sizeof(float) * proj_n);
     gemv_ref_int8(xn, &w_inINT8, p1, proj_n, K);
     gemv_ref_int8(xn2, &w_inINT8, p2, proj_n, K);
+    float* wn = getData(64051, 1, dim);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_int8(yg2, &woINT8, ref, out_n, K);
 
     float* qOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* kOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* vOut = (float*)calloc(n_v * dim, sizeof(float));
+    float* zOut = (float*)calloc(n_v * dim, sizeof(float));
     float* aOut = (float*)calloc(n_v, sizeof(float));
     float* bOut = (float*)calloc(n_v, sizeof(float));
     float* yGated = (float*)calloc(out_n, sizeof(float));
@@ -2104,30 +2121,32 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer kOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer vOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
+    buffer zOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, zOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer sBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, Sbuf, sizeof(float) * smat, MEMORY_VRAM);
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 17);
+    buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 19);
     free(twIn);
     free(twOut);
 
     operation ops[] = {
-        {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT8.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT8.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2141,11 +2160,12 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet INT8", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S INT8", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 17);
+    destroy_buffers(s, bufs, 19);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
+    free(wn);
     free(S);
     free(yg1);
     free(yg2);
@@ -2153,6 +2173,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
     free(qOut);
     free(kOut);
     free(vOut);
+    free(zOut);
     free(aOut);
     free(bOut);
     free(yGated);
@@ -2161,7 +2182,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
 }
 
 void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, float* gamma, QuantizedData w_inINT4, QuantizedData woINT4) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -2178,17 +2199,19 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     float* p2 = (float*)malloc(sizeof(float) * proj_n);
     gemv_ref_int4(xn, &w_inINT4, p1, proj_n, K);
     gemv_ref_int4(xn2, &w_inINT4, p2, proj_n, K);
+    float* wn = getData(64051, 1, dim);
     float* S = (float*)calloc(smat, sizeof(float));
     float* yg1 = (float*)malloc(sizeof(float) * out_n);
     float* yg2 = (float*)malloc(sizeof(float) * out_n);
-    deltanet_ref(p1, S, yg1, n_qk, n_v, dim);
-    deltanet_ref(p2, S, yg2, n_qk, n_v, dim);
+    deltanet_ref(p1, wn, S, yg1, n_qk, n_v, dim);
+    deltanet_ref(p2, wn, S, yg2, n_qk, n_v, dim);
     float* ref = (float*)malloc(sizeof(float) * out_n);
     gemv_ref_int4(yg2, &woINT4, ref, out_n, K);
 
     float* qOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* kOut = (float*)calloc(n_qk * dim, sizeof(float));
     float* vOut = (float*)calloc(n_v * dim, sizeof(float));
+    float* zOut = (float*)calloc(n_v * dim, sizeof(float));
     float* aOut = (float*)calloc(n_v, sizeof(float));
     float* bOut = (float*)calloc(n_v, sizeof(float));
     float* yGated = (float*)calloc(out_n, sizeof(float));
@@ -2212,30 +2235,32 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     buffer qOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, qOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer kOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, kOut, sizeof(float) * n_qk * dim, MEMORY_VRAM);
     buffer vOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, vOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
+    buffer zOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, zOut, sizeof(float) * n_v * dim, MEMORY_VRAM);
     buffer aOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, aOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer bOutBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, bOut, sizeof(float) * n_v, MEMORY_VRAM);
     buffer sBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, Sbuf, sizeof(float) * smat, MEMORY_VRAM);
     buffer yGatedBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, yGated, sizeof(float) * out_n, MEMORY_VRAM);
     buffer outBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, out, sizeof(float) * out_n, MEMORY_VRAM);
-    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 17);
+    buffer wnBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, wn, sizeof(float) * dim, MEMORY_RAM);
+    buffer bufs[] = {xBuffer, x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, wOutBuffer, wOutScale, wOutZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, outBuffer, wnBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 19);
     free(twIn);
     free(twOut);
 
     operation ops[] = {
-        {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT4.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 10,
+        {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
          .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
+        {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer}, .bufferCount = 9,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMV-INT4.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
@@ -2249,11 +2274,12 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     report("GatedDeltaNet INT4", 100, out, ref, out_n, ms);
     report("GatedDeltaNet-S INT4", 100, Sbuf, S, smat, ms);
 
-    destroy_buffers(s, bufs, 17);
+    destroy_buffers(s, bufs, 19);
     free(xn);
     free(xn2);
     free(p1);
     free(p2);
+    free(wn);
     free(S);
     free(yg1);
     free(yg2);
@@ -2261,6 +2287,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
     free(qOut);
     free(kOut);
     free(vOut);
+    free(zOut);
     free(aOut);
     free(bOut);
     free(yGated);
@@ -2269,7 +2296,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
 }
 
 void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float* gamma, uint16_t* w_inFP16, uint16_t* woFP16) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -2283,12 +2310,13 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
 
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
+    float* wn = getData(64051, 1, dim);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_fp16(xn, w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -2352,7 +2380,7 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
 }
 
 void validateGatedDeltaNetGEMMINT8(session s, int M, int K, float* input, float* gamma, QuantizedData w_inINT8, QuantizedData woINT8) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -2374,12 +2402,13 @@ void validateGatedDeltaNetGEMMINT8(session s, int M, int K, float* input, float*
 
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
+    float* wn = getData(64051, 1, dim);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_int8(xn, &w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -2447,7 +2476,7 @@ void validateGatedDeltaNetGEMMINT8(session s, int M, int K, float* input, float*
 }
 
 void validateGatedDeltaNetGEMMINT4(session s, int M, int K, float* input, float* gamma, QuantizedData w_inINT4, QuantizedData woINT4) {
-    int proj_n = 8256;
+    int proj_n = 12352;
     int out_n = 4096;
     int n_qk = 16;
     int n_v = 32;
@@ -2469,12 +2498,13 @@ void validateGatedDeltaNetGEMMINT4(session s, int M, int K, float* input, float*
 
     float* S_ref = (float*)calloc(smat, sizeof(float));
     float* yg_all = (float*)malloc(sizeof(float) * M * out_n);
+    float* wn = getData(64051, 1, dim);
     for (int m = 0; m < M; m++) {
         float* xn = (float*)malloc(sizeof(float) * K);
         rms_norm_apply(input + m * K, gamma, xn, K);
         float* proj = (float*)malloc(sizeof(float) * proj_n);
         gemv_ref_int4(xn, &w_in_scaled, proj, proj_n, K);
-        deltanet_ref(proj, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
+        deltanet_ref(proj, wn, S_ref, yg_all + m * out_n, n_qk, n_v, dim);
         free(xn);
         free(proj);
     }
@@ -3885,13 +3915,15 @@ void validateSwigluFfnSplitKINT4(session s, int M, int N, int K, float* input, f
 
 #define K_OFF2 2048
 #define V_OFF2 4096
-#define A_OFF2 8192
-#define B_OFF2 8224
+#define Z_OFF2 8192
+#define A_OFF2 12288
+#define B_OFF2 12320
 
-static void linear_proj_route_ref(const float* proj, float* q, float* k, float* v, float* a, float* b) {
+static void linear_proj_route_ref(const float* proj, float* q, float* k, float* v, float* z, float* a, float* b) {
     for (int i = 0; i < 2048; i++) q[i] = proj[i];
     for (int i = 0; i < 2048; i++) k[i] = proj[K_OFF2 + i];
     for (int i = 0; i < 4096; i++) v[i] = proj[V_OFF2 + i];
+    for (int i = 0; i < 4096; i++) z[i] = proj[Z_OFF2 + i];
     for (int i = 0; i < 32; i++) a[i] = proj[A_OFF2 + i];
     for (int i = 0; i < 32; i++) b[i] = proj[B_OFF2 + i];
 }
@@ -3899,7 +3931,7 @@ static void linear_proj_route_ref(const float* proj, float* q, float* k, float* 
 static double linear_proj_split_run(session s, int M, int K, float* input, float* gamma,
                                     buffer weightBuffer, buffer scaleBuffer, buffer zeroBuffer, int hasScale,
                                     int nTotal, const char* splitShader, const char* reduceShader,
-                                    buffer qOut, buffer kOut, buffer vOut, buffer aOut, buffer bOut) {
+                                    buffer qOut, buffer kOut, buffer vOut, buffer zOut, buffer aOut, buffer bOut) {
     buffer xBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
     buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * M * K, MEMORY_RAM);
     float* pinit = (float*)calloc(4 * nTotal, sizeof(float));
@@ -3923,8 +3955,8 @@ static double linear_proj_split_run(session s, int M, int K, float* input, float
 
     snprintf(ops[1].shader, sizeof(ops[1].shader), "%s", reduceShader);
     ops[1].buffers[0] = partialBuffer; ops[1].buffers[1] = qOut; ops[1].buffers[2] = kOut;
-    ops[1].buffers[3] = vOut; ops[1].buffers[4] = aOut; ops[1].buffers[5] = bOut;
-    ops[1].bufferCount = 6;
+    ops[1].buffers[3] = vOut; ops[1].buffers[4] = zOut; ops[1].buffers[5] = aOut; ops[1].buffers[6] = bOut;
+    ops[1].bufferCount = 7;
     ops[1].pushConstants[0] = nTotal;
     ops[1].pushConstantCount = 1;
     ops[1].dispatchX = (nTotal + 255) / 256; ops[1].dispatchY = 1; ops[1].dispatchZ = 1;
@@ -3945,7 +3977,7 @@ static double linear_proj_split_run(session s, int M, int K, float* input, float
 }
 
 void validateLinearProjSplitKFP16(session s, int M, int K, float* input, float* gamma, uint16_t* w_inFP16) {
-    int nTotal = 8256;
+    int nTotal = 12352;
     float* xn = (float*)malloc(sizeof(float) * K);
     rms_norm_apply(input, gamma, xn, K);
     float* proj = (float*)malloc(sizeof(float) * nTotal);
@@ -3953,9 +3985,10 @@ void validateLinearProjSplitKFP16(session s, int M, int K, float* input, float* 
     float* qr = (float*)malloc(sizeof(float) * 2048);
     float* kr = (float*)malloc(sizeof(float) * 2048);
     float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* zr = (float*)malloc(sizeof(float) * 4096);
     float* ar = (float*)malloc(sizeof(float) * 32);
     float* br = (float*)malloc(sizeof(float) * 32);
-    linear_proj_route_ref(proj, qr, kr, vr, ar, br);
+    linear_proj_route_ref(proj, qr, kr, vr, zr, ar, br);
 
     uint16_t* tw = (uint16_t*)malloc(sizeof(uint16_t) * K * nTotal);
     transpose_block16((uint8_t*)w_inFP16, (uint8_t*)tw, K, nTotal, QUANT_FP16);
@@ -3963,36 +3996,40 @@ void validateLinearProjSplitKFP16(session s, int M, int K, float* input, float* 
     buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
     buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
     buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer zO = createBuffer(s.dev.device, s.dev.physicalDevice, zr, sizeof(float) * 4096, MEMORY_RAM);
     buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
     buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 32, MEMORY_RAM);
 
     double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, weightBuffer, weightBuffer, 0,
                                       nTotal, "RmsNorm-LinearProj-SplitK-FP16.spv", "Reduce-LinearProj.spv",
-                                      qO, kO, vO, aO, bO);
+                                      qO, kO, vO, zO, aO, bO);
 
     float* q = (float*)malloc(sizeof(float) * 2048);
     float* kk = (float*)malloc(sizeof(float) * 2048);
     float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* zz = (float*)malloc(sizeof(float) * 4096);
     float* aa = (float*)malloc(sizeof(float) * 32);
     float* bb = (float*)malloc(sizeof(float) * 32);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, zO, zz);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
     report("LP-Split-q FP16", 100, q, qr, 2048, ms);
     report("LP-Split-k FP16", 100, kk, kr, 2048, ms);
     report("LP-Split-v FP16", 100, vv, vr, 4096, ms);
+    report("LP-Split-z FP16", 100, zz, zr, 4096, ms);
     report("LP-Split-a FP16", 0, aa, ar, 32, ms);
     report("LP-Split-b FP16", 0, bb, br, 32, ms);
 
-    destroy_buffers(s, (buffer[]){weightBuffer, qO, kO, vO, aO, bO}, 6);
-    free(xn); free(proj); free(qr); free(kr); free(vr); free(ar); free(br);
-    free(q); free(kk); free(vv); free(aa); free(bb);
+    destroy_buffers(s, (buffer[]){weightBuffer, qO, kO, vO, zO, aO, bO}, 7);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(zr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(zz); free(aa); free(bb);
 }
 
 void validateLinearProjSplitKINT8(session s, int M, int K, float* input, float* gamma, QuantizedData wQ) {
-    int nTotal = 8256;
+    int nTotal = 12352;
     float* xn = (float*)malloc(sizeof(float) * K);
     rms_norm_apply(input, gamma, xn, K);
     float* proj = (float*)malloc(sizeof(float) * nTotal);
@@ -4000,9 +4037,10 @@ void validateLinearProjSplitKINT8(session s, int M, int K, float* input, float* 
     float* qr = (float*)malloc(sizeof(float) * 2048);
     float* kr = (float*)malloc(sizeof(float) * 2048);
     float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* zr = (float*)malloc(sizeof(float) * 4096);
     float* ar = (float*)malloc(sizeof(float) * 32);
     float* br = (float*)malloc(sizeof(float) * 32);
-    linear_proj_route_ref(proj, qr, kr, vr, ar, br);
+    linear_proj_route_ref(proj, qr, kr, vr, zr, ar, br);
 
     uint8_t* tw = (uint8_t*)malloc(K * nTotal);
     transpose_block16(wQ.data, tw, K, nTotal, QUANT_INT8);
@@ -4013,36 +4051,40 @@ void validateLinearProjSplitKINT8(session s, int M, int K, float* input, float* 
     buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
     buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
     buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer zO = createBuffer(s.dev.device, s.dev.physicalDevice, zr, sizeof(float) * 4096, MEMORY_RAM);
     buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
     buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 32, MEMORY_RAM);
 
     double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, scaleBuffer, zeroBuffer, 1,
                                       nTotal, "RmsNorm-LinearProj-SplitK-INT8.spv", "Reduce-LinearProj.spv",
-                                      qO, kO, vO, aO, bO);
+                                      qO, kO, vO, zO, aO, bO);
 
     float* q = (float*)malloc(sizeof(float) * 2048);
     float* kk = (float*)malloc(sizeof(float) * 2048);
     float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* zz = (float*)malloc(sizeof(float) * 4096);
     float* aa = (float*)malloc(sizeof(float) * 32);
     float* bb = (float*)malloc(sizeof(float) * 32);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, zO, zz);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
     report("LP-Split-q INT8", 100, q, qr, 2048, ms);
     report("LP-Split-k INT8", 100, kk, kr, 2048, ms);
     report("LP-Split-v INT8", 100, vv, vr, 4096, ms);
+    report("LP-Split-z INT8", 100, zz, zr, 4096, ms);
     report("LP-Split-a INT8", 0, aa, ar, 32, ms);
     report("LP-Split-b INT8", 0, bb, br, 32, ms);
 
-    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, aO, bO}, 8);
-    free(xn); free(proj); free(qr); free(kr); free(vr); free(ar); free(br);
-    free(q); free(kk); free(vv); free(aa); free(bb);
+    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, zO, aO, bO}, 9);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(zr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(zz); free(aa); free(bb);
 }
 
 void validateLinearProjSplitKINT4(session s, int M, int K, float* input, float* gamma, QuantizedData wQ) {
-    int nTotal = 8256;
+    int nTotal = 12352;
     float* xn = (float*)malloc(sizeof(float) * K);
     rms_norm_apply(input, gamma, xn, K);
     float* proj = (float*)malloc(sizeof(float) * nTotal);
@@ -4050,9 +4092,10 @@ void validateLinearProjSplitKINT4(session s, int M, int K, float* input, float* 
     float* qr = (float*)malloc(sizeof(float) * 2048);
     float* kr = (float*)malloc(sizeof(float) * 2048);
     float* vr = (float*)malloc(sizeof(float) * 4096);
+    float* zr = (float*)malloc(sizeof(float) * 4096);
     float* ar = (float*)malloc(sizeof(float) * 32);
     float* br = (float*)malloc(sizeof(float) * 32);
-    linear_proj_route_ref(proj, qr, kr, vr, ar, br);
+    linear_proj_route_ref(proj, qr, kr, vr, zr, ar, br);
 
     uint8_t* tw = (uint8_t*)malloc(K * nTotal / 2);
     transpose_block16(wQ.data, tw, K, nTotal, QUANT_INT4);
@@ -4063,32 +4106,36 @@ void validateLinearProjSplitKINT4(session s, int M, int K, float* input, float* 
     buffer qO = createBuffer(s.dev.device, s.dev.physicalDevice, qr, sizeof(float) * 2048, MEMORY_RAM);
     buffer kO = createBuffer(s.dev.device, s.dev.physicalDevice, kr, sizeof(float) * 2048, MEMORY_RAM);
     buffer vO = createBuffer(s.dev.device, s.dev.physicalDevice, vr, sizeof(float) * 4096, MEMORY_RAM);
+    buffer zO = createBuffer(s.dev.device, s.dev.physicalDevice, zr, sizeof(float) * 4096, MEMORY_RAM);
     buffer aO = createBuffer(s.dev.device, s.dev.physicalDevice, ar, sizeof(float) * 32, MEMORY_RAM);
     buffer bO = createBuffer(s.dev.device, s.dev.physicalDevice, br, sizeof(float) * 32, MEMORY_RAM);
 
     double ms = linear_proj_split_run(s, M, K, input, gamma, weightBuffer, scaleBuffer, zeroBuffer, 1,
                                       nTotal, "RmsNorm-LinearProj-SplitK-INT4.spv", "Reduce-LinearProj.spv",
-                                      qO, kO, vO, aO, bO);
+                                      qO, kO, vO, zO, aO, bO);
 
     float* q = (float*)malloc(sizeof(float) * 2048);
     float* kk = (float*)malloc(sizeof(float) * 2048);
     float* vv = (float*)malloc(sizeof(float) * 4096);
+    float* zz = (float*)malloc(sizeof(float) * 4096);
     float* aa = (float*)malloc(sizeof(float) * 32);
     float* bb = (float*)malloc(sizeof(float) * 32);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qO, q);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kO, kk);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vO, vv);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, zO, zz);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, aO, aa);
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, bO, bb);
     report("LP-Split-q INT4", 100, q, qr, 2048, ms);
     report("LP-Split-k INT4", 100, kk, kr, 2048, ms);
     report("LP-Split-v INT4", 100, vv, vr, 4096, ms);
+    report("LP-Split-z INT4", 100, zz, zr, 4096, ms);
     report("LP-Split-a INT4", 0, aa, ar, 32, ms);
     report("LP-Split-b INT4", 0, bb, br, 32, ms);
 
-    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, aO, bO}, 8);
-    free(xn); free(proj); free(qr); free(kr); free(vr); free(ar); free(br);
-    free(q); free(kk); free(vv); free(aa); free(bb);
+    destroy_buffers(s, (buffer[]){weightBuffer, scaleBuffer, zeroBuffer, qO, kO, vO, zO, aO, bO}, 9);
+    free(xn); free(proj); free(qr); free(kr); free(vr); free(zr); free(ar); free(br);
+    free(q); free(kk); free(vv); free(zz); free(aa); free(bb);
 }
 
 void validateAttentionSplitKFP16(session s, int att_seq, int att_heads, int att_kv_heads, int att_dim, float* att_q, uint16_t* att_k, uint16_t* att_v) {

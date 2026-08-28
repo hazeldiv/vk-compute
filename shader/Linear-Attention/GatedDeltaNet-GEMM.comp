@@ -13,6 +13,8 @@ layout(set = 0, binding = 3) readonly buffer ARawBuffer { float aRaw[]; };
 layout(set = 0, binding = 4) readonly buffer BRawBuffer { float bRaw[]; };
 layout(set = 0, binding = 5) buffer StateBuffer { float S[]; };
 layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
+layout(set = 0, binding = 7) readonly restrict buffer ZBuffer { float z[]; };
+layout(set = 0, binding = 8) readonly restrict buffer WeightBuffer { float wnorm[]; };
 
 shared float Ks[TS][DIM];
 shared float Dk[TS][TS];
@@ -24,6 +26,8 @@ shared float alpha_P[TS + 1];
 shared float w_sh[TS];
 shared float skv[DIM];
 shared float sqv[DIM];
+shared float y_sh[DIM];
+shared float yinv;
 
 void main() {
     uint r = gl_LocalInvocationID.y;
@@ -109,7 +113,19 @@ void main() {
                 delta[m][i] = dv;
 
                 float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];
-                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym;
+                y_sh[i] = ym;
+            }
+            barrier();
+            if (tid == 0u) {
+                float tot = 0.0;
+                for (uint d = 0; d < DIM; d++) tot += y_sh[d] * y_sh[d];
+                yinv = inversesqrt(tot / float(DIM) + 1e-6);
+            }
+            barrier();
+            if (tid < DIM) {
+                uint gi = (mBase + m) * (32 * DIM) + h * DIM + tid;
+                float zv = z[gi];
+                yGated[gi] = y_sh[tid] * yinv * wnorm[tid] * (zv / (1.0 + exp(-zv)));
             }
             barrier();
         }

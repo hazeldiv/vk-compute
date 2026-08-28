@@ -18,6 +18,7 @@ typedef struct model_state {
     buffer qProj;
     buffer kProj;
     buffer vProj;
+    buffer zProj;
     buffer aProj;
     buffer bProj;
     buffer kCache[MODEL_LAYERS];

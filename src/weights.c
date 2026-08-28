@@ -345,7 +345,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     loadEmbedLike(s, sfHead, "lm_head.weight", "lmHead", V, &w.lmHead);
     loadEmbedLike(s, sfEmbUse, "model.language_model.embed_tokens.weight", "embed", V, &w.embed);
 
-    char n1[256], n2[256], n3[256];
+    char n1[256], n2[256], n3[256], n4[256];
 
     for (int L = 0; L < spec->layerCount; L++) {
         const layer* ly = &spec->layers[L];
@@ -393,11 +393,12 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             w.attnNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_DIM, "attnNorm", L);
 
             lname(n1, sizeof(n1), L, "linear_attn.in_proj_qkv.weight");
-            lname(n2, sizeof(n2), L, "linear_attn.in_proj_a.weight");
-            lname(n3, sizeof(n3), L, "linear_attn.in_proj_b.weight");
-            const char* pn[3] = {n1, n2, n3};
+            lname(n2, sizeof(n2), L, "linear_attn.in_proj_z.weight");
+            lname(n3, sizeof(n3), L, "linear_attn.in_proj_a.weight");
+            lname(n4, sizeof(n4), L, "linear_attn.in_proj_b.weight");
+            const char* pn[4] = {n1, n2, n3, n4};
             int cols = 0;
-            float* mat = buildEngineMatrix(&sf, pn, 3, MODEL_K, &cols);
+            float* mat = buildEngineMatrix(&sf, pn, 4, MODEL_K, &cols);
             if (cols != MODEL_PROJ_N) fatal("delta projection width mismatch");
             w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_PROJ_N, q, 1.0f, mat);
             free(mat);

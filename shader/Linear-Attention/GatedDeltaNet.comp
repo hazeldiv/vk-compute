@@ -19,6 +19,8 @@ layout(set = 0, binding = 3) readonly buffer ARawBuffer { float aRaw[]; };
 layout(set = 0, binding = 4) readonly buffer BRawBuffer { float bRaw[]; };
 layout(set = 0, binding = 5) buffer StateBuffer { vec4 S[]; };
 layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
+layout(set = 0, binding = 7) readonly restrict buffer ZBuffer { float z[]; };
+layout(set = 0, binding = 8) readonly restrict buffer WeightBuffer { float wnorm[]; };
 
 shared vec4 k4[HEAD_DIM / 4];
 shared vec4 q4[HEAD_DIM / 4];
@@ -94,7 +96,26 @@ void main() {
     }
 
     float y = alpha * y0 + beta * delta * kq_dot;
+
+    float sy = (hlf == 0u) ? y * y : 0.0;
+    float sysum = subgroupAdd(sy);
+    if (subgroupElect()) {
+        wave_kq[gl_SubgroupID] = sysum;
+    }
+    barrier();
+    if (i == 0u) {
+        float total = 0.0;
+        for (uint w = 0; w < TS / 64; w++) {
+            total += wave_kq[w];
+        }
+        wave_kq[0] = total;
+    }
+    barrier();
+    float inv = inversesqrt(wave_kq[0] / float(HEAD_DIM) + 1e-6);
+
     if (hlf == 0u) {
-        yGated[h * HEAD_DIM + r] = y;
+        uint zidx = h * HEAD_DIM + r;
+        float zv = z[zidx];
+        yGated[zidx] = y * inv * wnorm[r] * (zv / (1.0 + exp(-zv)));
     }
 }
