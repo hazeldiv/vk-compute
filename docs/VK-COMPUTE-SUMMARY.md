@@ -8,7 +8,7 @@ A Vulkan-based GPU compute engine for running LLM inference (target: **Qwen3.5 9
 
 Both the server and the harness share the same `operation` dispatch core (§3.3).
 
-> **Model status.** The engine runs the **text stack only** (32 transformer layers; the `mtp.*` and `model.visual.*` tensors are ignored). The full-attention and FFN layers are faithful to the reference. The **gated delta-net (linear attention) is currently a simplification**: the shaders implement the sigmoid-`a`/`b` delta rule + `silu(g)` output gate, but the real model's short **`conv1d`** (kernel-4 causal conv over the qkv projection), per-head **`A_log` decay**, **`dt_bias`**, and the q/k **`norm.weight`** head-norm are **loaded into buffers but not yet consumed** (§7.3). As a result the delta-net layers produce a coherent but **not HF-identical** output. See §13 (known issues).
+> **Model status.** The engine runs the **text stack only** (32 transformer layers; the `mtp.*` and `model.visual.*` tensors are ignored). The full-attention and FFN layers are faithful to the reference. The **gated delta-net (linear attention)** now follows the Qwen3.5 design for the input projection: `in_proj_qkv` (+ `in_proj_a`/`in_proj_b`) only — the `in_proj_z` gate is gone, and the qkv projection is passed through the short causal **`conv1d`** (kernel 4, depthwise over the 8192-dim qkv) + **SiLU** before the delta rule (§7.3). The pure delta rule is a simplification: per-head **`A_log`** exponential decay, **`dt_bias`**, and the q/k **`norm.weight`** head-norm are **loaded into buffers but not yet consumed**. As a result the delta-net layers produce a coherent but **not HF-identical** output. See §13 (known issues).
 
 ---
 
@@ -31,7 +31,8 @@ Both the server and the harness share the same `operation` dispatch core (§3.3)
 | `qkv_n` | 10240 | q(16×256) + g(16×256) + k(4×256) + v(4×256); `g` is a sigmoid output gate |
 | `heads`, `kv_heads`, `att_dim` | 16 / 4 / 256 | full attention geometry |
 | `n_qk`, `n_v`, `dim` | 16 / 32 / 128 | gated delta-net geometry |
-| `proj_n` | 12352 | delta-net input projection (Q,K,V,G,A,B) |
+| `zqkv_n` | 8192 | delta-net qkv projection width (`MODEL_ZQKV_N` = q 2048 ‖ k 2048 ‖ v 4096), conv+SiLU target |
+| `proj_n` | 8256 | delta-net input projection (Q,K,V,A,B) |
 | `M` (prefill) | 512 / 16384 | prefill chunk / max chunk (`MODEL_PREFILL_CHUNK` / `MODEL_MAX_GEMM`) |
 | `vocab_size` | 81920 (default 248320) | vocab: pruned (81920) or full (248320, padded from 248070 real tokens) — runtime `--vocab-head`/`--vocab-embed` |
 | `max_ctx` | 32768 | compile-time `MODEL_MAX_CTX` (buffer/`#define MAXCTX` shader stride); exposed as a runtime limit via `--max-ctx` |
@@ -83,7 +84,8 @@ vk-compute/
     │   │                       # RmsNorm-LinearProj-GEMM2-* (prefill)
     │   ├── Embed-Gather.comp   # prefill embedding pre-fetch (tied lm-head column gather)
     │   ├── GatedDeltaNet.comp  GatedDeltaNet-GEMM.comp   (precision-agnostic)
-    │   └── Reduce-LinearProj.comp       # LinearProj split-K reduce (6-way routing)
+    │   ├── Conv-SiLU.comp      # depthwise causal conv (kernel 4) + SiLU over the 8192-dim qkv
+    │   └── Reduce-LinearProj.comp       # LinearProj split-K reduce (5-way routing)
     ├── FFN/                    # swiglu feed-forward
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-swiglu-ffn-* (decode GEMV),
     │   │                       # RmsNorm-up-ffn-SplitK-* (decode, flattened gate|up),
@@ -187,6 +189,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - Attention decode (`Att-full-*` / `Att-SplitK2-*`): no push constants — context_length = position buffer + 1. Attention prefill (`Att-QK2-*` / `Att-Softmax` / `Att-PV2-*`): `{ctxLen, qOff, mRows, headBase}` (ctxLen = chunk-absolute context, qOff = chunk base for the causal limit `qOff + mGlobal`). Legacy `Att-full-GEMM-*`: `{context_length}`.
 - GEMM2 prefill kernels: `RmsNorm-swiglu-flat-GEMM2-*` `{M, N, K, off}` (off = FFN gate/up boundary for `upHalf` routing); `RmsNorm-swiglu-ffn-GEMM2-*` / `RmsNorm-LinearProj-GEMM2-*` / `GEMM-ADD2-*` `{M, N, K}`; `RmsNorm-Prologue` `{K}`.
 - GatedDeltaNet: `{M}` (GEMM) or `{N_V, N_QK, DIM}` (decode).
+- Conv-SiLU: `{M}` (tokens in the chunk).
 - LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize, doIncrement, passIdx}` for ArgMax-Reduce (doIncrement=1 bumps the position buffer by 1 after a generated token; passIdx tags the write slot for the double-buffered decode groups).
 - Embed-Gather: `{V}` (vocab stride of the tied lm head). Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
 - Split-K decode reduce passes: `Reduce-GEMV-ADD` `{N, chunks}` (N = K, chunks = 4); `Reduce-LinearProj` `{N}`; `Reduce-Att2` / `Reduce-Rope` no push constants (N from geometry).
@@ -204,6 +207,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - Attention decode: `Att-full` `dispatchX = heads`; `Att-SplitK2` `dispatchX = heads`, `dispatchY = 128` (K-chunks of 4 tiles).
 - Split-K decode GEMVs: `dispatchX = N/256`, `dispatchY = 4` (K split over 4 workgroups).
 - GatedDeltaNet GEMM: `dispatchX = n_v = 32`, one workgroup per v-head.
+- Conv-SiLU: `dispatchX = 8192/256 = 32`, one thread per qkv channel (each thread shifts its own 3-slot history over the M tokens, no barriers).
 - LMHead-GEMV-ArgMax: `dispatchX = (vocab+255)/256`; ArgMax-Reduce: single workgroup.
 
 ### 4.7 Real weight loading (src/safetensors.c + src/weights.c)
@@ -213,10 +217,10 @@ Weights come from the HuggingFace safetensors shards (`model.safetensors-0000{N}
 1. `safetensors_open` parses the 8-byte-length JSON header (names/dtype/shape/data_offsets) with a minimal in-C JSON walker; data offsets are 64-bit (`_fseeki64`) — several tensors live past the 2 GB mark in a 5.3 GB shard. Both BF16 and F32 tensors are read; BF16 is widened to float (`bf16_to_float`).
 2. Per "logical" tensor, the HF `[out][in]` matrices are concatenated along the output axis and transposed to the engine `[in][out]` layout:
    - full-attn `proj` = `q_proj`(q‖g) ‖ `k_proj` ‖ `v_proj` → 10240 columns (Q‖G‖K‖V);
-   - delta `proj` = `in_proj_qkv`(q‖k‖v) ‖ `in_proj_z`(g) ‖ `in_proj_a`(32) ‖ `in_proj_b`(32) → 12352 columns (Q‖K‖V‖G‖A‖B);
+   - delta `proj` = `in_proj_qkv`(q‖k‖v) ‖ `in_proj_a`(32) ‖ `in_proj_b`(32) → 8256 columns (Q‖K‖V‖A‖B) — the `in_proj_z` gate projection is **not** loaded (the Qwen3.5 block has no output gate; see §7.3);
    - `gate`/`up`/`down` = `mlp.gate_proj`/`up_proj`/`down_proj`, `out` = `o_proj`/`out_proj`.
 3. Quantize per the `spec` `QuantType` (`quantizeDataINT8/INT4` for int8/int4, `float_to_fp16` for fp16), then `transpose_block16`, then upload (`createBufferNamed`). Embeddings and the lm-head (`[K][vocab]`) are built fp16 directly from the BF16 `[vocab][K]` source without a float intermediate.
-4. The norm vectors (`input_layernorm`, `post_attention_layernorm`, final `norm`, `q_norm`/`k_norm` [256], delta `norm.weight` [128], `A_log`[32], `dt_bias`[32], `conv1d.weight`[8192×1×4]) are loaded as small float buffers.
+4. The norm vectors (`input_layernorm`, `post_attention_layernorm`, final `norm`, `q_norm`/`k_norm` [256], delta `norm.weight` [128], `A_log`[32], `dt_bias`[32]) are loaded as small float buffers; `conv1d.weight` (`[8192×1×4]` → 8192 channels × 4 taps, channel-major `w0..w3` with `w0` = t−3 … `w3` = current) is loaded **FP32** and consumed by `Conv-SiLU.spv` (§7.3).
 5. Results are cached on disk in `bin/weights/<name>_<q>.bin` (the old `tensorLoadFile`/`tensorWriteFile` format) so the expensive quantize+transpose runs once. Cache names are per-layer (`proj_3_INT8`) and vocab-sized (`lmHead_81920_FP16`) — the earlier synthetic code keyed the cache by name only and would have aliased every layer to layer 0.
 
 **Untied embeddings**: `w.embed` (from `embed_tokens`) and `w.lmHead` (from `lm_head`) are separate buffers (`tie_word_embeddings: false`); the old code aliased them. RoPE theta base is `1e7` (`rope_theta`); the partial-RoPE factor (`0.25`) and `rms_norm_eps` (`1e-6`, the engine uses `1e-5`) are **not** yet corrected — see §13.
@@ -880,16 +884,16 @@ void main() {
 
 #### `RmsNorm-LinearProj-*`
 
-RMSNorm + single GEMM over `N = 12352`, output routed by column with per-token strides: `q[2048]` (cols < 2048), `k[2048]` (< 4096), `v[4096]` (< 8192), `g[4096]` (< 12288), `a[32]` (< 12320), `b[32]` (else).
+RMSNorm + single GEMM over `N = 8256`, output routed by column with per-token strides: `q[2048]` (cols < 2048), `k[2048]` (< 4096), `v[4096]` (< 8192), `a[32]` (< 8224), `b[32]` (else).
 
 #### `Embed-RmsNorm-LinearProj-*` (token-embedding fused variant, FP16 only)
 
 Replaces the `x` input with a token-id lookup: the token id(s) (a `uint` buffer, GEMV: 1 element, GEMM: `M` elements) index into the **tied lm-head buffer** — the same block-transposed FP16 `uvec4[]` layout as `LMHead-GEMV-ArgMax-FP16.comp` binding 1 — to fetch the 4096-dim embedding row, then RMSNorm + LinearProj proceed exactly as `RmsNorm-LinearProj-*`. This shader is meant to run right after the LM-head argmax (token selection) so the next decode step can start from the selected token's embedding without CPU readback.
 
-- **Bindings (GEMV and GEMM):** `0 = tokenIds (uint[])`, `1 = lm (uvec4[], transposed lm head [K][vocab])`, `2 = gamma (vec4[])`, `3 = w (uvec4[], transposed w_in [K][12352])`, `4..9 = q/k/v/g/a/b out (float[])`. Push constants `{M, N, K, V}`.
+- **Bindings (GEMV and GEMM):** `0 = tokenIds (uint[])`, `1 = lm (uvec4[], transposed lm head [K][vocab])`, `2 = gamma (vec4[])`, `3 = w (uvec4[], transposed w_in [K][8256])`, `4..8 = q/k/v/a/b out (float[])`. Push constants `{M, N, K, V}`.
 - **Embedding fetch:** vec4 index `i` (0..1023) reads `lm[(i/2)*V + tok]`; even `i` takes `unpackHalf2x16(raw.x), unpackHalf2x16(raw.y)`, odd `i` takes `.z,.w` (each `uvec4` = 2 vec4 k-rows of a column).
-- **GEMV (`Embed-RmsNorm-LinearProj-FP16.comp`):** 256 threads/col, subgroup RMSNorm sum identical to `RmsNorm-LinearProj-FP16`; `dispatchX = (12352+255)/256 = 49`.
-- **GEMM (`Embed-RmsNorm-LinearProj-GEMM-FP16.comp`):** 16×16 tiled clone of `RmsNorm-LinearProj-GEMM-FP16`; per-token embedding fetched by `tokenIds[mGlobal]` in both the sum-sq pass and the A-tile staging; `dispatchX = 12352/16 = 772`, `dispatchY = M/16`.
+- **GEMV (`Embed-RmsNorm-LinearProj-FP16.comp`):** 256 threads/col, subgroup RMSNorm sum identical to `RmsNorm-LinearProj-FP16`; `dispatchX = (8256+255)/256 = 33`.
+- **GEMM (`Embed-RmsNorm-LinearProj-GEMM-FP16.comp`):** 16×16 tiled clone of `RmsNorm-LinearProj-GEMM-FP16`; per-token embedding fetched by `tokenIds[mGlobal]` in both the sum-sq pass and the A-tile staging; `dispatchX = 8256/16 = 516`, `dispatchY = M/16`.
 
 Note the lm-head column fetch is strided by `V` uvec4s (column-major access into a 640 MB buffer), so the GEMM variant is slower than the plain `x`-input GEMM (~150 ms vs ~45 ms at M=64) — a layout artifact of tied embeddings, not a correctness issue.
 
@@ -900,10 +904,19 @@ Workgroup = one v-head; state `S` is a 128×128 matrix per head in VRAM. Per tok
 - `alpha = 1/(1+exp(a))`, `beta = 1/(1+exp(-b))` — **per-token and per value-head** (`aRaw[h]`/`bRaw[h]`, 32 values; the earlier fix changed these from `aRaw[qk]`/`bRaw[qk]`, 16 values, to match the real `in_proj_a/b` shape `[32, 4096]`)
 - `delta = V − S·K`
 - `y = alpha·(S·Q) + beta·delta·(K·Q)`
-- `yGated = y · silu(G)`
+- `yGated = y` (no output gate — the Qwen3.5 block has none)
 - state update: `S ← alpha·S + beta·delta·Kᵀ`
 
-> **Not implemented (current gap).** The shader above is the *simplified* gated delta rule. The real Qwen3.5 linear-attention block also has a short causal **`conv1d`** (kernel 4, depthwise over the 8192-dim qkv projection), per-head **`A_log`** exponential decay, **`dt_bias`**, and a q/k head **`norm.weight`** (128-dim), all of which are loaded into `w.conv`/`w.aLog`/`w.dtBias`/`w.attnNorm` (§4.7) but **not yet consumed by `GatedDeltaNet.comp`/`GatedDeltaNet-GEMM.comp`**. Until these are folded in (plus `rms_norm_eps = 1e-6` and the partial RoPE `0.25` correction in §13), the delta-net layers are coherent but not HF-identical.
+> **Remaining gap.** The shader above implements the delta rule directly on the conv+SiLU'd qkv (the `conv1d`+SiLU step runs in a separate `Conv-SiLU.spv` pass, below). Still **not implemented**: per-head **`A_log`** exponential decay, **`dt_bias`**, and the q/k head **`norm.weight`** (128-dim) — these are loaded into `w.aLog`/`w.dtBias`/`w.attnNorm` (§4.7) but not yet consumed. Until they (plus `rms_norm_eps = 1e-6` and the partial RoPE `0.25` correction in §13) are folded in, the delta-net layers are coherent but not HF-identical.
+
+#### `Conv-SiLU.comp` (depthwise causal conv + SiLU on the qkv projection)
+
+Runs between the input projection and the delta rule for every delta-net layer. It applies the short causal `conv1d` (kernel 4) depthwise over the **8192** qkv channels (q 0..2047, k 2048..4095, v 4096..8191) followed by SiLU, writing the result in place so `GatedDeltaNet*` consumes the transformed q/k/v (`a`/`b` are untouched).
+
+- **Precision-agnostic, FP32.** Bindings: `0 = qProj`, `1 = kProj`, `2 = vProj`, `3 = conv (8192×4 FP32, channel-major)`, `4 = convHist (3×8192 FP32 shift register)`. Push `{M}`. `local_size = 256`, `dispatchX = 8192/256 = 32`, one thread per channel.
+- **Shift-register state (`convHist`):** per delta layer, slot 0/1/2 hold `Zqkv[t−1]` / `Zqkv[t−2]` / `Zqkv[t−3]` (zero-initialized = causal zero-padding). Each thread keeps a 3-slot rolling window in registers and loops `m = 0..M−1`:
+  - `cur = zqkv[m][c]`, `z = w0·h2 + w1·h1 + w2·h0 + w3·cur` (`w0` = t−3 … `w3` = current), `zqkv[m][c] = z / (1 + exp(−z))`, then `h2=h1; h1=h0; h0=cur`.
+- Because the conv is **per-channel** (no cross-channel coupling), each thread owns its channel across the whole chunk — **no barriers needed**, and it is self-consistent across prefill-chunk boundaries and decode steps (no absolute position required). VRAM cost: `24 × 3 × 8192 × 4 B ≈ 2.25 MB`.
 
 #### `GatedDeltaNet-GEMM.comp` (prefill, chunked linear attention)
 
@@ -921,11 +934,10 @@ layout(push_constant) uniform Dimensions { uint M; } param;
 layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
 layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
 layout(set = 0, binding = 2) readonly buffer VBuffer { float V[]; };
-layout(set = 0, binding = 3) readonly buffer GBuffer { float G[]; };
-layout(set = 0, binding = 4) readonly buffer ARawBuffer { float aRaw[]; };
-layout(set = 0, binding = 5) readonly buffer BRawBuffer { float bRaw[]; };
-layout(set = 0, binding = 6) buffer StateBuffer { float S[]; };
-layout(set = 0, binding = 7) buffer YGatedBuffer { float yGated[]; };
+layout(set = 0, binding = 3) readonly buffer ARawBuffer { float aRaw[]; };
+layout(set = 0, binding = 4) readonly buffer BRawBuffer { float bRaw[]; };
+layout(set = 0, binding = 5) buffer StateBuffer { float S[]; };
+layout(set = 0, binding = 6) buffer YGatedBuffer { float yGated[]; };
 
 shared float Ks[TS][DIM];
 shared float Dk[TS][TS];
@@ -955,8 +967,8 @@ void main() {
         //   P_m = prod_{p<m} alpha_p, w_m = beta_m / P_{m+1}
         if (tid == 0) {
             for (uint m = 0; m < TS; m++) {
-                float a = aRaw[(mBase + m) * 16 + qk];
-                float b = bRaw[(mBase + m) * 16 + qk];
+                float a = aRaw[(mBase + m) * 32 + h];
+                float b = bRaw[(mBase + m) * 32 + h];
                 alpha_sh[m] = 1.0 / (1.0 + exp(a));
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
             }
@@ -1028,8 +1040,7 @@ void main() {
                 delta[m][i] = dv;
 
                 float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];
-                float gm = G[(mBase + m) * (32 * DIM) + h * DIM + i];
-                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym * (gm / (1.0 + exp(-gm)));
+                yGated[(mBase + m) * (32 * DIM) + h * DIM + i] = ym;
             }
             barrier();
         }
@@ -1115,7 +1126,7 @@ This cut the QKV chain from ~24.6 s to ~8.7 s per 16k prompt (fused avg ≈96 ms
 
 #### `RmsNorm-LinearProj-GEMM2-*` (prefill, delta-net input projection)
 
-Prologue + GEMM2 with `N = 12352`, `TN = 32`. Writes directly into the six routed output buffers (q/k/v/g/a/b) via the per-column stride layout `[m][qk*N_QK*DIM + d]`, `[m][qk]`, etc. (same routing as the old fused shader). A ping-pong probe on this family **regressed** (+1.5% INT4) — small-N grids don't have enough parallelism to hide the prefetch (gotcha 16).
+Prologue + GEMM2 with `N = 8256`, `TN = 32`. Writes directly into the five routed output buffers (q/k/v/a/b) via the per-column stride layout `[m][qk*N_QK*DIM + d]`, `[m][qk]`, etc. (same routing as the old fused shader, minus the gate). A ping-pong probe on this family **regressed** (+1.5% INT4) — small-N grids don't have enough parallelism to hide the prefetch (gotcha 16).
 
 #### `Embed-Gather.comp` (prefill, layer-0 embedding pre-fetch)
 
@@ -1144,7 +1155,7 @@ Whole-attention cost dropped 48.7 s → ~10.4 s for a 16k prompt (QK2 ≈ 8.2 s,
 - **`GEMV-SplitK-*` + `Reduce-GEMV-ADD.comp`**: the K dimension is split across `dispatchY = 4` workgroups (256 threads each, strided k-tiles), partial sums written to `st->gemvPartial[chunk*N + col]`; `Reduce-GEMV-ADD` sums the 4 partials and adds the residual (`C[g] = Σ_z P[z*N+g] + R[g]`). Used by `addGemvSplit` for attention-out and FFN-down when `m == 1`.
 - **`RmsNorm-up-ffn-SplitK-*` + `FFN-Down-SplitK-*`**: decode FFN flattened like the prefill flat kernel — one shader computes `silu(gate)·up` over `2×FFN_N` columns (routing via `nBase >= off`, push `{M,N,K,off}`), writing `st->ffnPartial`; `FFN-Down-SplitK` then GEMVs the down matrix over the partial (which `Reduce-GEMV-ADD` reduces into `h`).
 - **`RmsNorm-QKV-SplitK-*` + `Reduce-Rope-*`**: split-K QKV projection to `st->qkvPartial`, then a per-head reduce that routes by column ranges — g (raw to `gAttn`), q/k (RMSNorm scaled by learned `q_norm`/`k_norm` + RoPE), v (raw) — and stores q/k/v to cache (replaces the old fused `RmsNorm-QKV-*`). Quantized scale/zero are written at the fixed slot `kvHead * MODEL_MAX_CTX + pos`.
-- **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 12352 columns into the six q/k/v/g/a/b output buffers.
+- **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 8256 columns into the five q/k/v/a/b output buffers.
 - **`Att-SplitK2-*` + `Reduce-Att2.comp`** (decode attention, ctx ≥ 256): `Att-SplitK2` splits the KV sequence into up to `MAXC = 128` chunks of 4 KV-tiles (LOOPS=4, 64-token tiles); each workgroup runs an online-softmax over its chunk and writes `{max, sum, acc[HEAD_DIM]}` per (chunk, head) into `st->attPartial`; `Reduce-Att2` re-normalizes across chunks (`w = exp(P[ml*2] - m)`). Below 256 tokens the engine uses `Att-full-*` (single workgroup, online softmax, §7.2).
 
 ---
@@ -1155,7 +1166,7 @@ The engine compiles the model into `operation` arrays at startup and executes th
 
 ### 8.1 Op compilation
 
-`addOp` appends a fully-formed `operation` (shader name, buffers, push constants, dispatch). The layer builders (`buildFfn`, `buildAttention`, `buildDelta`, `buildLinearProj`, `buildLmHead`) emit the op sequences from §7.6. `createGenerator` pre-compiles four arrays:
+`addOp` appends a fully-formed `operation` (shader name, buffers, push constants, dispatch). The layer builders (`buildFfn`, `buildAttention`, `buildDelta`, `buildLinearProj`, `buildLmHead`) emit the op sequences from §7.6 — `buildDelta` inserts a `Conv-SiLU.spv` op between the input projection and `GatedDeltaNet*` for every delta layer. `createGenerator` pre-compiles four arrays:
 
 - **`groupOps` / `groupOpsShort`** — decode group: `DECODE_GROUP = 4` tokens × (Embed-LinearProj → 32 layers → lm-head). The two variants differ only in attention: split-K (`Att-SplitK2`+`Reduce-Att2`) vs `Att-full`, selected by `ATT_SPLIT_THRESHOLD = 256` on the current context length.
 - **`prefillOps`** — one chunk of `maxM` tokens (`MODEL_PREFILL_CHUNK`): Embed-Gather → RmsNorm-Prologue → LinearProj-GEMM2-FP16 (over `st->embStaged`) → 32 layers → (no lm head).
@@ -1174,7 +1185,7 @@ The prompt is processed in chunks of `MODEL_PREFILL_CHUNK` (512) tokens:
 
 - `generateTokens(g, prompt, nPrompt, maxNewTokens, out, &outCount)` = `runPrefill` + the decode loop, writing generated ids to a caller buffer and **stopping at EOS** (`token == g->eos`). `maxNewTokens` is clamped so `nPrompt + maxNewTokens <= g->maxCtx`.
 - The op lists are **double-buffered**: while group `u` executes, group `u+1` is recorded (the current token is written into `tokenIds[0]` after each group's result readback). Two separate op arrays (`groupOps` vs a shadow copy compiled with `passIdx`-tagged lm-head write slots) are alternated each iteration.
-- `resetGenerator(g)` re-zeroes the 24 gated-delta `stateS` recurrence buffers (`createTransferAndCopy` re-copies their still-zero staging buffers) and resets `nextPos = 0`, so each server request is an independent full prompt.
+- `resetGenerator(g)` re-zeroes the 24 gated-delta `stateS` recurrence buffers **and** the 24 `convHist` shift registers (`createTransferAndCopy` re-copies their still-zero staging buffers) and resets `nextPos = 0`, so each server request is an independent full prompt.
 - `serverMain` (compute.c) sets binary stdio (`_setmode`), parses `--weights/--vocab-head/--vocab-embed/--eos/--max-ctx/--max-new`, creates the session+generator once, then loops: read `n` prompt ids → `resetGenerator` → `generateTokens` → write `m` output ids → until `n == 0`.
 - The group's `ArgMax-Reduce` increments the shared position buffer once per token (`doIncrement = 1`); prefill never touches it on the GPU (`runPrefill` sets it host-side after the last chunk), and the lm-head final pass runs with `doIncrement = 0` — together these keep the position counter correct across the prefill→decode transition (see gotcha 8).
 
@@ -1201,7 +1212,7 @@ The dispatch layer retains per-op timestamp logging (`logFrame`/`logLastFrame` a
 13. **Chunked execution avoids TDR.** Submitting one giant prefill command buffer (16k tokens) exceeds the Windows 8 s TDR budget (`VK_ERROR_DEVICE_LOST = -4`). Slice submissions to ≤ 8 ops with a wait between slices.
 14. **Long-running jobs can transiently crash in `0xC0000005` during weight load** (weight file ~2 GB); retrying the run succeeds — not a code bug, worth re-running before debugging. Validation runs can also transiently produce NaN/garbage in one shader; two consecutive green vals = real pass.
 15. **Quantized KV-cache scale/zero need a context-independent stride.** Writers originally used `kvh*(pos+1)+pos` / `kvh*(tokenIdx+M)+absTok` — a stride that grows with the current context — while readers assumed whatever the *current* chunk's stride was, so every token written by an earlier chunk had its scale read from the wrong slot once the cache grew (silently, and masked by the zero-token demo signature). Fix: fixed stride `kvh * MODEL_MAX_CTX + token` in all writers (`Rope-GEMM`, `Reduce-Rope`) and readers (`Att-QK2/PV2/SplitK2/full` INT8+INT4), with validator fixtures updated to match.
-16. **GCN4 tile geometry for the GEMM2 family: smaller workgroups win.** TN=64 or TS=32 (1024-thread) variants regress +50–70% despite halving barrier count — occupancy/latency-hiding dominates. Ping-pong k-tile prefetch (one barrier per tile, prefetch into the alternate LDS set) gives a reliable but small −1..2% **only when grid.x is wide** (FFN/ADD2 shapes); on narrow-N kernels (LinearProj N=12352, QKV) it regressed or washed out.
+16. **GCN4 tile geometry for the GEMM2 family: smaller workgroups win.** TN=64 or TS=32 (1024-thread) variants regress +50–70% despite halving barrier count — occupancy/latency-hiding dominates. Ping-pong k-tile prefetch (one barrier per tile, prefetch into the alternate LDS set) gives a reliable but small −1..2% **only when grid.x is wide** (FFN/ADD2 shapes); on narrow-N kernels (LinearProj N=8256, QKV) it regressed or washed out.
 17. **Appended shader bindings must match validator buffer order exactly.** When the gated-attention change added `q_norm`/`k_norm`/`gAttn` bindings, the three *legacy prefill-fused* `RmsNorm-QKV-GEMM-*` shaders declared them as `gAttn, qGamma, kGamma` while the validators supplied `qGamma, kGamma, gOut` — q got the wrong gamma and g/k wrote nowhere (q err 6.4, g/k zero). The decode-fused and `Rope-GEMM`/`Reduce-Rope` shaders matched, which is why only `validateQkvRopeGEMM*` failed. Also: the learned per-head norm gamma must be applied to each column **before** the RoPE rotation mixes the two halves (`acc*inv_rms*gamma` then rope), not to the rotated result — applying it after yields a real numeric mismatch against the reference, not just noise.
 18. **VRAM is ~7936 MB on the 8 GB RX 580, not 8192, and it's fragmented.** `main.exe meminfo` dumps this: `heap[0]` device-local is 7936 MB (WDDM reserves ~256 MB) and host-visible/staging memory lives in a separate 16/32 GB system heap — staging is *not* the VRAM problem. The 9 B model + state needs ~7480 MB of device-local memory, and because ~450 discrete `vkAllocateMemory` calls fragment the heap, the allocation that tips it over is reproducible: `OOM: vkAllocateMemory failed for 'attScores' (DEVICE_LOCAL, 128.00 MB) | device_local=7352.66 MB`. `createBufferNamed(..., name)` + per-pool byte counters (reset) in `buffer.c` emit this line and name the buffer. Freeing device memory = lower `MODEL_MAX_CTX` / smaller `MODEL_PREFILL_CHUNK`, INT8 embed/lm-head, or consolidating the ~450 tiny allocations into arenas.
 
@@ -1225,6 +1236,8 @@ The dispatch layer retains per-op timestamp logging (`logFrame`/`logLastFrame` a
 | GatedDeltaNet-GEMM INT8 | 0.000061 / 0.000005 | ~64 ms |
 | GatedDeltaNet-GEMM INT4 | 0.000103 / 0.000006 | ~67 ms |
 | Gate-Sigmoid | 0.000000 | ~0.02 ms |
+| Conv-SiLU (M=1 / M=64, out + history) | 0.000000 | ~0.02 / 0.19 ms |
+| Conv-SiLU-chunk (2×M=64, out + history) | 0.000000 | ~0.19 ms |
 | LMHead-ArgMax FP16 (token index) | exact match | ~117 ms (4096 × 81920 GEMV + reductions) |
 | LMHead-ArgMax-pos FP16 (position buffer, +1) | 41 → 42 exact | included above |
 | Embed-RmsNorm-LinearProj FP16 (q / k / v / g / a / b) | 0.000164 / 0.000145 / 0.000168 / 0.000175 / 0.000088 / 0.000084 | ~2.6 ms |
@@ -1280,7 +1293,7 @@ This fits arithmetically but overflows at runtime — fragmentation from ~450 di
 
 ## 13. Known issues / not yet implemented
 
-1. **Gated-deltaNet `conv1d` (and `A_log`/`dt_bias`/q-k `norm`) are not implemented.** `GatedDeltaNet.comp`/`-GEMM` run the simplified sigmoid-`a`/`b` delta rule + `silu(g)` gate only. The real block's short causal `conv1d` (kernel 4 over qkv), per-head `A_log` decay, `dt_bias`, and 128-dim q/k `norm.weight` are loaded into `w.conv`/`w.aLog`/`w.dtBias`/`w.attnNorm` but unused. Until these are folded in, linear-attention layers are **not HF-identical** (they produce a coherent, deterministic stream, not the reference output).
+1. **Gated-deltaNet `A_log` / `dt_bias` / q-k `norm.weight` are not implemented.** The short causal `conv1d` + SiLU is now wired (`Conv-SiLU.spv`, §7.3), but `GatedDeltaNet.comp`/`-GEMM` still run a simplified `sigmoid(-a)`/`sigmoid(b)` delta rule from the raw `in_proj_a`/`in_proj_b` projections. The real block's per-head `A_log` exponential decay, `dt_bias`, and 128-dim q/k `norm.weight` are loaded into `w.aLog`/`w.dtBias`/`w.attnNorm` but still unused. Until these are folded in, linear-attention layers are **not HF-identical** (they produce a coherent, deterministic stream, not the reference output).
 2. **`rms_norm_eps` = `1e-5`** everywhere (shaders + `rms_norm_apply`), but the model config is `1e-6`.
 3. **Partial RoPE (`0.25`)**: the engine rotates the full head; the model rotates only 64 of 256 dims.
 4. **Final logit scaling** (if any) is not applied — verify against HF.
