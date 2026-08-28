@@ -57,6 +57,9 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
             char ns[64];
             snprintf(ns, sizeof(ns), "stateS_%d", L);
             st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_N_V * MODEL_DIM * MODEL_DIM, ns);
+            char nh[64];
+            snprintf(nh, sizeof(nh), "convHist_%d", L);
+            st.convHist[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_CONV_HIST * MODEL_ZQKV_N, nh);
         }
     }
 
@@ -99,6 +102,10 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
             buffer ss[] = {st.stateS[L]};
             createTransferAndCopy(s.dev.device, s.dev.queue, ss, 1);
         }
+        if (st.convHist[L].buffer != VK_NULL_HANDLE) {
+            buffer ch[] = {st.convHist[L]};
+            createTransferAndCopy(s.dev.device, s.dev.queue, ch, 1);
+        }
     }
 
     return st;
@@ -126,6 +133,7 @@ void destroyState(session s, model_state* st) {
         if (st->vScale[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->vScale[L]);
         if (st->vZero[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->vZero[L]);
         if (st->stateS[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->stateS[L]);
+        if (st->convHist[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->convHist[L]);
     }
     destroyBuffer(s.dev.device, st->position);
     destroyBuffer(s.dev.device, st->tokenIds);

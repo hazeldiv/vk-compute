@@ -397,6 +397,10 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
         addLinearProj(g, ops, n, L, gemm, m, st->h);
     }
 
+    buffer convBufs[] = {st->qProj, st->kProj, st->vProj, w->conv[L], st->convHist[L]};
+    int pushConv[] = {m};
+    addOp(ops, n, "Conv-SiLU.spv", L, convBufs, 5, pushConv, 1, MODEL_ZQKV_N / 256, 1);
+
     buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated};
     if (gemm) {
         int pushDn[] = {m};
@@ -612,10 +616,11 @@ uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int m
 
 void resetGenerator(generator* g) {
     int count = 0;
-    buffer states[MODEL_LAYERS];
+    buffer states[MODEL_LAYERS * 2];
     for (int L = 0; L < g->spec->layerCount; L++) {
         if (g->spec->layers[L].attn.type == ATTENTION_DELTA) {
             states[count++] = g->st.stateS[L];
+            states[count++] = g->st.convHist[L];
         }
     }
     createTransferAndCopy(g->s.dev.device, g->s.dev.queue, states, count);

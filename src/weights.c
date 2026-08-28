@@ -295,14 +295,11 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     int64_t n = 0;
     float* v = safetensors_load_f32(sf, t, &n);
     if (!v) fatal("conv read error");
-    uint16_t* h = (uint16_t*)malloc(sizeof(uint16_t) * n);
-    for (int64_t i = 0; i < n; i++) h[i] = float_to_fp16(v[i]);
-    free(v);
     char label[64];
     snprintf(label, sizeof(label), "conv_%d", layer);
-    buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, h, sizeof(uint16_t) * n, MEMORY_VRAM, label);
+    buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * n, MEMORY_VRAM, label);
     countBuffer("conv", layer, b);
-    free(h);
+    free(v);
     return b;
 }
 

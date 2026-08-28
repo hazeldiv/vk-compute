@@ -4865,6 +4865,153 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
     free(embOut);
 }
 
+static void conv_split(const float* z, float* q, float* k, float* v, int M) {
+    for (int m = 0; m < M; m++) {
+        memcpy(q + m * 2048, z + m * 8192, sizeof(float) * 2048);
+        memcpy(k + m * 2048, z + m * 8192 + 2048, sizeof(float) * 2048);
+        memcpy(v + m * 4096, z + m * 8192 + 4096, sizeof(float) * 4096);
+    }
+}
+
+static void conv_join(float* z, const float* q, const float* k, const float* v, int M) {
+    for (int m = 0; m < M; m++) {
+        memcpy(z + m * 8192, q + m * 2048, sizeof(float) * 2048);
+        memcpy(z + m * 8192 + 2048, k + m * 2048, sizeof(float) * 2048);
+        memcpy(z + m * 8192 + 4096, v + m * 4096, sizeof(float) * 4096);
+    }
+}
+
+static void conv_silu_ref(const float* z, const float* conv, float* out, float* hist, int M) {
+    for (int c = 0; c < 8192; c++) {
+        float w0 = conv[c * 4 + 0];
+        float w1 = conv[c * 4 + 1];
+        float w2 = conv[c * 4 + 2];
+        float w3 = conv[c * 4 + 3];
+        float h0 = hist[0 * 8192 + c];
+        float h1 = hist[1 * 8192 + c];
+        float h2 = hist[2 * 8192 + c];
+        for (int m = 0; m < M; m++) {
+            float cur = z[m * 8192 + c];
+            float zz = w0 * h2 + w1 * h1 + w2 * h0 + w3 * cur;
+            out[m * 8192 + c] = zz / (1.0f + expf(-zz));
+            h2 = h1;
+            h1 = h0;
+            h0 = cur;
+        }
+        hist[0 * 8192 + c] = h0;
+        hist[1 * 8192 + c] = h1;
+        hist[2 * 8192 + c] = h2;
+    }
+}
+
+static void conv_silu_run(session s, const float* z, const float* conv, buffer histB,
+                          float* out, float* histOut, int M, double* ms) {
+    float* q = (float*)malloc(sizeof(float) * M * 2048);
+    float* k = (float*)malloc(sizeof(float) * M * 2048);
+    float* v = (float*)malloc(sizeof(float) * M * 4096);
+    conv_split(z, q, k, v, M);
+
+    buffer qB = createBuffer(s.dev.device, s.dev.physicalDevice, q, sizeof(float) * M * 2048, MEMORY_VRAM);
+    buffer kB = createBuffer(s.dev.device, s.dev.physicalDevice, k, sizeof(float) * M * 2048, MEMORY_VRAM);
+    buffer vB = createBuffer(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * M * 4096, MEMORY_VRAM);
+    buffer convB = createBuffer(s.dev.device, s.dev.physicalDevice, (void*)conv, sizeof(float) * 8192 * 4, MEMORY_VRAM);
+    buffer bufs[] = {qB, kB, vB, convB};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 4);
+
+    operation ops[] = {{
+        .shader = "Conv-SiLU.spv",
+        .buffers = {qB, kB, vB, convB, histB}, .bufferCount = 5,
+        .pushConstants = {M}, .pushConstantCount = 1,
+        .dispatchX = 8192 / 256, .dispatchY = 1, .dispatchZ = 1}};
+    *ms = run_ops(s, ops, 1);
+
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, qB, q);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, kB, k);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, vB, v);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, histB, histOut);
+    conv_join(out, q, k, v, M);
+
+    destroy_buffers(s, bufs, 4);
+    free(q);
+    free(k);
+    free(v);
+}
+
+void validateConvSilu(session s, int M) {
+    float* z = getData(7123, M, 8192);
+    float* conv = getData(7245, 8192, 4);
+    float* hinit = getData(7367, 3, 8192);
+
+    float* refOut = (float*)malloc(sizeof(float) * M * 8192);
+    float* refHist = (float*)malloc(sizeof(float) * 3 * 8192);
+    memcpy(refHist, hinit, sizeof(float) * 3 * 8192);
+    conv_silu_ref(z, conv, refOut, refHist, M);
+
+    buffer histB = createBuffer(s.dev.device, s.dev.physicalDevice, hinit, sizeof(float) * 3 * 8192, MEMORY_VRAM);
+    createTransferAndCopy(s.dev.device, s.dev.queue, &histB, 1);
+
+    float* out = (float*)malloc(sizeof(float) * M * 8192);
+    float* histOut = (float*)malloc(sizeof(float) * 3 * 8192);
+    double ms = 0.0;
+    conv_silu_run(s, z, conv, histB, out, histOut, M, &ms);
+
+    report("Conv-SiLU", M * 8192 / 2, out, refOut, M * 8192, ms);
+    report("Conv-SiLU-hist", 0, histOut, refHist, 3 * 8192, ms);
+
+    destroyBuffer(s.dev.device, histB);
+    free(z);
+    free(conv);
+    free(hinit);
+    free(refOut);
+    free(refHist);
+    free(out);
+    free(histOut);
+}
+
+void validateConvSiluChunked(session s, int M) {
+    float* z1 = getData(7123, M, 8192);
+    float* z2 = getData(8123, M, 8192);
+    float* conv = getData(7245, 8192, 4);
+
+    float* refOut = (float*)malloc(sizeof(float) * 2 * M * 8192);
+    float* refHist = (float*)calloc(3 * 8192, sizeof(float));
+    float* zAll = (float*)malloc(sizeof(float) * 2 * M * 8192);
+    memcpy(zAll, z1, sizeof(float) * M * 8192);
+    memcpy(zAll + M * 8192, z2, sizeof(float) * M * 8192);
+    conv_silu_ref(zAll, conv, refOut, refHist, 2 * M);
+
+    float* zeroHist = (float*)calloc(3 * 8192, sizeof(float));
+    buffer histB = createBuffer(s.dev.device, s.dev.physicalDevice, zeroHist, sizeof(float) * 3 * 8192, MEMORY_VRAM);
+    createTransferAndCopy(s.dev.device, s.dev.queue, &histB, 1);
+
+    float* out1 = (float*)malloc(sizeof(float) * M * 8192);
+    float* out2 = (float*)malloc(sizeof(float) * M * 8192);
+    float* histOut = (float*)calloc(3 * 8192, sizeof(float));
+    double ms = 0.0;
+    conv_silu_run(s, z1, conv, histB, out1, histOut, M, &ms);
+    conv_silu_run(s, z2, conv, histB, out2, histOut, M, &ms);
+
+    float* outAll = (float*)malloc(sizeof(float) * 2 * M * 8192);
+    memcpy(outAll, out1, sizeof(float) * M * 8192);
+    memcpy(outAll + M * 8192, out2, sizeof(float) * M * 8192);
+
+    report("Conv-SiLU-chunk", 2 * M * 8192 / 2, outAll, refOut, 2 * M * 8192, ms);
+    report("Conv-SiLU-hist-chunk", 0, histOut, refHist, 3 * 8192, ms);
+
+    destroyBuffer(s.dev.device, histB);
+    free(z1);
+    free(z2);
+    free(conv);
+    free(zAll);
+    free(refOut);
+    free(refHist);
+    free(zeroHist);
+    free(out1);
+    free(out2);
+    free(outAll);
+    free(histOut);
+}
+
 void validateGateSigmoid(session s, int count, float* g, float* o) {
     float* ref = (float*)malloc(sizeof(float) * count);
     for (int i = 0; i < count; i++) {
@@ -5056,6 +5203,9 @@ void validation(void) {
     validateLinearProjSplitKFP16(s, M, K, input, gamma, w_inFP16);
     validateLinearProjSplitKINT8(s, M, K, input, gamma, w_inINT8);
     validateLinearProjSplitKINT4(s, M, K, input, gamma, w_inINT4);
+    validateConvSilu(s, 1);
+    validateConvSilu(s, 64);
+    validateConvSiluChunked(s, 64);
     // validateGatedDeltaNetFP16(s, K, input, input2, gamma, w_inFP16, woFP16);
     validateGatedDeltaNetINT8(s, K, input, input2, gamma, w_inINT8, woINT8);
     validateGatedDeltaNetINT4(s, K, input, input2, gamma, w_inINT4, woINT4);

@@ -27,6 +27,7 @@ typedef struct model_state {
     buffer vScale[MODEL_LAYERS];
     buffer vZero[MODEL_LAYERS];
     buffer stateS[MODEL_LAYERS];
+    buffer convHist[MODEL_LAYERS];
     buffer position;
     buffer tokenIds;
     buffer maxValue;

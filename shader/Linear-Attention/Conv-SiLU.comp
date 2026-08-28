@@ -1,0 +1,72 @@
+#version 450
+
+#define K_OFF 2048
+#define V_OFF 4096
+#define ZQKV 8192
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Dimensions { uint M; } dims;
+
+layout(set = 0, binding = 0) buffer qBuffer { float q[]; };
+layout(set = 0, binding = 1) buffer kBuffer { float k[]; };
+layout(set = 0, binding = 2) buffer vBuffer { float v[]; };
+layout(set = 0, binding = 3) readonly restrict buffer convBuffer { float conv[]; };
+layout(set = 0, binding = 4) buffer histBuffer { float hist[]; };
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= ZQKV) return;
+
+    float w0 = conv[c * 4 + 0];
+    float w1 = conv[c * 4 + 1];
+    float w2 = conv[c * 4 + 2];
+    float w3 = conv[c * 4 + 3];
+
+    float h0 = hist[0 * ZQKV + c];
+    float h1 = hist[1 * ZQKV + c];
+    float h2 = hist[2 * ZQKV + c];
+
+    uint stride;
+    uint off;
+    if (c < K_OFF) {
+        stride = K_OFF;
+        off = c;
+    } else if (c < V_OFF) {
+        stride = K_OFF;
+        off = c - K_OFF;
+    } else {
+        stride = V_OFF;
+        off = c - V_OFF;
+    }
+
+    for (uint m = 0; m < dims.M; m++) {
+        float cur;
+        if (c < K_OFF) {
+            cur = q[m * stride + off];
+        } else if (c < V_OFF) {
+            cur = k[m * stride + off];
+        } else {
+            cur = v[m * stride + off];
+        }
+
+        float z = w0 * h2 + w1 * h1 + w2 * h0 + w3 * cur;
+        float y = z / (1.0 + exp(-z));
+
+        if (c < K_OFF) {
+            q[m * stride + off] = y;
+        } else if (c < V_OFF) {
+            k[m * stride + off] = y;
+        } else {
+            v[m * stride + off] = y;
+        }
+
+        h2 = h1;
+        h1 = h0;
+        h0 = cur;
+    }
+
+    hist[0 * ZQKV + c] = h0;
+    hist[1 * ZQKV + c] = h1;
+    hist[2 * ZQKV + c] = h2;
+}
