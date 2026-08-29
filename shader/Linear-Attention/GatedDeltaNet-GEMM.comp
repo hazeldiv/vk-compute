@@ -25,10 +25,9 @@ shared float q_inv_sh[TS];
 shared float Dk[TS][TS];
 shared float Dq[TS][TS];
 shared float delta[TS][DIM];
-shared float alpha_sh[TS];
+shared float g_sh[TS];
 shared float beta_sh[TS];
-shared float alpha_P[TS + 1];
-shared float w_sh[TS];
+shared float G[TS + 1];
 shared float skv[DIM];
 shared float sqv[DIM];
 shared float y_sh[DIM];
@@ -50,13 +49,11 @@ void main() {
             for (uint m = 0; m < TS; m++) {
                 float a = aRaw[(mBase + m) * 32 + h];
                 float b = bRaw[(mBase + m) * 32 + h];
-                float g = -exp(aLog[h]) * log(1.0 + exp(a + dtBias[h]));
-                alpha_sh[m] = exp(g);
+                g_sh[m] = -exp(aLog[h]) * log(1.0 + exp(a + dtBias[h]));
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
             }
-            alpha_P[0] = 1.0;
-            for (uint m = 0; m < TS; m++) alpha_P[m + 1] = alpha_P[m] * alpha_sh[m];
-            for (uint m = 0; m < TS; m++) w_sh[m] = beta_sh[m] / alpha_P[m + 1];
+            G[0] = 0.0;
+            for (uint m = 0; m < TS; m++) G[m + 1] = G[m] + g_sh[m];
         }
         barrier();
 
@@ -125,19 +122,22 @@ void main() {
 
             if (tid < DIM) {
                 uint i = tid;
+                float Gcur = G[m + 1];
+                float ecur = exp(Gcur);
                 float p = 0.0;
                 float qc = 0.0;
                 for (uint j = 0; j < m; j++) {
-                    float wj = w_sh[j];
+                    float e = exp(Gcur - G[j + 1]);
+                    float bj = beta_sh[j];
                     float dj = delta[j][i];
-                    p += wj * Dk[j][m] * dj;
-                    qc += wj * Dq[j][m] * dj;
+                    p += e * bj * Dk[j][m] * dj;
+                    qc += e * bj * Dq[j][m] * dj;
                 }
                 float vm = V[(mBase + m) * (32 * DIM) + h * DIM + i];
-                float dv = vm - alpha_P[m + 1] * skv[i] - alpha_P[m + 1] * p;
+                float dv = vm - ecur * skv[i] - p;
                 delta[m][i] = dv;
 
-                float ym = alpha_sh[m] * (alpha_P[m] * sqv[i] + alpha_P[m] * qc) + beta_sh[m] * dv * Dq[m][m];
+                float ym = ecur * sqv[i] + qc + beta_sh[m] * dv * Dq[m][m];
                 y_sh[i] = ym;
             }
             barrier();
@@ -159,11 +159,12 @@ void main() {
             uint i = idx / DIM;
             uint d = idx % DIM;
             float acc = 0.0;
+            float eT = exp(G[TS]);
             for (uint m = 0; m < TS; m++) {
-                acc += w_sh[m] * delta[m][i] * Ks[m][d];
+                acc += exp(G[TS] - G[m + 1]) * beta_sh[m] * delta[m][i] * Ks[m][d];
             }
             float s_old = S[h * (DIM * DIM) + i * DIM + d];
-            S[h * (DIM * DIM) + i * DIM + d] = alpha_P[TS] * (s_old + acc);
+            S[h * (DIM * DIM) + i * DIM + d] = eT * s_old + acc;
         }
         barrier();
     }

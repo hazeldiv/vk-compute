@@ -239,8 +239,11 @@ static float* loadVec(const safetensors* sf, const char* name, int len) {
     return v;
 }
 
-static buffer loadVecBuffer(session s, const safetensors* sf, const char* name, int len, const char* label, int layer) {
+static buffer loadVecBuffer(session s, const safetensors* sf, const char* name, int len, const char* label, int layer, int addOne) {
     float* v = loadVec(sf, name, len);
+    if (addOne) {
+        for (int i = 0; i < len; i++) v[i] += 1.0f;
+    }
     buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * len, MEMORY_VRAM, label);
     countBuffer(label, layer, b);
     registerWeightBuffer(b);
@@ -269,6 +272,54 @@ static float* buildEngineMatrix(const safetensors* sf, const char** hfNames, int
         free(src);
         off += sizes[i];
     }
+    float* eng = (float*)malloc(sizeof(float) * (size_t)total * engineRows);
+    transpose(hf, eng, total, engineRows);
+    free(hf);
+    *outCols = total;
+    return eng;
+}
+
+static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* kn, const char* vn, int engineRows, int* outCols) {
+    const sa_tensor* tq = require(sf, qn);
+    const sa_tensor* tk = require(sf, kn);
+    const sa_tensor* tv = require(sf, vn);
+    int qRows = (int)tq->shape[0];
+    int kRows = (int)tk->shape[0];
+    int vRows = (int)tv->shape[0];
+    int total = qRows + kRows + vRows;
+    int hd = MODEL_HEAD_DIM;
+    int qPart = MODEL_HEADS * hd;
+
+    float* hf = (float*)malloc(sizeof(float) * (size_t)total * engineRows);
+
+    int64_t n = 0;
+    float* src = safetensors_load_f32(sf, tq, &n);
+    if (!src || n != (int64_t)qRows * engineRows) fatal("q proj length mismatch");
+    for (int c = 0; c < qRows; c++) {
+        int head, dim, srcRow;
+        if (c < qPart) {
+            head = c / hd;
+            dim = c % hd;
+            srcRow = head * (2 * hd) + dim;
+        } else {
+            head = (c - qPart) / hd;
+            dim = (c - qPart) % hd;
+            srcRow = head * (2 * hd) + hd + dim;
+        }
+        memcpy(hf + (size_t)c * engineRows, src + (size_t)srcRow * engineRows, sizeof(float) * engineRows);
+    }
+    free(src);
+
+    float* sk = safetensors_load_f32(sf, tk, &n);
+    if (!sk || n != (int64_t)kRows * engineRows) fatal("k proj length mismatch");
+    memcpy(hf + (size_t)qRows * engineRows, sk, sizeof(float) * n);
+    free(sk);
+
+    float* sv = safetensors_load_f32(sf, tv, &n);
+    if (!sv || n != (int64_t)vRows * engineRows) fatal("v proj length mismatch");
+    memcpy(hf + (size_t)(qRows + kRows) * engineRows, sv, sizeof(float) * n);
+    free(sv);
+
     float* eng = (float*)malloc(sizeof(float) * (size_t)total * engineRows);
     transpose(hf, eng, total, engineRows);
     free(hf);
@@ -352,7 +403,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     registerWeightBuffer(w.theta);
     free(theta);
 
-    w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", MODEL_K, "gammaFinal", -1);
+    w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", MODEL_K, "gammaFinal", -1, 1);
 
     const safetensors* sfHead = customVocab ? &sfLm : &sf;
     const safetensors* sfEmbUse = customVocab ? &sfEmb : &sf;
@@ -372,9 +423,9 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
         QuantType f = ly->ffn.q;
 
         lname(n1, sizeof(n1), L, "input_layernorm.weight");
-        w.gammaIn[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaIn", L);
+        w.gammaIn[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaIn", L, 1);
         lname(n1, sizeof(n1), L, "post_attention_layernorm.weight");
-        w.gammaF[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaF", L);
+        w.gammaF[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaF", L, 1);
 
         char projName[64], outName[64];
         snprintf(projName, sizeof(projName), "proj_%d", L);
@@ -382,16 +433,15 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 
         if (ly->attn.type == ATTENTION_FULL) {
             lname(n1, sizeof(n1), L, "self_attn.q_norm.weight");
-            w.qNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "qNorm", L);
+            w.qNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "qNorm", L, 1);
             lname(n1, sizeof(n1), L, "self_attn.k_norm.weight");
-            w.kNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "kNorm", L);
+            w.kNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "kNorm", L, 1);
 
             lname(n1, sizeof(n1), L, "self_attn.q_proj.weight");
             lname(n2, sizeof(n2), L, "self_attn.k_proj.weight");
             lname(n3, sizeof(n3), L, "self_attn.v_proj.weight");
-            const char* pn[3] = {n1, n2, n3};
             int cols = 0;
-            float* mat = buildEngineMatrix(&sf, pn, 3, MODEL_K, &cols);
+            float* mat = buildQkvMatrix(&sf, n1, n2, n3, MODEL_K, &cols);
             if (cols != MODEL_QKV_N) fatal("qkv projection width mismatch");
             w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_QKV_N, q, 1.0f, mat);
             free(mat);
@@ -405,11 +455,11 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n1, sizeof(n1), L, "linear_attn.conv1d.weight");
             w.conv[L] = loadConv(s, &sf, n1, L);
             lname(n1, sizeof(n1), L, "linear_attn.A_log");
-            w.aLog[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "aLog", L);
+            w.aLog[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "aLog", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.dt_bias");
-            w.dtBias[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "dtBias", L);
+            w.dtBias[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "dtBias", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.norm.weight");
-            w.attnNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_DIM, "attnNorm", L);
+            w.attnNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_DIM, "attnNorm", L, 0);
 
             lname(n1, sizeof(n1), L, "linear_attn.in_proj_qkv.weight");
             lname(n2, sizeof(n2), L, "linear_attn.in_proj_z.weight");

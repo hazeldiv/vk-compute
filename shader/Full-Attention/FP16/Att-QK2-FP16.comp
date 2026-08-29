@@ -28,6 +28,7 @@ void main() {
     uint mtile = gl_WorkGroupID.y % (param.mRows / TS);
     uint hL = gl_WorkGroupID.y / (param.mRows / TS);
     uint head = param.headBase + hL;
+    uint kvh = head / KV_HEADS;
     uint mGlobal = mtile * TS + row;
     uint nBase = gl_WorkGroupID.x * TN;
     uint limit = param.qOff + mGlobal;
@@ -47,7 +48,7 @@ void main() {
         }
         if (tid < 64) {
             uint tok = nBase + tid;
-            uint base = tok * KV_TOTAL_ROWS + head * HEAD_DIM + c * 8;
+            uint base = tok * KV_TOTAL_ROWS + kvh * HEAD_DIM + c * 16;
             Bsub[0][tid] = vec4(unpackHalf2x16(uint(key[base]) | (uint(key[base + 1]) << 16)), unpackHalf2x16(uint(key[base + 2]) | (uint(key[base + 3]) << 16)));
             Bsub[1][tid] = vec4(unpackHalf2x16(uint(key[base + 4]) | (uint(key[base + 5]) << 16)), unpackHalf2x16(uint(key[base + 6]) | (uint(key[base + 7]) << 16)));
             Bsub[2][tid] = vec4(unpackHalf2x16(uint(key[base + 8]) | (uint(key[base + 9]) << 16)), unpackHalf2x16(uint(key[base + 10]) | (uint(key[base + 11]) << 16)));

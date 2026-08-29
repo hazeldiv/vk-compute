@@ -69,6 +69,8 @@ void serverMain(int argc, char** argv) {
     int eos = atoi(argval(argc, argv, "--eos", "248044"));
     int maxCtx = atoi(argval(argc, argv, "--max-ctx", "32768"));
     int maxNew = atoi(argval(argc, argv, "--max-new", "128"));
+    const char* dumpDir = argval(argc, argv, "--dump", NULL);
+    int dumpLayers = atoi(argval(argc, argv, "--dump-layers", "0"));
     if (maxNew < 1) maxNew = 1;
 
     _setmode(_fileno(stdin), _O_BINARY);
@@ -76,6 +78,10 @@ void serverMain(int argc, char** argv) {
 
     session s = createSession();
     generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK, weightDir, vocabHead, vocabEmbed, eos, maxCtx);
+    if (dumpDir != NULL) {
+        generatorSetDumpDir(g, dumpDir);
+        generatorSetDumpLayers(g, dumpLayers);
+    }
 
     uint32_t* prompt = NULL;
     int promptCap = 0;

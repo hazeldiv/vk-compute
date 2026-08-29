@@ -132,7 +132,7 @@ void main() {
     }
 
     if (globalCol < param.kOffset) {
-        qOut[globalCol] = acc;
+        qOut[globalCol] = acc * 0.0625;
     } else {
         uint row = globalCol - param.kOffset;
         kCache[cacheSlot + row] = uint16_t(packHalf2x16(vec2(acc)));

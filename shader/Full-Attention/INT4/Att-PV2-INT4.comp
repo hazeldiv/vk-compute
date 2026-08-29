@@ -48,13 +48,13 @@ void main() {
             p_sh[m][kv * 4 + 2] = float(s[base + 2]);
             p_sh[m][kv * 4 + 3] = float(s[base + 3]);
         }
-        if (tid < 64) {
-            uint kv = tid / 16;
-            uint tok = tid % 16;
-            uint base = (c * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + nBase + kv * 4;
+        for (uint i = tid; i < TS * TS; i += TS * TS) {
+            uint cd = i / TS;
+            uint tok = i % TS;
+            uint base = (c * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + nBase + cd * 4;
             float vs = vscale[kvh * MAXCTX + c * TS + tok];
             float vz = vzero[kvh * MAXCTX + c * TS + tok];
-            Vsub[kv][tok] = vec4(float(uint(value[base])), float(uint(value[base + 1])), float(uint(value[base + 2])), float(uint(value[base + 3]))) * vs - vz;
+            Vsub[cd][tok] = vec4(float(uint(value[base])), float(uint(value[base + 1])), float(uint(value[base + 2])), float(uint(value[base + 3]))) * vs - vz;
         }
         barrier();
         #pragma unroll

@@ -27,6 +27,7 @@ void main() {
     uint mtile = gl_WorkGroupID.y % (param.mRows / TS);
     uint hL = gl_WorkGroupID.y / (param.mRows / TS);
     uint head = param.headBase + hL;
+    uint kvh = head / KV_HEADS;
     uint mGlobal = mtile * TS + row;
     uint nBase = gl_WorkGroupID.x * (TS * 4);
     uint pRow = (hL * param.mRows + mGlobal) * MAXCTX;
@@ -44,13 +45,13 @@ void main() {
             p_sh[m][kv * 4 + 2] = float(s[base + 2]);
             p_sh[m][kv * 4 + 3] = float(s[base + 3]);
         }
-        if (tid < 64) {
-            uint kv = tid / 16;
-            uint tok = tid % 16;
-            uint base = (c * TS + tok) * KV_TOTAL_ROWS + head * HEAD_DIM + nBase + kv * 2;
+        for (uint i = tid; i < TS * TS; i += TS * TS) {
+            uint cd = i / TS;
+            uint tok = i % TS;
+            uint base = (c * TS + tok) * KV_TOTAL_ROWS + kvh * HEAD_DIM + nBase + cd * 4;
             vec2 v01 = unpackHalf2x16(uint(value[base]) | (uint(value[base + 1]) << 16));
             vec2 v23 = unpackHalf2x16(uint(value[base + 2]) | (uint(value[base + 3]) << 16));
-            Vsub[kv][tok] = vec4(v01.x, v01.y, v23.x, v23.y);
+            Vsub[cd][tok] = vec4(v01.x, v01.y, v23.x, v23.y);
         }
         barrier();
         #pragma unroll

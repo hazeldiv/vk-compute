@@ -20,7 +20,7 @@ def _read_u32(proc):
     return struct.unpack("<I", raw)[0]
 
 
-def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128):
+def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128, dump_dir=None, dump_layers=0):
     weight_dir = Path(weight_dir).resolve()
 
     if vocab_weight is None:
@@ -51,6 +51,9 @@ def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128):
     ]
     if head_file is not None:
         cmd += ["--vocab-head", str(head_file), "--vocab-embed", str(embed_file)]
+    if dump_dir is not None:
+        Path(dump_dir).mkdir(parents=True, exist_ok=True)
+        cmd += ["--dump", str(dump_dir), "--dump-layers", str(dump_layers)]
 
     proc = subprocess.Popen(
         cmd,
@@ -70,8 +73,19 @@ def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128):
     return llm
 
 
+def apply_chat_template(llm, messages, enable_thinking=True):
+    bos = "<|im_start|>"
+    eos = "<|im_end|>"
+    parts = []
+    for msg in messages:
+        parts.append(f"{bos}{msg['role']}\n{msg['content']}{eos}\n")
+    parts.append(f"{bos}assistant\n")
+    parts.append(" thinking\n" if enable_thinking else " thinking\n\n response\n\n")
+    return llm.tokenizer.encode("".join(parts), add_special_tokens=False).ids
+
+
 def tokenize(llm, text):
-    return llm.tokenizer.encode(text).ids
+    return apply_chat_template(llm, [{"role": "user", "content": text}])
 
 
 def detokenize(llm, token_ids):
@@ -113,6 +127,8 @@ def _main():
     ids = tokenize(llm, text)
     out = generate(llm, ids)
     close(llm)
+    print("input tokens:", ids)
+    print("output tokens:", out)
     print(detokenize(llm, out))
 
 

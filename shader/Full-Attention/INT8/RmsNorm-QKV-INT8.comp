@@ -188,7 +188,7 @@ void main() {
     }
 
     if (globalCol < param.kOffset) {
-        qOut[globalCol] = acc;
+        qOut[globalCol] = acc * 0.0625;
     } else {
         uint row = globalCol - param.kOffset;
         uint kvHead = gl_WorkGroupID.x - param.kOffset / TS;

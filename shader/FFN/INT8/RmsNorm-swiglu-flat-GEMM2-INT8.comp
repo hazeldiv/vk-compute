@@ -24,8 +24,9 @@ layout(set = 0, binding = 10) readonly restrict buffer InvRms { float invRms[]; 
 shared vec4 Asub[2][4][TS];
 shared vec4 Bsub[2][4][TN];
 
-vec4 unpackUint8x4(uint v) {
-    return vec4(uvec4(v) & uvec4(0xFF));
+vec4 unpackUint8x4(uint packedData) {
+    uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
+    return vec4(bytes);
 }
 
 void loadTiles(uint t, uint buf, uint tid, uint lBase, uint upHalf, uint g, uint mRow0) {

@@ -1564,7 +1564,7 @@ static void qkv_rope_ref(const float* proj, const float* theta, float* qref, flo
                 val = hn[head + col - QKV_ROPE_DIM / 2] * sn + hn[head + col] * cs;
             }
         }
-        if (j < g_offset) qref[j] = val;
+        if (j < g_offset) qref[j] = val * 0.0625f;
         else kref[j - k_offset] = val;
     }
     free(hn);
@@ -3308,6 +3308,116 @@ void validateRmsNormSwigluFfnGEMM2INT4(session s, int M, int N, int K, float* in
 
     destroy_buffers(s, bufs, 10);
     free(out);
+    free(ref);
+}
+
+void validateRmsNormSwigluFlatGEMM2INT8(session s, int M, int N, int K, float* input, float* gamma, QuantizedData weightINT8, QuantizedData weight2INT8) {
+    float* gOut = (float*)calloc(M * N, sizeof(float));
+    float* uOut = (float*)calloc(M * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N);
+    uint8_t* transposed2 = (uint8_t*)malloc(sizeof(uint8_t) * K * N);
+    transpose_block16(weightINT8.data, transposed, K, N, QUANT_INT8);
+    transpose_block16(weight2INT8.data, transposed2, K, N, QUANT_INT8);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * K, MEMORY_RAM);
+    buffer gateBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N, MEMORY_RAM);
+    buffer upBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed2, sizeof(uint8_t) * K * N, MEMORY_RAM);
+    buffer gBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gOut, sizeof(float) * M * N, MEMORY_VRAM);
+    buffer uBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, uOut, sizeof(float) * M * N, MEMORY_VRAM);
+    buffer gateScale = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.scale, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer gateZero = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT8.z, sizeof(float) * K * N / weightINT8.group_size, MEMORY_RAM);
+    buffer upScale = createBuffer(s.dev.device, s.dev.physicalDevice, weight2INT8.scale, sizeof(float) * K * N / weight2INT8.group_size, MEMORY_RAM);
+    buffer upZero = createBuffer(s.dev.device, s.dev.physicalDevice, weight2INT8.z, sizeof(float) * K * N / weight2INT8.group_size, MEMORY_RAM);
+    float* invInit = (float*)calloc(M, sizeof(float));
+    buffer invRmsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, invInit, sizeof(float) * M, MEMORY_VRAM);
+    free(invInit);
+    buffer bufs[] = {inputBuffer, gammaBuffer, gateBuffer, upBuffer, gBuffer, uBuffer, gateScale, gateZero, upScale, upZero, invRmsBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 11);
+    free(transposed);
+    free(transposed2);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-Prologue.spv", .buffers = {inputBuffer, invRmsBuffer}, .bufferCount = 2,
+         .pushConstants = {K}, .pushConstantCount = 1,
+         .dispatchX = M, .dispatchY = 1, .dispatchZ = 1},
+        {.shader = "RmsNorm-swiglu-flat-GEMM2-INT8.spv", .buffers = {inputBuffer, gammaBuffer, gateBuffer, upBuffer, gBuffer, uBuffer, gateScale, gateZero, upScale, upZero, invRmsBuffer}, .bufferCount = 11,
+         .pushConstants = {M, N, K, N}, .pushConstantCount = 4,
+         .dispatchX = (N * 2) / 32, .dispatchY = M / 16, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    for (int m = 0; m < M; m++)
+        swiglu_ref_int8(input + m * K, gamma, &weightINT8, &weight2INT8, ref + m * N, N, K);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gBuffer, gOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, uBuffer, uOut);
+    float* comb = (float*)malloc(sizeof(float) * M * N);
+    for (int i = 0; i < M * N; i++) {
+        float v = gOut[i];
+        comb[i] = (v / (1.0f + expf(-v))) * uOut[i];
+    }
+    report("RmsNorm-swiglu-flat-GEMM2-INT8", 100, comb, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 11);
+    free(gOut);
+    free(uOut);
+    free(comb);
+    free(ref);
+}
+
+void validateRmsNormSwigluFlatGEMM2INT4(session s, int M, int N, int K, float* input, float* gamma, QuantizedData weightINT4, QuantizedData weight2INT4) {
+    float* gOut = (float*)calloc(M * N, sizeof(float));
+    float* uOut = (float*)calloc(M * N, sizeof(float));
+
+    uint8_t* transposed = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
+    uint8_t* transposed2 = (uint8_t*)malloc(sizeof(uint8_t) * K * N / 2);
+    transpose_block16(weightINT4.data, transposed, K, N, QUANT_INT4);
+    transpose_block16(weight2INT4.data, transposed2, K, N, QUANT_INT4);
+    buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * M * K, MEMORY_RAM);
+    buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * K, MEMORY_RAM);
+    buffer gateBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint8_t) * K * N / 2, MEMORY_RAM);
+    buffer upBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed2, sizeof(uint8_t) * K * N / 2, MEMORY_RAM);
+    buffer gBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gOut, sizeof(float) * M * N, MEMORY_VRAM);
+    buffer uBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, uOut, sizeof(float) * M * N, MEMORY_VRAM);
+    buffer gateScale = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.scale, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer gateZero = createBuffer(s.dev.device, s.dev.physicalDevice, weightINT4.z, sizeof(float) * K * N / weightINT4.group_size, MEMORY_RAM);
+    buffer upScale = createBuffer(s.dev.device, s.dev.physicalDevice, weight2INT4.scale, sizeof(float) * K * N / weight2INT4.group_size, MEMORY_RAM);
+    buffer upZero = createBuffer(s.dev.device, s.dev.physicalDevice, weight2INT4.z, sizeof(float) * K * N / weight2INT4.group_size, MEMORY_RAM);
+    float* invInit = (float*)calloc(M, sizeof(float));
+    buffer invRmsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, invInit, sizeof(float) * M, MEMORY_VRAM);
+    free(invInit);
+    buffer bufs[] = {inputBuffer, gammaBuffer, gateBuffer, upBuffer, gBuffer, uBuffer, gateScale, gateZero, upScale, upZero, invRmsBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 11);
+    free(transposed);
+    free(transposed2);
+
+    operation ops[] = {
+        {.shader = "RmsNorm-Prologue.spv", .buffers = {inputBuffer, invRmsBuffer}, .bufferCount = 2,
+         .pushConstants = {K}, .pushConstantCount = 1,
+         .dispatchX = M, .dispatchY = 1, .dispatchZ = 1},
+        {.shader = "RmsNorm-swiglu-flat-GEMM2-INT4.spv", .buffers = {inputBuffer, gammaBuffer, gateBuffer, upBuffer, gBuffer, uBuffer, gateScale, gateZero, upScale, upZero, invRmsBuffer}, .bufferCount = 11,
+         .pushConstants = {M, N, K, N}, .pushConstantCount = 4,
+         .dispatchX = (N * 2) / 32, .dispatchY = M / 16, .dispatchZ = 1}
+    };
+    double ms = run_ops(s, ops, 2);
+
+    float* ref = (float*)malloc(sizeof(float) * M * N);
+    for (int m = 0; m < M; m++)
+        swiglu_ref_int4(input + m * K, gamma, &weightINT4, &weight2INT4, ref + m * N, N, K);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, gBuffer, gOut);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, uBuffer, uOut);
+    float* comb = (float*)malloc(sizeof(float) * M * N);
+    for (int i = 0; i < M * N; i++) {
+        float v = gOut[i];
+        comb[i] = (v / (1.0f + expf(-v))) * uOut[i];
+    }
+    report("RmsNorm-swiglu-flat-GEMM2-INT4", 100, comb, ref, M * N, ms);
+
+    destroy_buffers(s, bufs, 11);
+    free(gOut);
+    free(uOut);
+    free(comb);
     free(ref);
 }
 
@@ -5111,7 +5221,7 @@ void validateConvSiluChunked(session s, int M) {
 void validateGateSigmoid(session s, int count, float* g, float* o) {
     float* ref = (float*)malloc(sizeof(float) * count);
     for (int i = 0; i < count; i++) {
-        ref[i] = o[i] * (g[i] / (1.0f + expf(-g[i])));
+        ref[i] = o[i] * (1.0f / (1.0f + expf(-g[i])));
     }
     buffer gBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, g, sizeof(float) * count, MEMORY_RAM);
     buffer oBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, o, sizeof(float) * count, MEMORY_VRAM);
@@ -5249,6 +5359,8 @@ void validation(void) {
     validateRmsNormSwigluFfnGEMM2FP16(s, Mg, N, K, inputM, gamma, weightFP16, weight2FP16);
     validateRmsNormSwigluFfnGEMM2INT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
     validateRmsNormSwigluFfnGEMM2INT4(s, Mg, N, K, inputM, gamma, weightINT4, weight2INT4);
+    validateRmsNormSwigluFlatGEMM2INT8(s, Mg, N, K, inputM, gamma, weightINT8, weight2INT8);
+    validateRmsNormSwigluFlatGEMM2INT4(s, Mg, N, K, inputM, gamma, weightINT4, weight2INT4);
 
     // validateRmsNormLinearProjGEMMFP16(s, Mg, K, inputM, gamma, w_inFP16);
     // validateRmsNormLinearProjGEMMINT8(s, Mg, K, inputM, gamma, w_inINT8);

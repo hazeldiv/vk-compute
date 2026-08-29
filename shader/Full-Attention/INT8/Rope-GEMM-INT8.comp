@@ -160,5 +160,5 @@ void main() {
         acc = rope_shared[col];
     }
 
-    qOut[row * param.gOffset + globalCol] = acc;
+    qOut[row * param.gOffset + globalCol] = acc * 0.0625;
 }

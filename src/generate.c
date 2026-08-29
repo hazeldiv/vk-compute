@@ -268,35 +268,37 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         addOp(ops, n, model_shader("Rope-GEMM", q), L, ropeGBufs, brg, pushRG, 5,
               2 * MODEL_HEADS + 2 * MODEL_KV_HEADS, m);
 
-        int pushA[] = {ctx, offset, m, 0};
+        for (int hb = 0; hb < MODEL_HEADS / MODEL_KV_HEADS; hb++) {
+            int pushA[] = {ctx, offset, m, hb * MODEL_KV_HEADS};
 
-        buffer qkBufs[5];
-        int bq = 0;
-        qkBufs[bq++] = st->qOut;
-        qkBufs[bq++] = st->kCache[L];
-        if (q != QUANT_FP16) {
-            qkBufs[bq++] = st->kScale[L];
-            qkBufs[bq++] = st->kZero[L];
+            buffer qkBufs[5];
+            int bq = 0;
+            qkBufs[bq++] = st->qOut;
+            qkBufs[bq++] = st->kCache[L];
+            if (q != QUANT_FP16) {
+                qkBufs[bq++] = st->kScale[L];
+                qkBufs[bq++] = st->kZero[L];
+            }
+            qkBufs[bq++] = st->attScores;
+            addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, (ctx + 63) / 64, ((m + 15) / 16) * 4);
+
+            buffer smBufs[2];
+            smBufs[0] = st->attScores;
+            smBufs[1] = st->smSum;
+            addOp(ops, n, "Att-Softmax.spv", L, smBufs, 2, pushA, 4, m, 4);
+
+            buffer pvBufs[6];
+            int bp = 0;
+            pvBufs[bp++] = st->attScores;
+            pvBufs[bp++] = st->vCache[L];
+            if (q != QUANT_FP16) {
+                pvBufs[bp++] = st->vScale[L];
+                pvBufs[bp++] = st->vZero[L];
+            }
+            pvBufs[bp++] = st->attnOut;
+            pvBufs[bp++] = st->smSum;
+            addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, ((m + 15) / 16) * 4);
         }
-        qkBufs[bq++] = st->attScores;
-        addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 4, ctx / 64, ((m + 15) / 16) * 4);
-
-        buffer smBufs[2];
-        smBufs[0] = st->attScores;
-        smBufs[1] = st->smSum;
-        addOp(ops, n, "Att-Softmax.spv", L, smBufs, 2, pushA, 4, m, 4);
-
-        buffer pvBufs[6];
-        int bp = 0;
-        pvBufs[bp++] = st->attScores;
-        pvBufs[bp++] = st->vCache[L];
-        if (q != QUANT_FP16) {
-            pvBufs[bp++] = st->vScale[L];
-            pvBufs[bp++] = st->vZero[L];
-        }
-        pvBufs[bp++] = st->attnOut;
-        pvBufs[bp++] = st->smSum;
-        addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 4, 4, ((m + 15) / 16) * 4);
 
         buffer gateBufs[2];
         gateBufs[0] = st->gAttn;
@@ -459,10 +461,9 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
     return n;
 }
 
-static int compilePrefill(generator* g, int m, int offset) {
+static int compilePrefillHead(generator* g, operation* ops, int m) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
-    operation* ops = g->prefillOps;
     int n = 0;
 
     buffer gatherBufs[4];
@@ -475,10 +476,15 @@ static int compilePrefill(generator* g, int m, int offset) {
 
     addLinearProj(g, ops, &n, 0, 1, m, st->embStaged);
 
+    return n;
+}
+
+static int compilePrefill(generator* g, int m, int offset) {
+    operation* ops = g->prefillOps;
+    int n = compilePrefillHead(g, ops, m);
     for (int L = 0; L < g->spec->layerCount; L++) {
         buildLayer(g, ops, &n, L, 1, m, 0, offset + m, offset);
     }
-
     return n;
 }
 
@@ -511,6 +517,57 @@ void destroyGenerator(generator* g) {
     destroyWeights(g->s, &g->w);
 }
 
+static void dumpBuffer(generator* g, buffer buf, const char* name, int64_t floats) {
+    if (g->dumpDir[0] == '\0') return;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s.bin", g->dumpDir, name);
+    float* host = (float*)malloc((size_t)buf.size);
+    if (host == NULL) return;
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, buf, host);
+    FILE* f = fopen(path, "wb");
+    if (f != NULL) {
+        int64_t avail = (int64_t)buf.size / (int64_t)sizeof(float);
+        int64_t n = floats < avail ? floats : avail;
+        fwrite(host, sizeof(float), (size_t)n, f);
+        fclose(f);
+    }
+    free(host);
+}
+
+static void dumpBufferFp16(generator* g, buffer buf, const char* name, int64_t halves) {
+    if (g->dumpDir[0] == '\0') return;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s.bin", g->dumpDir, name);
+    uint16_t* host = (uint16_t*)malloc((size_t)buf.size);
+    if (host == NULL) return;
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, buf, host);
+    FILE* f = fopen(path, "wb");
+    if (f != NULL) {
+        int64_t avail = (int64_t)buf.size / (int64_t)sizeof(uint16_t);
+        int64_t n = halves < avail ? halves : avail;
+        fwrite(host, sizeof(uint16_t), (size_t)n, f);
+        fclose(f);
+    }
+    free(host);
+}
+
+static void dumpBufferU8(generator* g, buffer buf, const char* name, int64_t bytes) {
+    if (g->dumpDir[0] == '\0') return;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/%s.bin", g->dumpDir, name);
+    uint8_t* host = (uint8_t*)malloc((size_t)buf.size);
+    if (host == NULL) return;
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, buf, host);
+    FILE* f = fopen(path, "wb");
+    if (f != NULL) {
+        int64_t avail = (int64_t)buf.size;
+        int64_t n = bytes < avail ? bytes : avail;
+        fwrite(host, 1, (size_t)n, f);
+        fclose(f);
+    }
+    free(host);
+}
+
 static void executeChunked(session s, operation* ops, int opCount, const char* phase, int token) {
     int done = 0;
     while (done < opCount) {
@@ -533,9 +590,91 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     while (done < nTokens) {
         int cur = nTokens - done;
         if (cur > m) cur = m;
+        int padded = (cur + 15) & ~15;
         memcpy(st->tokenIds.mappedMemory, tokens + done, sizeof(uint32_t) * cur);
-        g->prefillOpCount = compilePrefill(g, cur, done);
-        executeChunked(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)(g->nextPos + done));
+        for (int i = cur; i < padded; i++) ((uint32_t*)st->tokenIds.mappedMemory)[i] = 0;
+
+        if (g->dumpLayers > 0) {
+            int headCount = compilePrefillHead(g, g->prefillOps, padded);
+            executeChunked(g->s, g->prefillOps, headCount, "prefill", (int)(g->nextPos + done));
+            dumpBuffer(g, st->embOut, "layer_00_embed", (int64_t)padded * MODEL_K);
+            for (int L = 0; L < g->spec->layerCount && L < g->dumpLayers; L++) {
+                const layer* ly = &g->spec->layers[L];
+                int n = 0;
+                if (ly->attn.type == ATTENTION_FULL) {
+                    buildAttention(g, g->prefillOps, &n, L, 1, padded, 0, done + padded, done);
+                } else if (ly->attn.type == ATTENTION_DELTA) {
+                    buildDelta(g, g->prefillOps, &n, L, 1, padded);
+                }
+                executeChunked(g->s, g->prefillOps, n, "prefill", (int)(g->nextPos + done));
+                char name[64];
+                snprintf(name, sizeof(name), "layer_%02d_hattn", L + 1);
+                dumpBuffer(g, st->h, name, (int64_t)padded * MODEL_K);
+
+                int nf = 0;
+                if (ly->ffn.type == FFN_SWIGLU) {
+                    buildFfn(g, g->prefillOps, &nf, L, 1, padded);
+                }
+                executeChunked(g->s, g->prefillOps, nf, "prefill", (int)(g->nextPos + done));
+                snprintf(name, sizeof(name), "layer_%02d_h", L + 1);
+                dumpBuffer(g, st->h, name, (int64_t)padded * MODEL_K);
+                if (g->spec->layers[L].attn.type == ATTENTION_FULL) {
+                    snprintf(name, sizeof(name), "layer_%02d_qkvRaw", L + 1);
+                    dumpBuffer(g, st->qkvRaw, name, (int64_t)padded * MODEL_QKV_N);
+                    snprintf(name, sizeof(name), "layer_%02d_qOut", L + 1);
+                    dumpBuffer(g, st->qOut, name, (int64_t)padded * MODEL_Q_OFF);
+                    snprintf(name, sizeof(name), "layer_%02d_attnOut", L + 1);
+                    dumpBuffer(g, st->attnOut, name, (int64_t)padded * MODEL_Q_OFF);
+                    snprintf(name, sizeof(name), "layer_%02d_gAttn", L + 1);
+                    dumpBuffer(g, st->gAttn, name, (int64_t)padded * MODEL_Q_OFF);
+                    snprintf(name, sizeof(name), "layer_%02d_scores", L + 1);
+                    dumpBufferFp16(g, st->attScores, name, (int64_t)4 * padded * MODEL_MAX_CTX);
+                    snprintf(name, sizeof(name), "layer_%02d_smSum", L + 1);
+                    dumpBuffer(g, st->smSum, name, (int64_t)4 * padded);
+                    QuantType aq = g->spec->layers[L].attn.q;
+                    if (aq == QUANT_FP16) {
+                        snprintf(name, sizeof(name), "layer_%02d_kCache", L + 1);
+                        dumpBufferFp16(g, st->kCache[L], name, (int64_t)(done + padded) * MODEL_KV_ROWS);
+                        snprintf(name, sizeof(name), "layer_%02d_vCache", L + 1);
+                        dumpBufferFp16(g, st->vCache[L], name, (int64_t)(done + padded) * MODEL_KV_ROWS);
+                    } else {
+                        int64_t nt = (int64_t)(done + padded);
+                        snprintf(name, sizeof(name), "layer_%02d_kCacheU8", L + 1);
+                        dumpBufferU8(g, st->kCache[L], name, nt * MODEL_KV_ROWS);
+                        snprintf(name, sizeof(name), "layer_%02d_vCacheU8", L + 1);
+                        dumpBufferU8(g, st->vCache[L], name, nt * MODEL_KV_ROWS);
+                        snprintf(name, sizeof(name), "layer_%02d_kScale", L + 1);
+                        dumpBuffer(g, st->kScale[L], name, (int64_t)MODEL_KV_HEADS * MODEL_MAX_CTX);
+                        snprintf(name, sizeof(name), "layer_%02d_kZero", L + 1);
+                        dumpBuffer(g, st->kZero[L], name, (int64_t)MODEL_KV_HEADS * MODEL_MAX_CTX);
+                        snprintf(name, sizeof(name), "layer_%02d_vScale", L + 1);
+                        dumpBuffer(g, st->vScale[L], name, (int64_t)MODEL_KV_HEADS * MODEL_MAX_CTX);
+                        snprintf(name, sizeof(name), "layer_%02d_vZero", L + 1);
+                        dumpBuffer(g, st->vZero[L], name, (int64_t)MODEL_KV_HEADS * MODEL_MAX_CTX);
+                    }
+                }
+                snprintf(name, sizeof(name), "layer_%02d_act", L + 1);
+                dumpBuffer(g, st->act, name, (int64_t)padded * MODEL_FFN_N);
+                snprintf(name, sizeof(name), "layer_%02d_gAct", L + 1);
+                dumpBuffer(g, st->gAct, name, (int64_t)padded * MODEL_FFN_N);
+                snprintf(name, sizeof(name), "layer_%02d_uAct", L + 1);
+                dumpBuffer(g, st->uAct, name, (int64_t)padded * MODEL_FFN_N);
+                snprintf(name, sizeof(name), "layer_%02d_invRms", L + 1);
+                dumpBuffer(g, st->invRms, name, (int64_t)padded);
+                if (g->spec->layers[L].attn.type == ATTENTION_DELTA) {
+                    snprintf(name, sizeof(name), "layer_%02d_yGated", L + 1);
+                    dumpBuffer(g, st->yGated, name, (int64_t)padded * MODEL_K);
+                }
+            }
+            for (int L = g->dumpLayers; L < g->spec->layerCount; L++) {
+                int n = 0;
+                buildLayer(g, g->prefillOps, &n, L, 1, padded, 0, done + padded, done);
+                executeChunked(g->s, g->prefillOps, n, "prefill", (int)(g->nextPos + done));
+            }
+        } else {
+            g->prefillOpCount = compilePrefill(g, padded, done);
+            executeChunked(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)(g->nextPos + done));
+        }
         done += cur;
         lastCur = cur;
     }
@@ -627,4 +766,34 @@ void resetGenerator(generator* g) {
     }
     createTransferAndCopy(g->s.dev.device, g->s.dev.queue, states, count);
     g->nextPos = 0;
+}
+
+void generatorSetDumpDir(generator* g, const char* dir) {
+    if (dir == NULL) {
+        g->dumpDir[0] = '\0';
+        return;
+    }
+    snprintf(g->dumpDir, sizeof(g->dumpDir), "%s", dir);
+}
+
+void generatorDumpPrefill(generator* g, int rows) {
+    if (g->dumpDir[0] == '\0') return;
+    model_state* st = &g->st;
+    dumpBuffer(g, st->embOut, "embOut", (int64_t)rows * MODEL_K);
+    dumpBuffer(g, st->h, "h", (int64_t)rows * MODEL_K);
+    dumpBuffer(g, st->lastRow, "lastRow", MODEL_K);
+}
+
+void generatorSetDumpLayers(generator* g, int layers) {
+    g->dumpLayers = layers;
+}
+
+void generatorDumpDecodeStep(generator* g, int step) {
+    if (g->dumpDir[0] == '\0') return;
+    model_state* st = &g->st;
+    char name[64];
+    snprintf(name, sizeof(name), "decode_%02d_h", step);
+    dumpBuffer(g, st->h, name, MODEL_K);
+    snprintf(name, sizeof(name), "decode_%02d_q", step);
+    dumpBuffer(g, st->qOut, name, MODEL_K);
 }
