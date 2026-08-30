@@ -7,6 +7,7 @@
 #include "buffer.h"
 #include "dispatch.h"
 #include "data.h"
+#include "state.h"
 #include "validation.h"
 
 static void validate_softmax_v(const float* x, const float* v, float* o, int n) {
@@ -4894,6 +4895,11 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     uint16_t* transposed = (uint16_t*)malloc(sizeof(uint16_t) * K * vocabSize);
     transpose_block16((uint8_t*)lmHeadFP16, (uint8_t*)transposed, K, vocabSize, QUANT_FP16);
 
+    float* logitsZero = (float*)calloc(vocabSize, sizeof(float));
+    sample_params spZero = {0};
+    uint32_t* histZero = (uint32_t*)calloc(MAX_PENALTY_LEN, sizeof(uint32_t));
+    uint32_t rngZero = 1;
+
     buffer inputBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, input, sizeof(float) * K, MEMORY_RAM);
     buffer gammaBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, gamma, sizeof(float) * K, MEMORY_RAM);
     buffer weightBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, transposed, sizeof(uint16_t) * K * vocabSize, MEMORY_RAM);
@@ -4902,16 +4908,22 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, result, sizeof(uint32_t), MEMORY_VRAM);
     buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posVal, sizeof(uint32_t), MEMORY_VRAM);
     buffer tokenIdsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &tokenVal, sizeof(uint32_t), MEMORY_VRAM);
-    buffer bufs[] = {inputBuffer, gammaBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer, tokenIdsBuffer};
-    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 8);
+    buffer logitsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, logitsZero, sizeof(float) * vocabSize, MEMORY_VRAM);
+    buffer sampleParamsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &spZero, sizeof(sample_params), MEMORY_RAM);
+    buffer historyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, histZero, sizeof(uint32_t) * MAX_PENALTY_LEN, MEMORY_VRAM);
+    buffer rngBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &rngZero, sizeof(uint32_t), MEMORY_RAM);
+    buffer bufs[] = {inputBuffer, gammaBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer, tokenIdsBuffer, logitsBuffer, sampleParamsBuffer, historyBuffer, rngBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 12);
     free(transposed);
+    free(logitsZero);
+    free(histZero);
 
     operation ops[] = {
         {.shader = "LMHead-GEMV-ArgMax-FP16.spv", .buffers = {inputBuffer, weightBuffer, maxValueBuffer, maxIndexBuffer, gammaBuffer}, .bufferCount = 5,
          .pushConstants = {1, vocabSize, K}, .pushConstantCount = 3,
          .dispatchX = numGroups, .dispatchY = 1, .dispatchZ = 1},
-        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, resultBuffer, posBuffer, tokenIdsBuffer}, .bufferCount = 5,
-         .pushConstants = {vocabSize, 1, 0}, .pushConstantCount = 3,
+        {.shader = "ArgMax-Reduce.spv", .buffers = {maxValueBuffer, maxIndexBuffer, logitsBuffer, sampleParamsBuffer, historyBuffer, rngBuffer, resultBuffer, posBuffer, tokenIdsBuffer}, .bufferCount = 9,
+         .pushConstants = {vocabSize, 1, 0, 0}, .pushConstantCount = 4,
          .dispatchX = 1, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4926,7 +4938,7 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     printf("LMHead-ArgMax-pos FP16: shader[0]= %u ref= %d\n", posRead, posVal + 1);
     printf("LMHead-ArgMax FP16 time: %.3f ms\n", ms);
 
-    destroy_buffers(s, bufs, 8);
+    destroy_buffers(s, bufs, 12);
     free(maxValues);
     free(maxIndices);
     free(result);

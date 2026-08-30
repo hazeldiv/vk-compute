@@ -2,6 +2,9 @@ import struct
 import sys
 import subprocess
 import time
+import random
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from tokenizers import Tokenizer
@@ -12,6 +15,16 @@ BACKEND = ROOT / "bin" / "main.exe"
 
 class LLM:
     pass
+
+
+@dataclass
+class Sampling:
+    temperature: float = 1.0
+    rep_penalty: float = 1.0
+    penalty_len: int = 256
+    top_k: int = 40
+    top_p: float = 0.8
+    seed: int = None
 
 
 def _read_u32(proc):
@@ -96,11 +109,19 @@ def detokenize(llm, token_ids):
     return llm.tokenizer.decode(token_ids)
 
 
-def _stream_ids(llm, token_ids):
+def _stream_ids(llm, token_ids, sampling=None):
     if not token_ids:
         return
     n = len(token_ids)
     llm.proc.stdin.write(struct.pack("<I", n))
+    if sampling is None:
+        header = (0.0, 1.0, 0, 0, 1.0, 1)
+    else:
+        seed = sampling.seed if sampling.seed is not None else random.getrandbits(32)
+        if seed == 0:
+            seed = 1
+        header = (sampling.temperature, sampling.rep_penalty, sampling.penalty_len, sampling.top_k, sampling.top_p, seed)
+    llm.proc.stdin.write(struct.pack("<ffIIfI", *header))
     llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
     llm.proc.stdin.flush()
     while True:
@@ -110,14 +131,14 @@ def _stream_ids(llm, token_ids):
         yield tok
 
 
-def generate(llm, token_ids):
-    return list(_stream_ids(llm, token_ids))
+def generate(llm, token_ids, sampling=None):
+    return list(_stream_ids(llm, token_ids, sampling))
 
 
-def generate_stream(llm, token_ids):
+def generate_stream(llm, token_ids, sampling=None):
     ids = []
     prev = ""
-    for tok in _stream_ids(llm, token_ids):
+    for tok in _stream_ids(llm, token_ids, sampling):
         ids.append(tok)
         text = llm.tokenizer.decode(ids)
         if len(text) > len(prev):
@@ -146,20 +167,22 @@ def _main():
     if text is None: return
     weight_dir = sys.argv[1] if len(sys.argv) > 1 else "model/Qwen3.5-9B-weight"
     thinking = sys.argv[5] if len(sys.argv) > 5 else "none"
+    sampling = Sampling(**json.loads(sys.argv[6])) if len(sys.argv) > 6 else None
 
     llm = start_llm(weight_dir, max_ctx=max_ctx, vocab_weight=vocab, max_new_tokens=16384)
     ids = tokenize(llm, text, thinking == "thinking")
     decoded_ids = []
     prev = ""
     timestamps = []
-    for tok in _stream_ids(llm, ids):
+    for tok in _stream_ids(llm, ids, sampling):
         timestamps.append(time.perf_counter())
         decoded_ids.append(tok)
         text = llm.tokenizer.decode(decoded_ids)
         if len(text) > len(prev):
             print(text[len(prev):], end="", flush=True)
         prev = text
-    print()
+    print("")
+    print(decoded_ids)
     if len(timestamps) > 4:
         n = len(timestamps) - 4
         elapsed = timestamps[-1] - timestamps[3]

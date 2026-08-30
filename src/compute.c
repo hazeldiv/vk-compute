@@ -106,12 +106,25 @@ void serverMain(int argc, char** argv) {
         uint32_t n = 0;
         if (fread(&n, sizeof(uint32_t), 1, stdin) != 1) break;
         if (n == 0) break;
+
+        sample_params sp = {0};
+        uint32_t seed = 0;
+        if (fread(&sp.temperature, sizeof(float), 1, stdin) != 1) break;
+        if (fread(&sp.repPenalty, sizeof(float), 1, stdin) != 1) break;
+        if (fread(&sp.penaltyLength, sizeof(uint32_t), 1, stdin) != 1) break;
+        if (fread(&sp.topK, sizeof(uint32_t), 1, stdin) != 1) break;
+        if (fread(&sp.topP, sizeof(float), 1, stdin) != 1) break;
+        if (fread(&seed, sizeof(uint32_t), 1, stdin) != 1) break;
+        if (sp.penaltyLength > MAX_PENALTY_LEN) sp.penaltyLength = MAX_PENALTY_LEN;
+        if (seed == 0) seed = 1;
+
         if ((int)n > promptCap) {
             prompt = (uint32_t*)realloc(prompt, sizeof(uint32_t) * n);
             promptCap = (int)n;
         }
         if (fread(prompt, sizeof(uint32_t), n, stdin) != n) break;
 
+        generatorSetSampling(g, &sp, seed);
         resetGenerator(g);
         generateTokens(g, prompt, (int)n, maxNew, emitToken, NULL);
         uint32_t sentinel = 0xFFFFFFFFu;

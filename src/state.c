@@ -76,6 +76,15 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
     st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups, "maxValue");
     st.maxIndex = createZeroed(s, (int64_t)sizeof(uint32_t) * numGroups, "maxIndex");
     st.result = createZeroed(s, sizeof(uint32_t) * 4, "result");
+    st.logits = createZeroed(s, (int64_t)sizeof(float) * vocab, "logits");
+    sample_params spInit = {0};
+    st.sampleParams = createBufferNamed(s.dev.device, s.dev.physicalDevice, &spInit, sizeof(sample_params), MEMORY_RAM, "sampleParams");
+    uint32_t seedInit = 0;
+    st.sampleRng = createBufferNamed(s.dev.device, s.dev.physicalDevice, &seedInit, sizeof(uint32_t), MEMORY_RAM, "sampleRng");
+    uint32_t* hist = (uint32_t*)malloc(sizeof(uint32_t) * MAX_PENALTY_LEN);
+    for (int i = 0; i < MAX_PENALTY_LEN; i++) hist[i] = 0xFFFFFFFFu;
+    st.sampleHistory = createBufferNamed(s.dev.device, s.dev.physicalDevice, hist, (int64_t)sizeof(uint32_t) * MAX_PENALTY_LEN, MEMORY_VRAM, "sampleHistory");
+    free(hist);
     st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_K, "gemvPartial");
     st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N, "qkvPartial");
     st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N, "ffnPartial");
@@ -154,6 +163,10 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->qkvRaw);
     destroyBuffer(s.dev.device, st->gAct);
     destroyBuffer(s.dev.device, st->uAct);
+    destroyBuffer(s.dev.device, st->logits);
+    destroyBuffer(s.dev.device, st->sampleParams);
+    destroyBuffer(s.dev.device, st->sampleHistory);
+    destroyBuffer(s.dev.device, st->sampleRng);
 }
 
 void stateSetPosition(session s, model_state* st, uint32_t pos) {

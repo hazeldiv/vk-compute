@@ -5,6 +5,14 @@
 #include "buffer.h"
 #include "model.h"
 
+typedef struct {
+    float temperature;
+    float repPenalty;
+    uint32_t penaltyLength;
+    uint32_t topK;
+    float topP;
+} sample_params;
+
 typedef struct model_state {
     int maxM;
     buffer h;
@@ -46,6 +54,10 @@ typedef struct model_state {
     buffer qkvRaw;
     buffer gAct;
     buffer uAct;
+    buffer logits;
+    buffer sampleParams;
+    buffer sampleHistory;
+    buffer sampleRng;
 } model_state;
 
 model_state createState(session s, const model_config* spec, int maxM, int vocab, int verbose);

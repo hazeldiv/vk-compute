@@ -1,5 +1,6 @@
 #version 450
 #define TS 256
+#define MAX_PENALTY 1024
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -7,50 +8,254 @@ layout(push_constant) uniform Params {
     uint vocabSize;
     uint doIncrement;
     uint passIdx;
+    uint mode;
 } params;
 
 layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
-layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
-layout(set = 0, binding = 3) buffer PositionBuffer { uint position[]; };
-layout(set = 0, binding = 4) writeonly restrict buffer TokenIdsBuffer { uint tokenIds[]; };
+layout(set = 0, binding = 2) buffer LogitsBuffer { float logits[]; };
+layout(set = 0, binding = 3) readonly restrict buffer SamplerParamsBuffer {
+    float temperature;
+    float repPenalty;
+    uint penaltyLength;
+    uint topK;
+    float topP;
+} sp;
+layout(set = 0, binding = 4) buffer HistoryBuffer { uint history[]; };
+layout(set = 0, binding = 5) buffer RngBuffer { uint rng[]; };
+layout(set = 0, binding = 6) writeonly restrict buffer ResultBuffer { uint result[]; };
+layout(set = 0, binding = 7) buffer PositionBuffer { uint position[]; };
+layout(set = 0, binding = 8) writeonly restrict buffer TokenIdsBuffer { uint tokenIds[]; };
 
-shared float redValue[TS];
-shared uint redIndex[TS];
+shared float redVal[TS];
+shared uint redIdx[TS];
+shared float blockSum[TS];
+shared float cumBase[TS];
+shared uint histSh[MAX_PENALTY];
+shared float gMax;
+shared float gMin;
+shared float gLo;
+shared float gHi;
+shared float gThr;
+shared float gTarget;
+shared uint winBlock;
+shared uint outTok;
+
+uint xorshift32(uint x) {
+    x ^= x << 13u;
+    x ^= x >> 17u;
+    x ^= x << 5u;
+    return x;
+}
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint numGroups = (params.vocabSize + TS - 1) / TS;
+    uint V = params.vocabSize;
 
-    float bestValue = uintBitsToFloat(0xFF800000u);
-    uint bestIndex = 0;
-
-    for (uint i = tid; i < numGroups; i += TS) {
-        float v = maxValue[i];
-        uint idx = maxIndex[i];
-        if (v > bestValue || (v == bestValue && idx < bestIndex)) {
-            bestValue = v;
-            bestIndex = idx;
+    if (params.mode == 0u) {
+        uint numGroups = (V + TS - 1u) / TS;
+        float bestValue = uintBitsToFloat(0xFF800000u);
+        uint bestIndex = 0u;
+        for (uint i = tid; i < numGroups; i += TS) {
+            float v = maxValue[i];
+            uint idx = maxIndex[i];
+            if (v > bestValue || (v == bestValue && idx < bestIndex)) {
+                bestValue = v;
+                bestIndex = idx;
+            }
         }
+        redVal[tid] = bestValue;
+        redIdx[tid] = bestIndex;
+        barrier();
+        for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) {
+                float ov = redVal[tid + stride];
+                uint oi = redIdx[tid + stride];
+                if (ov > redVal[tid] || (ov == redVal[tid] && oi < redIdx[tid])) {
+                    redVal[tid] = ov;
+                    redIdx[tid] = oi;
+                }
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            result[params.passIdx] = redIdx[0];
+            tokenIds[0] = redIdx[0];
+            if (params.doIncrement == 1u) position[0] = position[0] + 1u;
+        }
+        return;
     }
 
-    redValue[tid] = bestValue;
-    redIndex[tid] = bestIndex;
+    uint E = (V + TS - 1u) / TS;
+    uint base = tid * E;
+    uint cnt = 0u;
+    if (base < V) cnt = ((V - base) < E) ? (V - base) : E;
+
+    float penalty = sp.repPenalty;
+    uint penLen = sp.penaltyLength;
+    if (penLen > MAX_PENALTY) penLen = MAX_PENALTY;
+    uint topK = sp.topK;
+    if (topK > V) topK = V;
+    float topP = sp.topP;
+    bool doPen = (penLen > 0u) && (penalty != 1.0f);
+
+    for (uint i = tid; i < penLen; i += TS) histSh[i] = history[i];
     barrier();
-    for (uint stride = TS/2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            float otherValue = redValue[tid + stride];
-            uint otherIndex = redIndex[tid + stride];
-            if (otherValue > redValue[tid] || (otherValue == redValue[tid] && otherIndex < redIndex[tid])) {
-                redValue[tid] = otherValue;
-                redIndex[tid] = otherIndex;
+
+    float lmax = -3.4e38f;
+    float lmin = 3.4e38f;
+    for (uint k = 0u; k < cnt; k++) {
+        uint j = base + k;
+        float a = logits[j] / sp.temperature;
+        if (doPen) {
+            bool hit = false;
+            for (uint h = 0u; h < penLen; h++) {
+                if (histSh[h] == j) { hit = true; break; }
             }
+            if (hit) a = (a > 0.0f) ? (a / penalty) : (a * penalty);
+        }
+        logits[j] = a;
+        if (a > lmax) lmax = a;
+        if (a < lmin) lmin = a;
+    }
+    redVal[tid] = lmax;
+    blockSum[tid] = lmin;
+    barrier();
+    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            float ov = redVal[tid + stride];
+            float ov2 = blockSum[tid + stride];
+            if (ov > redVal[tid]) redVal[tid] = ov;
+            if (ov2 < blockSum[tid]) blockSum[tid] = ov2;
         }
         barrier();
     }
-    if (tid == 0) {
-        result[params.passIdx] = redIndex[0];
-        tokenIds[0] = redIndex[0];
-        if (params.doIncrement == 1u) position[0] = position[0] + 1u;
+    if (tid == 0u) { gMax = redVal[0]; gMin = blockSum[0]; }
+    barrier();
+
+    float m = 0.0f;
+    for (uint k = 0u; k < cnt; k++) m += exp(logits[base + k] - gMax);
+    redVal[tid] = m;
+    barrier();
+    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) redVal[tid] += redVal[tid + stride];
+        barrier();
+    }
+    float Zall = redVal[0];
+    barrier();
+
+    if (tid == 0u) gThr = gMin;
+    barrier();
+
+    if (topK > 0u) {
+        if (tid == 0u) { gLo = gMin; gHi = gMax; }
+        barrier();
+        for (uint it = 0u; it < 48u; it++) {
+            if (tid == 0u) gThr = 0.5f * (gLo + gHi);
+            barrier();
+            uint c = 0u;
+            for (uint k = 0u; k < cnt; k++) { if (logits[base + k] >= gThr) c++; }
+            redIdx[tid] = c;
+            barrier();
+            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) redIdx[tid] += redIdx[tid + stride];
+                barrier();
+            }
+            if (tid == 0u) { if (redIdx[0] >= topK) gLo = gThr; else gHi = gThr; }
+            barrier();
+        }
+        if (tid == 0u) gThr = gLo;
+        barrier();
+    }
+
+    if (topP < 1.0f && topP > 0.0f) {
+        float Zk = Zall;
+        if (topK > 0u) {
+            float mk = 0.0f;
+            for (uint k = 0u; k < cnt; k++) {
+                float a = logits[base + k];
+                if (a >= gThr) mk += exp(a - gMax);
+            }
+            redVal[tid] = mk;
+            barrier();
+            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) redVal[tid] += redVal[tid + stride];
+                barrier();
+            }
+            Zk = redVal[0];
+            barrier();
+        }
+        if (tid == 0u) { gLo = gThr; gHi = gMax; redVal[0] = topP * Zk; }
+        barrier();
+        float target = redVal[0];
+        for (uint it = 0u; it < 48u; it++) {
+            if (tid == 0u) gThr = 0.5f * (gLo + gHi);
+            barrier();
+            float s = 0.0f;
+            for (uint k = 0u; k < cnt; k++) {
+                float a = logits[base + k];
+                if (a >= gThr) s += exp(a - gMax);
+            }
+            redVal[tid] = s;
+            barrier();
+            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) redVal[tid] += redVal[tid + stride];
+                barrier();
+            }
+            if (tid == 0u) { if (redVal[0] >= target) gLo = gThr; else gHi = gThr; }
+            barrier();
+        }
+        if (tid == 0u) gThr = gLo;
+        barrier();
+    }
+
+    float bm = 0.0f;
+    for (uint k = 0u; k < cnt; k++) {
+        float a = logits[base + k];
+        if (a >= gThr) bm += exp(a - gMax);
+    }
+    blockSum[tid] = bm;
+    barrier();
+
+    if (tid == 0u) {
+        float acc = 0.0f;
+        for (uint i = 0u; i < TS; i++) { cumBase[i] = acc; acc += blockSum[i]; }
+        uint s = rng[0];
+        if (s == 0u) s = 0x9E3779B9u;
+        float u = float(s >> 8) * (1.0f / 16777216.0f);
+        gTarget = u * acc;
+        winBlock = TS - 1u;
+        for (uint i = 0u; i < TS; i++) {
+            if (gTarget < cumBase[i] + blockSum[i]) { winBlock = i; break; }
+        }
+    }
+    barrier();
+
+    if (tid == winBlock) {
+        float acc = cumBase[tid];
+        uint chosen = base;
+        bool found = false;
+        for (uint k = 0u; k < cnt; k++) {
+            uint j = base + k;
+            float a = logits[j];
+            if (a >= gThr) {
+                acc += exp(a - gMax);
+                if (!found) chosen = j;
+                if (!found && gTarget < acc) found = true;
+            }
+        }
+        outTok = chosen;
+    }
+    barrier();
+
+    if (tid == 0u) {
+        result[params.passIdx] = outTok;
+        tokenIds[0] = outTok;
+        uint pos = position[0];
+        if (penLen > 0u) history[pos % penLen] = outTok;
+        uint s = rng[0];
+        if (s == 0u) s = 0x9E3779B9u;
+        rng[0] = xorshift32(s);
+        if (params.doIncrement == 1u) position[0] = pos + 1u;
     }
 }

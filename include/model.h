@@ -28,6 +28,7 @@
 #define MODEL_MAX_GEMM 16384
 #define MODEL_PREFILL_CHUNK 512
 #define MODEL_MAX_OPS 1280
+#define MAX_PENALTY_LEN 1024
 
 typedef enum {
     ATTENTION_NONE,

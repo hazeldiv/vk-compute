@@ -456,13 +456,19 @@ static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int
     model_state* st = &g->st;
     model_weights* w = &g->w;
 
-    buffer lmBufs[] = {*input, w->lmHead, st->maxValue, st->maxIndex, w->gammaFinal};
-    int pushL[] = {1, g->vocab, MODEL_K};
-    addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (g->vocab + 255) / 256, 1);
+    if (g->sampling) {
+        buffer lmBufs[] = {*input, w->lmHead, st->logits, w->gammaFinal};
+        int pushL[] = {1, g->vocab, MODEL_K};
+        addOp(ops, n, "LMHead-GEMV-FP16.spv", -1, lmBufs, 4, pushL, 3, (g->vocab + 255) / 256, 1);
+    } else {
+        buffer lmBufs[] = {*input, w->lmHead, st->maxValue, st->maxIndex, w->gammaFinal};
+        int pushL[] = {1, g->vocab, MODEL_K};
+        addOp(ops, n, "LMHead-GEMV-ArgMax-FP16.spv", -1, lmBufs, 5, pushL, 3, (g->vocab + 255) / 256, 1);
+    }
 
-    buffer redBufs[] = {st->maxValue, st->maxIndex, st->result, st->position, st->tokenIds};
-    int pushR[] = {g->vocab, doIncrement, passIdx};
-    addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 5, pushR, 3, 1, 1);
+    buffer redBufs[] = {st->maxValue, st->maxIndex, st->logits, st->sampleParams, st->sampleHistory, st->sampleRng, st->result, st->position, st->tokenIds};
+    int pushR[] = {g->vocab, doIncrement, passIdx, g->sampling};
+    addOp(ops, n, "ArgMax-Reduce.spv", -1, redBufs, 9, pushR, 4, 1, 1);
 }
 
 static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
@@ -796,15 +802,31 @@ void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNe
 
 void resetGenerator(generator* g) {
     int count = 0;
-    buffer states[MODEL_LAYERS * 2];
+    buffer states[MODEL_LAYERS * 2 + 1];
     for (int L = 0; L < g->spec->layerCount; L++) {
         if (g->spec->layers[L].attn.type == ATTENTION_DELTA) {
             states[count++] = g->st.stateS[L];
             states[count++] = g->st.convHist[L];
         }
     }
+    states[count++] = g->st.sampleHistory;
     createTransferAndCopy(g->s.dev.device, g->s.dev.queue, states, count);
     g->nextPos = 0;
+}
+
+void generatorSetSampling(generator* g, const sample_params* p, uint32_t seed) {
+    if (g->st.sampleParams.mappedMemory != NULL) {
+        memcpy(g->st.sampleParams.mappedMemory, p, sizeof(sample_params));
+    }
+    if (g->st.sampleRng.mappedMemory != NULL) {
+        *(uint32_t*)g->st.sampleRng.mappedMemory = seed;
+    }
+    int sampling = (p->temperature > 0.0f) ? 1 : 0;
+    if (g->sampling == sampling) return;
+    g->sampling = sampling;
+    g->groupOpCount = compileDecodeGroup(g, g->groupOps, 1);
+    g->groupOpCountShort = compileDecodeGroup(g, g->groupOpsShort, 0);
+    g->finalOpCount = compileFinal(g);
 }
 
 void generatorSetDumpDir(generator* g, const char* dir) {
