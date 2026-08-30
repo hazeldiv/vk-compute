@@ -73,19 +73,22 @@ def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128, 
     return llm
 
 
-def apply_chat_template(llm, messages, enable_thinking=True):
+def apply_chat_template(llm, messages, system="", enable_thinking=True):
     bos = "<|im_start|>"
     eos = "<|im_end|>"
     parts = []
+    if (system != ""):
+        parts.append("<|im_start|>system\n")
+        parts.append(system+eos+"\n")
     for msg in messages:
         parts.append(f"{bos}{msg['role']}\n{msg['content']}{eos}\n")
     parts.append(f"{bos}assistant\n")
-    parts.append(" thinking\n" if enable_thinking else " thinking\n\n response\n\n")
+    parts.append("<think>\n" if enable_thinking else "<think>\n\n</think>\n\n")
     return llm.tokenizer.encode("".join(parts), add_special_tokens=False).ids
 
 
 def tokenize(llm, text):
-    return apply_chat_template(llm, [{"role": "user", "content": text}])
+    return apply_chat_template(llm, [{"role": "user", "content": text}], system="You are a helpful assistant.")
 
 
 def detokenize(llm, token_ids):

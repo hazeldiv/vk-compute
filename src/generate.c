@@ -717,8 +717,16 @@ uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int m
     int curCount = curSplit ? g->groupOpCount : g->groupOpCountShort;
 
     ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = token;
-    executeRecord(&g->s, curOps, curCount);
+    int dumpFirst = (g->dumpDir[0] != '\0');
+    executeRecord(&g->s, curOps, dumpFirst ? curCount / DECODE_GROUP : curCount);
     executeSubmitNow(&g->s);
+    if (dumpFirst) {
+        executeWaitLast(&g->s);
+        dumpBuffer(g, g->st.h, "decode_h", MODEL_K);
+        dumpBuffer(g, g->st.embOut, "decode_emb", MODEL_K);
+        executeRecord(&g->s, curOps + curCount / DECODE_GROUP, curCount - curCount / DECODE_GROUP);
+        executeSubmitNow(&g->s);
+    }
 
     int eos = 0;
     int units = fullGroups + (rem > 0 ? 1 : 0);

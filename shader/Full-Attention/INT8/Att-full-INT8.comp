@@ -25,6 +25,8 @@ shared float s_max[TS];
 shared float s_exp[TS];
 shared float scale_s[TS];
 shared float zero_s[TS];
+shared float vscale_s[TS];
+shared float vzero_s[TS];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
@@ -53,6 +55,8 @@ void main() {
         if (s < context) {
             scale_s[tid] = kscale[kv_block_id * MAXCTX + s];
             zero_s[tid] = kzero[kv_block_id * MAXCTX + s];
+            vscale_s[tid] = vscale[kv_block_id * MAXCTX + s];
+            vzero_s[tid] = vzero[kv_block_id * MAXCTX + s];
         }
         barrier();
 
@@ -101,7 +105,7 @@ void main() {
             if (tile_size > TS) tile_size = TS;
             for (uint i = 0; i < tile_size; i++) {
                 uint t = tile_start + i;
-                float v = float(uint(value[t * KV_TOTAL_ROWS + (kv_row_base + tid)])) * scale_s[i] - zero_s[i];
+                float v = float(uint(value[t * KV_TOTAL_ROWS + (kv_row_base + tid)])) * vscale_s[i] - vzero_s[i];
                 tile_acc += s_exp[i] * v;
             }
 
