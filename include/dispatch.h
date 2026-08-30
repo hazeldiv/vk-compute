@@ -30,6 +30,7 @@ void executeSubmitNow(session* s);
 void executeWaitLast(session* s);
 void logLastFrame(session* s, operation ops[], int opCount, const char* phase, int token);
 void setTimingEnabled(int enabled);
+int isTimingEnabled(void);
 void closeTimingLog(void);
 double getExecutionTime(session s);
 

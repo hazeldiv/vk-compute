@@ -124,7 +124,7 @@ void main() {
         }
         uint kvHead = gl_WorkGroupID.x - kHeadBase;
         quantizeParams(acc);
-        kCache[cacheSlot + row] = uint8_t(quantize(acc));
+        kCache[row * MAXCTX + pos] = uint8_t(quantize(acc));
         if (gl_LocalInvocationID.x == 0) {
             kScale[kvHead * MAXCTX + pos] = qscale_sh;
             kZero[kvHead * MAXCTX + pos] = qzero_sh;

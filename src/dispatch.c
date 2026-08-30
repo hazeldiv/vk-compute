@@ -50,6 +50,10 @@ void setTimingEnabled(int enabled) {
     timingEnabled = enabled;
 }
 
+int isTimingEnabled(void) {
+    return timingEnabled;
+}
+
 static VkDescriptorSet getDescriptorSet(session s, VkDescriptorSetLayout layout, const operation* op) {
     for (int i = 0; i < descCacheCount; i++) {
         desc_entry* e = &descCache[i];

@@ -64,7 +64,7 @@ void main() {
         if (s < context) {
             score = 0.0;
             for (uint d = 0; d < HEAD_DIM; d++) {
-                float k_val = float(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])) * scale_s[tid] - zero_s[tid];
+                float k_val = float(uint(key[(kv_row_base + d) * MAXCTX + s])) * scale_s[tid] - zero_s[tid];
                 score += q_shared[d] * k_val;
             }
         }

@@ -48,11 +48,11 @@ void main() {
         }
         if (tid < 64) {
             uint tok = nBase + tid;
-            uint base = tok * KV_TOTAL_ROWS + kvh * HEAD_DIM + c * 16;
-            Bsub[0][tid] = vec4(unpackHalf2x16(uint(key[base]) | (uint(key[base + 1]) << 16)), unpackHalf2x16(uint(key[base + 2]) | (uint(key[base + 3]) << 16)));
-            Bsub[1][tid] = vec4(unpackHalf2x16(uint(key[base + 4]) | (uint(key[base + 5]) << 16)), unpackHalf2x16(uint(key[base + 6]) | (uint(key[base + 7]) << 16)));
-            Bsub[2][tid] = vec4(unpackHalf2x16(uint(key[base + 8]) | (uint(key[base + 9]) << 16)), unpackHalf2x16(uint(key[base + 10]) | (uint(key[base + 11]) << 16)));
-            Bsub[3][tid] = vec4(unpackHalf2x16(uint(key[base + 12]) | (uint(key[base + 13]) << 16)), unpackHalf2x16(uint(key[base + 14]) | (uint(key[base + 15]) << 16)));
+            uint base = (kvh * HEAD_DIM + c * 16) * MAXCTX + tok;
+            Bsub[0][tid] = vec4(unpackHalf2x16(uint(key[base]) | (uint(key[base + MAXCTX]) << 16)), unpackHalf2x16(uint(key[base + 2 * MAXCTX]) | (uint(key[base + 3 * MAXCTX]) << 16)));
+            Bsub[1][tid] = vec4(unpackHalf2x16(uint(key[base + 4 * MAXCTX]) | (uint(key[base + 5 * MAXCTX]) << 16)), unpackHalf2x16(uint(key[base + 6 * MAXCTX]) | (uint(key[base + 7 * MAXCTX]) << 16)));
+            Bsub[2][tid] = vec4(unpackHalf2x16(uint(key[base + 8 * MAXCTX]) | (uint(key[base + 9 * MAXCTX]) << 16)), unpackHalf2x16(uint(key[base + 10 * MAXCTX]) | (uint(key[base + 11 * MAXCTX]) << 16)));
+            Bsub[3][tid] = vec4(unpackHalf2x16(uint(key[base + 12 * MAXCTX]) | (uint(key[base + 13 * MAXCTX]) << 16)), unpackHalf2x16(uint(key[base + 14 * MAXCTX]) | (uint(key[base + 15 * MAXCTX]) << 16)));
         }
         barrier();
         #pragma unroll

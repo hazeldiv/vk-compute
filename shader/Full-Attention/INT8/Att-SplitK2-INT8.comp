@@ -73,11 +73,11 @@ void main() {
         if (s < context) {
             float ks = ks_s[lane];
             float kz = kz_s[lane];
-            uint base = s * KV_TOTAL_ROWS + kv_row_base;
+            uint base = kv_row_base * MAXCTX + s;
             vec4 score4 = vec4(0.0);
             for (uint d = 0; d < HEAD_DIM / 4; d++) {
-                uint b = base + d * 4;
-                uvec4 kb = uvec4(uint(key[b]), uint(key[b+1]), uint(key[b+2]), uint(key[b+3]));
+                uint b = base + d * 4 * MAXCTX;
+                uvec4 kb = uvec4(uint(key[b]), uint(key[b + MAXCTX]), uint(key[b + 2 * MAXCTX]), uint(key[b + 3 * MAXCTX]));
                 vec4 kv = vec4(kb) * ks - kz;
                 score4 += q_shared[d] * kv;
             }

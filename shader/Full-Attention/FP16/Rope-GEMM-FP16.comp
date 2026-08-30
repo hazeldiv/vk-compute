@@ -5,6 +5,7 @@
 #define HEAD_DIM 256
 #define ROTARY_DIM 64
 #define ROTARY_HALF 32
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -76,7 +77,7 @@ void main() {
         } else {
             acc = rope_shared[col];
         }
-        kCache[cacheSlot + (globalCol - param.kOffset)] = uint16_t(packHalf2x16(vec2(acc)));
+        kCache[(globalCol - param.kOffset) * MAXCTX + token] = uint16_t(packHalf2x16(vec2(acc)));
         return;
     }
     if (head >= qHeads) {

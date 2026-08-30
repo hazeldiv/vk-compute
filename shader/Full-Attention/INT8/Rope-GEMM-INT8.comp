@@ -119,7 +119,7 @@ void main() {
         }
         uint kvHead = head - kHeadBase;
         quantizeParams(acc);
-        kCache[cacheSlot + (globalCol - param.kOffset)] = uint8_t(quantize(acc));
+        kCache[(globalCol - param.kOffset) * MAXCTX + token] = uint8_t(quantize(acc));
         if (col == 0) {
             kScale[kvHead * MAXCTX + token] = qscale_sh;
             kZero[kvHead * MAXCTX + token] = qzero_sh;

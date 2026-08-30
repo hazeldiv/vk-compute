@@ -7,6 +7,7 @@
 #define KV_HEADS 4
 #define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
 #define NEG_INF -1e30
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -48,7 +49,7 @@ void main() {
         if (s < context) {
             score = 0.0;
             for (uint d = 0; d < HEAD_DIM; d++) {
-                float k_val = unpackHalf2x16(uint(key[s * KV_TOTAL_ROWS + (kv_row_base + d)])).x;
+                float k_val = unpackHalf2x16(uint(key[(kv_row_base + d) * MAXCTX + s])).x;
                 score += q_shared[d] * k_val;
             }
         }

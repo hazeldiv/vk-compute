@@ -765,8 +765,12 @@ void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNe
         double t0 = nowMs();
         executeRecord(&g->s, nextOps, next * (nextCount / DECODE_GROUP));
         executeWaitLast(&g->s);
+        logLastFrame(&g->s, curOps, cur * (curCount / DECODE_GROUP), "decode", (int)g->nextPos);
         readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.result, tokens);
         double t1 = nowMs();
+        if (isTimingEnabled()) {
+            fprintf(stderr, "[decode][tok=%5d] group=%d  %7.3f ms/tok\n", (int)g->nextPos, cur, (t1 - t0) / (double)cur);
+        }
         ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = tokens[cur - 1];
         executeSubmitNow(&g->s);
         g->nextPos += cur;

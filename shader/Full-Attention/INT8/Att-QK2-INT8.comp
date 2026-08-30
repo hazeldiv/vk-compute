@@ -52,11 +52,11 @@ void main() {
         }
         if (tid < 64) {
             uint tok = nBase + tid;
-            uint base = tok * KV_TOTAL_ROWS + kvh * HEAD_DIM + c * 16;
-            Bsub[0][tid] = vec4(float(uint(key[base])),     float(uint(key[base + 1])), float(uint(key[base + 2])), float(uint(key[base + 3])));
-            Bsub[1][tid] = vec4(float(uint(key[base + 4])), float(uint(key[base + 5])), float(uint(key[base + 6])), float(uint(key[base + 7])));
-            Bsub[2][tid] = vec4(float(uint(key[base + 8])), float(uint(key[base + 9])), float(uint(key[base + 10])), float(uint(key[base + 11])));
-            Bsub[3][tid] = vec4(float(uint(key[base + 12])), float(uint(key[base + 13])), float(uint(key[base + 14])), float(uint(key[base + 15])));
+            uint base = (kvh * HEAD_DIM + c * 16) * MAXCTX + tok;
+            Bsub[0][tid] = vec4(float(uint(key[base])),     float(uint(key[base + MAXCTX])), float(uint(key[base + 2 * MAXCTX])), float(uint(key[base + 3 * MAXCTX])));
+            Bsub[1][tid] = vec4(float(uint(key[base + 4 * MAXCTX])), float(uint(key[base + 5 * MAXCTX])), float(uint(key[base + 6 * MAXCTX])), float(uint(key[base + 7 * MAXCTX])));
+            Bsub[2][tid] = vec4(float(uint(key[base + 8 * MAXCTX])), float(uint(key[base + 9 * MAXCTX])), float(uint(key[base + 10 * MAXCTX])), float(uint(key[base + 11 * MAXCTX])));
+            Bsub[3][tid] = vec4(float(uint(key[base + 12 * MAXCTX])), float(uint(key[base + 13 * MAXCTX])), float(uint(key[base + 14 * MAXCTX])), float(uint(key[base + 15 * MAXCTX])));
         }
         barrier();
         #pragma unroll

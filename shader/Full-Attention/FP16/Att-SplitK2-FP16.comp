@@ -12,6 +12,7 @@
 #define NEG_INF -1e30
 #define ACC_BASE (MAXC * HEADS * 2)
 #define MAXC 128
+#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -56,12 +57,12 @@ void main() {
         uint s = t * TS + lane;
         float score = NEG_INF;
         if (s < context) {
-            uint base = s * KV_TOTAL_ROWS + kv_row_base;
+            uint base = kv_row_base * MAXCTX + s;
             vec4 score4 = vec4(0.0);
             for (uint d = 0; d < HEAD_DIM / 4; d++) {
-                uint b = base + d * 4;
-                vec2 k01 = unpackHalf2x16(uint(key[b]) | (uint(key[b+1]) << 16));
-                vec2 k23 = unpackHalf2x16(uint(key[b+2]) | (uint(key[b+3]) << 16));
+                uint b = base + d * 4 * MAXCTX;
+                vec2 k01 = unpackHalf2x16(uint(key[b]) | (uint(key[b + MAXCTX]) << 16));
+                vec2 k23 = unpackHalf2x16(uint(key[b + 2 * MAXCTX]) | (uint(key[b + 3 * MAXCTX]) << 16));
                 vec4 kv = vec4(k01.x, k01.y, k23.x, k23.y);
                 score4 += q_shared[d] * kv;
             }

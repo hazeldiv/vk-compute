@@ -85,11 +85,13 @@ void serverMain(int argc, char** argv) {
     const char* dumpDir = argval(argc, argv, "--dump", NULL);
     int dumpLayers = atoi(argval(argc, argv, "--dump-layers", "0"));
     int verboseWeights = argflag(argc, argv, "--verbose-weights");
+    int timing = argflag(argc, argv, "--timing");
     if (maxNew < 1) maxNew = 1;
 
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 
+    if (timing) setTimingEnabled(1);
     session s = createSession();
     generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK, weightDir, vocabHead, vocabEmbed, eos, maxCtx, verboseWeights);
     if (dumpDir != NULL) {
@@ -120,4 +122,5 @@ void serverMain(int argc, char** argv) {
     free(prompt);
     destroyGenerator(g);
     destroySession(s);
+    if (timing) closeTimingLog();
 }
