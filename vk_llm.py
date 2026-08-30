@@ -87,8 +87,8 @@ def apply_chat_template(llm, messages, system="", enable_thinking=True):
     return llm.tokenizer.encode("".join(parts), add_special_tokens=False).ids
 
 
-def tokenize(llm, text):
-    return apply_chat_template(llm, [{"role": "user", "content": text}], system="You are a helpful assistant.")
+def tokenize(llm, text, thinking):
+    return apply_chat_template(llm, [{"role": "user", "content": text}], system="You are a helpful assistant.", enable_thinking=thinking)
 
 
 def detokenize(llm, token_ids):
@@ -121,17 +121,17 @@ def close(llm):
 
 
 def _main():
-    max_ctx = int(sys.argv[2]) if len(sys.argv) > 2 else 8192
-    vocab = sys.argv[3] if len(sys.argv) > 3 else None
-    text = sys.argv[4] if len(sys.argv) > 4 else "Hello, how are you?"
+    max_ctx = int(sys.argv[2]) if len(sys.argv) > 2 else 16384
+    vocab = sys.argv[3] if len(sys.argv) > 3 else "model/Qwen3.5-pruned-vocab"
+    text = sys.argv[4] if len(sys.argv) > 4 else None
+    if text is None: return
     weight_dir = sys.argv[1] if len(sys.argv) > 1 else "model/Qwen3.5-9B-weight"
+    thinking = sys.argv[5] if len(sys.argv) > 5 else "none"
 
-    llm = start_llm(weight_dir, max_ctx=max_ctx, vocab_weight=vocab)
-    ids = tokenize(llm, text)
+    llm = start_llm(weight_dir, max_ctx=max_ctx, vocab_weight=vocab, max_new_tokens=16384)
+    ids = tokenize(llm, text, thinking == "thinking")
     out = generate(llm, ids)
     close(llm)
-    print("input tokens:", ids)
-    print("output tokens:", out)
     print(detokenize(llm, out))
 
 

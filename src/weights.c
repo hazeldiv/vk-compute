@@ -137,6 +137,15 @@ static cachedTensor* tensorLoadFile(const char* path, const char* name, QuantTyp
     return cacheStore(name, q, rows, cols, data, dataBytes, scale, zero, scaleCount);
 }
 
+static cachedTensor* cacheGet(const char* name, QuantType q, int rows, int cols) {
+    cachedTensor* ct = cacheFind(name, q);
+    if (ct != NULL) return ct;
+    int blocks = (cols + 255) / 256;
+    char path[160];
+    snprintf(path, sizeof(path), CACHE_DIR "/%s_%s.bin", name, quantSuffix(q));
+    return tensorLoadFile(path, name, q, rows, cols, blocks);
+}
+
 static cachedTensor* tensorBuild(const char* path, const char* name, QuantType q, int rows, int cols, float wscale, const float* mat) {
     int blocks = (cols + 255) / 256;
     int scaleCount = rows * blocks;
@@ -181,16 +190,12 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
     t.q = q;
     t.rows = rows;
     t.cols = cols;
-    int blocks = (cols + 255) / 256;
 
-    cachedTensor* ct = cacheFind(name, q);
+    cachedTensor* ct = cacheGet(name, q, rows, cols);
     if (ct == NULL) {
         char path[160];
         snprintf(path, sizeof(path), CACHE_DIR "/%s_%s.bin", name, quantSuffix(q));
-        ct = tensorLoadFile(path, name, q, rows, cols, blocks);
-        if (ct == NULL) {
-            ct = tensorBuild(path, name, q, rows, cols, wscale, mat);
-        }
+        ct = tensorBuild(path, name, q, rows, cols, wscale, mat);
     }
 
     t.data = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
@@ -441,14 +446,20 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n2, sizeof(n2), L, "self_attn.k_proj.weight");
             lname(n3, sizeof(n3), L, "self_attn.v_proj.weight");
             int cols = 0;
-            float* mat = buildQkvMatrix(&sf, n1, n2, n3, MODEL_K, &cols);
-            if (cols != MODEL_QKV_N) fatal("qkv projection width mismatch");
+            float* mat = NULL;
+            if (cacheGet(projName, q, MODEL_K, MODEL_QKV_N) == NULL) {
+                mat = buildQkvMatrix(&sf, n1, n2, n3, MODEL_K, &cols);
+                if (cols != MODEL_QKV_N) fatal("qkv projection width mismatch");
+            }
             w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_QKV_N, q, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "self_attn.o_proj.weight");
             const char* on[1] = {n1};
-            mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            mat = NULL;
+            if (cacheGet(outName, q, MODEL_K, MODEL_K) == NULL) {
+                mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            }
             w.out[L] = createTensor(s, outName, L, MODEL_K, MODEL_K, q, 1.0f, mat);
             free(mat);
         } else {
@@ -467,14 +478,20 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n4, sizeof(n4), L, "linear_attn.in_proj_b.weight");
             const char* pn[4] = {n1, n2, n3, n4};
             int cols = 0;
-            float* mat = buildEngineMatrix(&sf, pn, 4, MODEL_K, &cols);
-            if (cols != MODEL_PROJ_N) fatal("delta projection width mismatch");
+            float* mat = NULL;
+            if (cacheGet(projName, q, MODEL_K, MODEL_PROJ_N) == NULL) {
+                mat = buildEngineMatrix(&sf, pn, 4, MODEL_K, &cols);
+                if (cols != MODEL_PROJ_N) fatal("delta projection width mismatch");
+            }
             w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_PROJ_N, q, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "linear_attn.out_proj.weight");
             const char* on[1] = {n1};
-            mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            mat = NULL;
+            if (cacheGet(outName, q, MODEL_K, MODEL_K) == NULL) {
+                mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            }
             w.out[L] = createTensor(s, outName, L, MODEL_K, MODEL_K, q, 1.0f, mat);
             free(mat);
         }
@@ -488,19 +505,28 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             const char* gn[1] = {n1};
             int cols = 0;
             lname(n1, sizeof(n1), L, "mlp.gate_proj.weight");
-            float* mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
-            if (cols != MODEL_FFN_N) fatal("gate width mismatch");
+            float* mat = NULL;
+            if (cacheGet(gateName, f, MODEL_K, MODEL_FFN_N) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
+                if (cols != MODEL_FFN_N) fatal("gate width mismatch");
+            }
             w.gate[L] = createTensor(s, gateName, L, MODEL_K, MODEL_FFN_N, f, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "mlp.up_proj.weight");
-            mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
+            mat = NULL;
+            if (cacheGet(upName, f, MODEL_K, MODEL_FFN_N) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
+            }
             w.up[L] = createTensor(s, upName, L, MODEL_K, MODEL_FFN_N, f, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "mlp.down_proj.weight");
-            mat = buildEngineMatrix(&sf, gn, 1, MODEL_FFN_N, &cols);
-            if (cols != MODEL_K) fatal("down projection width mismatch");
+            mat = NULL;
+            if (cacheGet(downName, f, MODEL_FFN_N, MODEL_K) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, MODEL_FFN_N, &cols);
+                if (cols != MODEL_K) fatal("down projection width mismatch");
+            }
             w.down[L] = createTensor(s, downName, L, MODEL_FFN_N, MODEL_K, f, 1.0f, mat);
             free(mat);
         }
