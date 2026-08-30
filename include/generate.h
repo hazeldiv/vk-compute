@@ -42,5 +42,6 @@ void generatorDumpPrefill(generator* g, int rows);
 void generatorSetDumpLayers(generator* g, int layers);
 void generatorDumpDecodeStep(generator* g, int step);
 void generatorSetSampling(generator* g, const sample_params* p, uint32_t seed);
+void generatorDumpSamplingDebug(generator* g, const uint32_t* generated, int nGen, int nPrompt);
 
 #endif

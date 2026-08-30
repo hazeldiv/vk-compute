@@ -455,7 +455,6 @@ static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, in
 static void buildLmHead(generator* g, operation* ops, int* n, buffer* input, int doIncrement, int passIdx) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
-
     if (g->sampling) {
         buffer lmBufs[] = {*input, w->lmHead, st->logits, w->gammaFinal};
         int pushL[] = {1, g->vocab, MODEL_K};
@@ -857,4 +856,30 @@ void generatorDumpDecodeStep(generator* g, int step) {
     dumpBuffer(g, st->h, name, MODEL_K);
     snprintf(name, sizeof(name), "decode_%02d_q", step);
     dumpBuffer(g, st->qOut, name, MODEL_K);
+}
+
+void generatorDumpSamplingDebug(generator* g, const uint32_t* generated, int nGen, int nPrompt) {
+    uint32_t* hist = (uint32_t*)malloc(sizeof(uint32_t) * (size_t)MAX_PENALTY_LEN);
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.sampleHistory, hist);
+    uint32_t gpuPos = stateReadPosition(g->s, &g->st);
+
+    fprintf(stderr, "[dbg-sampling] nPrompt=%d nGen=%d hostNextPos=%u gpuPosition=%u\n",
+            nPrompt, nGen, (unsigned)g->nextPos, (unsigned)gpuPos);
+
+    int sentinel = 0;
+    for (int i = 0; i < MAX_PENALTY_LEN; i++) {
+        if (hist[i] == 0xFFFFFFFFu) sentinel++;
+    }
+    fprintf(stderr, "[dbg-sampling] history %d/%d sentinel slots\n", sentinel, MAX_PENALTY_LEN);
+    for (int i = 0; i < MAX_PENALTY_LEN; i++) {
+        if (hist[i] != 0xFFFFFFFFu) {
+            fprintf(stderr, "[dbg-sampling]   slot[%d]=%u\n", i, (unsigned)hist[i]);
+        }
+    }
+
+    fprintf(stderr, "[dbg-sampling] generated tokens:\n");
+    for (int i = 0; i < nGen; i++) {
+        fprintf(stderr, "[dbg-sampling]   tok[%d]=%u\n", i, (unsigned)generated[i]);
+    }
+    free(hist);
 }

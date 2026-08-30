@@ -68,10 +68,10 @@ vk-compute/
 └── shader/
     ├── Utility/                # shared matmul primitives
     │   ├── FP16/ INT8/ INT4/   # GEMV-*, GEMV-ADD-*, GEMV-SplitK-*, GEMM-*, GEMM-ADD2-*,
-    │   │                       # RmsNorm-GEMV-*, LMHead-GEMV-ArgMax-*
+    │   │                       # RmsNorm-GEMV-*, LMHead-GEMV-ArgMax-*, LMHead-GEMV-FP16-*
     │   ├── RmsNorm-Prologue.comp        # invRms prologue (used by all GEMM2 kernels)
     │   ├── Reduce-GEMV-ADD.comp         # split-K reduce + residual add
-    │   └── ArgMax-Reduce.comp           # final argmax over per-workgroup maxes
+    │   └── ArgMax-Reduce.comp           # token selection: greedy argmax or full-logits sampler
     ├── Full-Attention/         # QKV projection + RoPE + full attention
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-* (legacy fused), RmsNorm-QKV-SplitK-*, Reduce-Rope-*
     │   ├── FP16/ INT8/ INT4/   # RmsNorm-QKV-GEMM2-* + Rope-GEMM-* (prefill, split passes)
@@ -190,7 +190,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - GEMM2 prefill kernels: `RmsNorm-swiglu-flat-GEMM2-*` `{M, N, K, off}` (off = FFN gate/up boundary for `upHalf` routing); `RmsNorm-swiglu-ffn-GEMM2-*` / `RmsNorm-LinearProj-GEMM2-*` / `GEMM-ADD2-*` `{M, N, K}`; `RmsNorm-Prologue` `{K}`.
 - GatedDeltaNet: `{M}` (GEMM) or `{N_V, N_QK, DIM}` (decode).
 - Conv-SiLU: `{M}` (tokens in the chunk).
-- LM head argmax: `{M, N, K}` (M=1, N=vocab) for the GEMV-ArgMax pass; `{vocabSize, doIncrement, passIdx}` for ArgMax-Reduce (doIncrement=1 bumps the position buffer by 1 after a generated token; passIdx tags the write slot for the double-buffered decode groups).
+- LM head: `{M, N, K}` (M=1, N=vocab) for the `LMHead-GEMV-*` pass (`GEMV-ArgMax-FP16` when greedy, `GEMV-FP16` writing raw `logits` when sampling); `{vocabSize, doIncrement, passIdx, mode}` for `ArgMax-Reduce` (`mode` = 0 greedy / 1 sampler; doIncrement=1 bumps the position buffer by 1; passIdx tags the write slot for the double-buffered decode groups).
 - Embed-Gather: `{V}` (vocab stride of the tied lm head). Embed-RmsNorm-LinearProj GEMV/GEMM: `{M, N, K, V}` (V = vocab size, selects the lm-head column used as the embedding).
 - Split-K decode reduce passes: `Reduce-GEMV-ADD` `{N, chunks}` (N = K, chunks = 4); `Reduce-LinearProj` `{N}`; `Reduce-Att2` / `Reduce-Rope` no push constants (N from geometry).
 
@@ -208,7 +208,7 @@ void transpose_block16(const uint8_t* input, uint8_t* output, int M, int N, int 
 - Split-K decode GEMVs: `dispatchX = N/256`, `dispatchY = 4` (K split over 4 workgroups).
 - GatedDeltaNet GEMM: `dispatchX = n_v = 32`, one workgroup per v-head.
 - Conv-SiLU: `dispatchX = 8192/256 = 32`, one thread per qkv channel (each thread shifts its own 3-slot history over the M tokens, no barriers).
-- LMHead-GEMV-ArgMax: `dispatchX = (vocab+255)/256`; ArgMax-Reduce: single workgroup.
+- LMHead-GEMV-{ArgMax,FP16}: `dispatchX = (vocab+255)/256`; ArgMax-Reduce: single workgroup (both greedy and sampling modes).
 
 ### 4.7 Real weight loading (src/safetensors.c + src/weights.c)
 
@@ -507,67 +507,31 @@ void main() {
 
 **How it works:** the GEMV loop is identical to `GEMV-FP16` (ping-pong `Asub`, 2 vec4 k-rows per `uvec4` weight load). Out-of-range threads (`globalCol >= N`, partial last workgroup) skip the compute but still execute every barrier, and carry `-inf` (`uintBitsToFloat(0xFF800000u)`) so they can never win the reduction. Then a shared tree reduction over 256 threads finds the max logit and its column; ties resolve to the **smaller index** for determinism. Thread 0 writes the workgroup's winner to `maxValue[wgID]` / `maxIndex[wgID]` (fp32 value + global column index).
 
-#### `ArgMax-Reduce.comp` (second stage, precision-agnostic)
+A sampling sibling `LMHead-GEMV-FP16.comp` (§7.7) is the same RMSNorm→GEMV but skips the reduction and writes the raw logit per column to a `logits[1..vocab]` buffer; `buildLmHead` picks one or the other from `g->sampling`.
 
-One workgroup of 256 threads reduces the per-workgroup winners from the first pass to a single token id. Bindings: `0 = maxValue (float[])`, `1 = maxIndex (uint[])`, `2 = result (uint[])`, `3 = position (uint[])`; push constant `{vocabSize, doIncrement}`; `dispatchX = 1`. Full source:
+#### `ArgMax-Reduce.comp` (second stage — greedy argmax or full-logits sampler)
 
-```glsl
-#version 450
-#define TS 256
+One workgroup of 256 threads, selected by a `mode` push constant over 9 storage-buffer bindings. Push constants are now `{vocabSize, doIncrement, passIdx, mode}`; `dispatchX = 1`. Bindings:
 
-layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+- `0 = maxValue (float[])`, `1 = maxIndex (uint[])` — per-group winners from `LMHead-GEMV-ArgMax` (used only by `mode == 0`).
+- `2 = logits (float[], read+write)` — full logit vector from `LMHead-GEMV-FP16` (used only by `mode == 1`).
+- `3 = sampleParams` — std430 block `{temperature, repPenalty, penaltyLength, topK, topP}` (host-written per request).
+- `4 = history (uint[], read+write)` — repetition-penalty ring of the last `penaltyLength` sampled ids, sentinel-filled per request.
+- `5 = rng (uint[], read+write)` — 1-element xorshift32 state, seeded host-side and advanced on-GPU per sample.
+- `6 = result (uint[])`, `7 = position (uint[])`, `8 = tokenIds (uint[])` (in/out as in the greedy path).
 
-layout(push_constant) uniform Params {
-    uint vocabSize;
-    uint doIncrement;
-} params;
+**`mode == 0` (greedy).** `numGroups = ceil(vocabSize/256)` (= 320 for vocab 81920); each thread strided-loads `maxValue[i]`/`maxIndex[i]` (`i += TS`), keeping the running best with a smallest-index tie-break, then one shared tree reduction; thread 0 writes `result[passIdx]` and `tokenIds[0]`, and bumps `position` when `doIncrement == 1` — the single per-token position update, kept out of any per-layer shader so N layers can never bump it N×.
 
-layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
-layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
-layout(set = 0, binding = 2) writeonly restrict buffer ResultBuffer { uint result[]; };
-layout(set = 0, binding = 3) buffer PositionBuffer { uint position[]; };
+**`mode == 1` (sampling).** A single-dispatch sampler over the full `logits` vector, where each thread owns `ceil(vocab/256)` contiguous tokens and phases are separated by `barrier()`:
 
-shared float redValue[TS];
-shared uint redIndex[TS];
+1. Load `sampleParams`; copy `history[0..penaltyLength)` into shared.
+2. Transform in place: `a = logit / temperature`; for ids present in the history, apply CTRL logit scaling `a = (a > 0) ? a/repPenalty : a*repPenalty`; track min/max; reduce to softmax max `gMax` and full denominator `Zall`.
+3. Top-k (if `topK > 0`): 48-iteration binary search over `[min, max]` for the k-th-largest threshold (parallel count + reduction).
+4. Top-p (if `topP < 1`): 48-iteration binary search over the surviving mass for the nucleus threshold (parallel weighted sum).
+5. Recompute the kept-set mass; per-thread block masses → exclusive prefix (`cumBase`); draw `u = xorshift32(rng[0]) ∈ [0,1)`; pick the token whose cumulative mass first exceeds `u`.
+6. Thread 0 writes `result[passIdx]` + `tokenIds[0]`, appends the id to `history[position % penaltyLength]`, advances `rng[0] = xorshift32(seed)`, and bumps `position` when `doIncrement`.
 
-void main() {
-    uint tid = gl_LocalInvocationID.x;
-    uint numGroups = (params.vocabSize + TS - 1) / TS;
-
-    float bestValue = uintBitsToFloat(0xFF800000u);
-    uint bestIndex = 0;
-
-    for (uint i = tid; i < numGroups; i += TS) {
-        float v = maxValue[i];
-        uint idx = maxIndex[i];
-        if (v > bestValue || (v == bestValue && idx < bestIndex)) {
-            bestValue = v;
-            bestIndex = idx;
-        }
-    }
-
-    redValue[tid] = bestValue;
-    redIndex[tid] = bestIndex;
-    barrier();
-    for (uint stride = TS/2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            float otherValue = redValue[tid + stride];
-            uint otherIndex = redIndex[tid + stride];
-            if (otherValue > redValue[tid] || (otherValue == redValue[tid] && otherIndex < redIndex[tid])) {
-                redValue[tid] = otherValue;
-                redIndex[tid] = otherIndex;
-            }
-        }
-        barrier();
-    }
-    if (tid == 0) {
-        result[0] = redIndex[0];
-        if (params.doIncrement == 1u) position[0] = position[0] + 1u;
-    }
-}
-```
-
-**How it works:** `numGroups = ceil(vocabSize/256)` (= 320 for vocab 81920); each thread strided-loads `maxValue[i]`/`maxIndex[i]` in chunks of 256 (`i += TS` loop), keeping the running best with the same smallest-index tie-break, then one shared tree reduction; thread 0 writes the final token id to `result[0]` and, when `doIncrement == 1` (decode), increments the shared position buffer by exactly one — the single per-token position update, kept out of any per-layer shader so N layers can never bump it N×. Both shaders are chained as two `operation`s in one `execute()` call (the dispatch harness inserts a write→read barrier between ops).
+`buildLmHead` chains `LMHead-GEMV-ArgMax-FP16` + `ArgMax-Reduce(mode 0)` for greedy, or `LMHead-GEMV-FP16` + `ArgMax-Reduce(mode 1)` for sampling (§7.7); both write the same `result`/`tokenIds`/`position` outputs, so `generateTokens` is unchanged between the two.
 
 ---
 
@@ -1167,6 +1131,26 @@ Whole-attention cost dropped 48.7 s → ~10.4 s for a 16k prompt (QK2 ≈ 8.2 s,
 - **`RmsNorm-LinearProj-SplitK-*` + `Reduce-LinearProj.comp`**: split-K proj to `st->linprojPartial`; reduce routes the 12352 columns into the six q/k/v/z/a/b output buffers.
 - **`Att-SplitK2-*` + `Reduce-Att2.comp`** (decode attention, ctx ≥ 256): `Att-SplitK2` splits the KV sequence into up to `MAXC = 128` chunks of 4 KV-tiles (LOOPS=4, 64-token tiles); each workgroup runs an online-softmax over its chunk and writes `{max, sum, acc[HEAD_DIM]}` per (chunk, head) into `st->attPartial`; `Reduce-Att2` re-normalizes across chunks (`w = exp(P[ml*2] - m)`). The QK dot reads the **transposed** K cache (`key[(kv_row_base + d)·MAXCTX + s]`, coalesced across `s` = token), while the P·V pass reads V token-major. Below 256 tokens the engine uses `Att-full-*` (single workgroup, online softmax, §7.2).
 
+### 7.7 Token selection — greedy vs sampling
+
+Token selection is a two-op chain built by `buildLmHead` (`src/generate.c`), threaded through both the decode groups and the prefill `finalOps`:
+
+- **Stage 1** — `LMHead-GEMV-ArgMax-FP16.spv` (greedy) or `LMHead-GEMV-FP16.spv` (sampling): the same RMSNorm → `x·lm_head` GEMV over `vocab` columns. The argmax variant reduces to per-workgroup `{maxValue, maxIndex}`; the sampling variant instead writes raw `logits[col]` into a new `st->logits` device buffer (`vocab × float`, ~320 KB).
+- **Stage 2** — `ArgMax-Reduce.spv`, with `mode = g->sampling` (§7.1). Both modes write `result[passIdx]` + `tokenIds[0]` and own the single per-token `position` bump, so the rest of `generateTokens` is identical.
+
+`generatorSetSampling(g, params, seed)` (called per request from `serverMain`) sets `g->sampling = (temperature > 0)` and, whenever that flips, recompiles `groupOps`/`groupOpsShort`/`finalOps` with the matching lm-head chain. Sampling parameters:
+
+| Param | Destination | Meaning |
+|---|---|---|
+| `temperature` | `sampleParams.temperature` | `<= 0` → greedy; `> 0` → softmax scaling factor |
+| `rep_penalty` | `sampleParams.repPenalty` | CTRL logit scaling for ids in the recent window (`1.0` = off) |
+| `penalty_len` | `sampleParams.penaltyLength` | history ring length (`0` = off) |
+| `top_k` | `sampleParams.topK` | keep only the k largest logits (`0` = off) |
+| `top_p` | `sampleParams.topP` | nucleus mass (`1.0` = off) |
+| `seed` | `sampleRng[0]` | xorshift32 seed, reseeded per request |
+
+The repetition-penalty ring `sampleHistory` is a device buffer of `MAX_PENALTY_LEN = 1024` `uint32`, sentinel-filled (`0xFFFFFFFF`) in `resetGenerator`; empty slots never match a vocab id. The Python frontend (`vk_llm.py`) drives all this via module-level constants — `is_sampling`, `temperature`, `rep_penalty`, `penalty_len`, `top_k`, `top_p`, `seed` — and `_stream_ids` writes them as a fixed 24-byte header (`struct.pack("<ffIIfI", …)`) between the length prefix and the token ids; `is_sampling == False` sends `temperature = 0.0` (greedy).
+
 ---
 
 ## 8. Inference Engine (src/generate.c)
@@ -1196,12 +1180,14 @@ The prompt is processed in chunks of `MODEL_PREFILL_CHUNK` (512) tokens:
 - The op lists are **double-buffered**: while group `u` executes, group `u+1` is recorded (the current token is written into `tokenIds[0]` after each group's result readback). Two separate op arrays (`groupOps` vs a shadow copy compiled with `passIdx`-tagged lm-head write slots) are alternated each iteration.
 - **Token pacing.** The GPU produces tokens in groups of `DECODE_GROUP = 4`, but `generateTokens` emits them **one at a time** through `emit`, sleeping between consecutive tokens of a group. The inter-token delay is the measured per-token time of the *previous* group (`(t1−t0)/cur`, QPC-timed around the group's wait + readback); the very first group uses a constant `FIRST_TOKEN_DELAY_MS = 25` ms. This makes the server's output stream look like per-token generation rather than 4-token bursts.
 - `resetGenerator(g)` re-zeroes the 24 gated-delta `stateS` recurrence buffers **and** the 24 `convHist` shift registers (`createTransferAndCopy` re-copies their still-zero staging buffers) and resets `nextPos = 0`, so each server request is an independent full prompt.
-- `serverMain` (compute.c) sets binary stdio (`_setmode`), parses `--weights/--vocab-head/--vocab-embed/--eos/--max-ctx/--max-new/--verbose-weights/--timing`, creates the session+generator once, then loops: read `n` prompt ids → `resetGenerator` → `generateTokens(..., emitToken, ...)`, where `emitToken` writes each `uint32` id + `fflush(stdout)` as it is produced; when generation ends it writes a `0xFFFFFFFF` terminator. The loop exits on `n == 0`.
+- `serverMain` (compute.c) sets binary stdio (`_setmode`), parses `--weights/--vocab-head/--vocab-embed/--eos/--max-ctx/--max-new/--verbose-weights/--timing/--debug-sampling`, creates the session+generator once, then loops per request: read `n` prompt-id count → read a fixed 24-byte sampling header (`temperature, repPenalty, penaltyLength, topK, topP, seed`, `<ffIIfI`) → read the `n` ids → `generatorSetSampling(g, &sp, seed)` → `resetGenerator` → `generateTokens(..., emitToken, ...)`. `emitToken` writes each `uint32` id + `fflush(stdout)`; when generation ends it writes a `0xFFFFFFFF` terminator. The loop exits on `n == 0`.
 - The group's `ArgMax-Reduce` increments the shared position buffer once per token (`doIncrement = 1`); prefill never touches it on the GPU (`runPrefill` sets it host-side after the last chunk), and the lm-head final pass runs with `doIncrement = 0` — together these keep the position counter correct across the prefill→decode transition (see gotcha 8).
 
 ### 8.4 Timing log
 
 The dispatch layer retains per-op timestamp logging (`logFrame`/`logLastFrame` and the `timing_agg`/`timing_log.txt` machinery in `dispatch.c`), gated by `setTimingEnabled`. It is wired to the **`--timing` CLI flag**: `serverMain` calls `setTimingEnabled(1)` at startup and `closeTimingLog()` at shutdown, which writes `timing_log.txt` (into the server's cwd, `bin/`). The decode loop additionally calls `logLastFrame(..., "decode", ...)` after each group's `executeWaitLast`, so per-op decode timings are logged too, and prints a per-group `[decode][tok=…] group=4  X.XXX ms/tok` line to stderr whenever timing is enabled (`isTimingEnabled()`). Without `--timing` the decode loop runs with no per-op logging overhead.
+
+A separate `--debug-sampling` flag (`generatorDumpSamplingDebug`) reads back the `sampleHistory` ring, `stateReadPosition`, and the emitted token list after each request and prints them to stderr, for diagnosing the repetition-penalty / sampler state (§7.7).
 
 ---
 
@@ -1292,7 +1278,9 @@ uv pip install --python .venv/Scripts/python.exe tokenizers   # once
 .venv/Scripts/python.exe vk_llm.py <weight_dir> <max_ctx> [<custom_vocab_dir>] ["prompt text"]
 ```
 
-`vk_llm.py` exposes `start_llm(weight_dir, max_ctx, vocab_weight=None, max_new_tokens, dump_dir=None, dump_layers=0)`, `apply_chat_template(messages, enable_thinking=True)`, `tokenize`, `generate`, `generate_stream`, `detokenize`, `close`. `tokenize(text)` wraps the text in the **Qwen3.5 chat template** — `<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n thinking\n` (thinking mode) — so prompts are formatted as chat turns rather than raw completions. `vocab_weight=None` uses the full 248320 vocab (tokenizer + shard lm-head/embed); a custom vocab dir (e.g. `model/Qwen3.5-pruned-vocab`) selects the pruned tokenizer and the `lm_head.*.safetensors`/`embed_tokens.*.safetensors` discovered in `weight_dir`. EOS = the tokenizer's `<|im_end|>` id (81896 pruned / 248046 full).
+`vk_llm.py` exposes `start_llm(weight_dir, max_ctx, vocab_weight=None, max_new_tokens, dump_dir=None, dump_layers=0, debug_sampling=False)`, `apply_chat_template(messages, enable_thinking=True)`, `tokenize`, `generate`, `generate_stream`, `detokenize`, `close`. `tokenize(text)` wraps the text in the **Qwen3.5 chat template** — `<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n thinking\n` (thinking mode) — so prompts are formatted as chat turns rather than raw completions. `vocab_weight=None` uses the full 248320 vocab (tokenizer + shard lm-head/embed); a custom vocab dir (e.g. `model/Qwen3.5-pruned-vocab`) selects the pruned tokenizer and the `lm_head.*.safetensors`/`embed_tokens.*.safetensors` discovered in `weight_dir`. EOS = the tokenizer's `<|im_end|>` id (81896 pruned / 248046 full).
+
+**Sampling** is opt-in and configured by module-level constants near the top of `vk_llm.py` — `is_sampling`, `temperature`, `rep_penalty`, `penalty_len`, `top_k`, `top_p`, `seed`. With `is_sampling = False` (default/greedy) the request sends `temperature = 0.0`; with `is_sampling = True` it sends the constants and the backend runs the sampler (§7.7). These are consumed by `_stream_ids`, so `generate`/`generate_stream` take only `(llm, token_ids)`.
 
 Generation streams: `generate_stream(llm, ids)` yields **incremental decoded text** (reads token ids from the stream until the `0xFFFFFFFF` sentinel, accumulates them, and yields the new tail of `tokenizer.decode(...)` at each step), while `generate(llm, ids)` returns the full token-id list (used by tests / `detokenize`). The `_main()` CLI driver prints text incrementally (`print(..., end="", flush=True)`) and, after generation, reports **`N tokens, X.X tokens/s`** (timing measured host-side per token after the first 4).
 
@@ -1327,7 +1315,8 @@ This fits arithmetically but overflows at runtime — fragmentation from ~450 di
 4. **(Resolved — no-op)** Qwen3.5 applies no final logit scaling: `logits = lm_head(rmsnorm(x))`, verified against the reference.
 5. **(Resolved)** Full-attention fidelity: `q_proj` q/g interleave (`buildQkvMatrix`), the GQA 16-head mapping (gotcha 25), and the `1/√head_dim` QK scaling are all applied. `vk_llm.py` now applies the Qwen3.5 **chat template** (thinking mode) via `apply_chat_template`.
 6. **VRAM OOM** (§12) blocks a full end-to-end generation on the 8 GB card at `max_ctx = 32768`.
-7. **(Resolved) End-to-end correctness, prefill and decode.** The engine now produces coherent, correct output against the real 9B weights in both thinking and non-thinking modes ("why the sky is blue?" → Rayleigh-scattering explanation, "2+2" → "4", "name a color" → "Blue"). A layer-by-layer differential (`--dump` + `cmp_layers.py`, run under `tools/pruner/.venv`) shows all 32 prefill layers tracking the HF reference at 0.96–0.9999 cosine correlation, and the decode trajectory matches the pruned-vocab-constrained HF greedy exactly, token-for-token. Eight bugs were fixed across prefill and decode (gotchas 27–32): the headline prefill bug was the full-attention output gate (`sigmoid` vs `silu`, gotcha 27), and the headline decode bug was `Att-full-{INT8,INT4}` dequantizing V with K's scale/zero (gotcha 31). The chat-template ` thinking` token fix (gotcha 32) was what finally enabled thinking-mode output. No sampling/temperature is applied — pure greedy argmax, matching the HF greedy reference.
+7. **(Resolved) End-to-end correctness, prefill and decode.** The engine now produces coherent, correct output against the real 9B weights in both thinking and non-thinking modes ("why the sky is blue?" → Rayleigh-scattering explanation, "2+2" → "4", "name a color" → "Blue"). A layer-by-layer differential (`--dump` + `cmp_layers.py`, run under `tools/pruner/.venv`) shows all 32 prefill layers tracking the HF reference at 0.96–0.9999 cosine correlation, and the decode trajectory matches the pruned-vocab-constrained HF greedy exactly, token-for-token. Eight bugs were fixed across prefill and decode (gotchas 27–32): the headline prefill bug was the full-attention output gate (`sigmoid` vs `silu`, gotcha 27), and the headline decode bug was `Att-full-{INT8,INT4}` dequantizing V with K's scale/zero (gotcha 31). The chat-template ` thinking` token fix (gotcha 32) was what finally enabled thinking-mode output. Greedy argmax remains the default and still matches the HF greedy reference; an optional sampling path (temperature / repetition penalty / top-k / top-p) is available (§7.7).
 8. **(Resolved) Streaming output + per-token pacing.** The server now emits token ids one at a time (with an `0xFFFFFFFF` terminator) instead of an `[m][ids]` burst, and `generateTokens` — whose GPU side still computes `DECODE_GROUP = 4` tokens per pass — simulates per-token cadence by sleeping between the 4 emitted tokens of a group (delay = the previous group's measured per-token time; first group constant 25 ms). `vk_llm.py`'s `generate_stream` yields decoded text incrementally and the CLI prints `N tokens, X.X tokens/s`. Weight loading prints a single stderr progress bar / spinner by default; the old per-tensor (and KV-cache allocation) lines are gated behind `--verbose-weights`.
 9. **(Resolved) Decode attention K-cache transpose.** The K cache was stored token-major (`[token][row]`), so the decode QK dot (`Att-SplitK2`/`Att-full`) read K in an uncoalesced, 1024-strided gather. Transposing K to dim-major (`kCache[row·MAXCTX + token]`) across the writers (`Rope-GEMM`, `Reduce-Rope`) and readers (`Att-QK2`, `Att-full`, `Att-SplitK2`), while leaving V token-major, coalesces those reads. Measured ~3× faster decode attention (`Att-SplitK2` per-call avg 0.901→0.337 ms FP16 and 0.689→0.219 ms INT8/INT4 at 4k ctx); the prefill `Att-QK2` B-load became coalesced too. The `--timing` CLI flag (plus `isTimingEnabled()`) drives the §8.4 per-op log, added to measure this.
 10. **MTP and vision tensors are ignored** (text-only baseline).
+11. **(Resolved) Sampling — temperature / repetition penalty / top-k / top-p.** `ArgMax-Reduce` was extended into a `mode`-selected sampler over a new full-logits buffer (§7.7), with a per-request `sampleParams` block, a sentinel-filled repetition-penalty ring (`sampleHistory`), and an on-GPU xorshift32 RNG (`sampleRng`). `g->sampling = (temperature > 0)`; greedy (`mode 0`) is byte-identical to the prior behavior. Sampling is opt-in from Python via module constants (`is_sampling`, `temperature`, `rep_penalty`, `penalty_len`, `top_k`, `top_p`, `seed`), and a `--debug-sampling` flag dumps the history ring / position / generated tokens for diagnostics.

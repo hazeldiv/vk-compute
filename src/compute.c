@@ -69,8 +69,13 @@ void memInfo(void) {
     destroySession(s);
 }
 
+static int dbgSampling = 0;
+static uint32_t dbgGen[16384];
+static int dbgCount = 0;
+
 static void emitToken(uint32_t token, void* ctx) {
     (void)ctx;
+    if (dbgSampling && dbgCount < 16384) dbgGen[dbgCount++] = token;
     fwrite(&token, sizeof(uint32_t), 1, stdout);
     fflush(stdout);
 }
@@ -86,6 +91,7 @@ void serverMain(int argc, char** argv) {
     int dumpLayers = atoi(argval(argc, argv, "--dump-layers", "0"));
     int verboseWeights = argflag(argc, argv, "--verbose-weights");
     int timing = argflag(argc, argv, "--timing");
+    dbgSampling = argflag(argc, argv, "--debug-sampling");
     if (maxNew < 1) maxNew = 1;
 
     _setmode(_fileno(stdin), _O_BINARY);
@@ -126,7 +132,9 @@ void serverMain(int argc, char** argv) {
 
         generatorSetSampling(g, &sp, seed);
         resetGenerator(g);
+        dbgCount = 0;
         generateTokens(g, prompt, (int)n, maxNew, emitToken, NULL);
+        if (dbgSampling) generatorDumpSamplingDebug(g, dbgGen, dbgCount, (int)n);
         uint32_t sentinel = 0xFFFFFFFFu;
         fwrite(&sentinel, sizeof(uint32_t), 1, stdout);
         fflush(stdout);
