@@ -4945,6 +4945,222 @@ void validateLmHeadArgMaxFP16(session s, int vocabSize, int K, float* input, flo
     free(xn);
 }
 
+static uint32_t xorshift32_ref(uint32_t x) {
+    x ^= x << 13u;
+    x ^= x >> 17u;
+    x ^= x << 5u;
+    return x;
+}
+
+typedef struct {
+    double a;
+    double p;
+} sampler_pair;
+
+static int sampler_pair_desc(const void* pa, const void* pb) {
+    double da = ((const sampler_pair*)pa)->a;
+    double db = ((const sampler_pair*)pb)->a;
+    if (da > db) return -1;
+    if (da < db) return 1;
+    return 0;
+}
+
+static uint32_t sampler_ref(float* logits, int V, const sample_params* sp, uint32_t* history, uint32_t* pos, uint32_t* rng, uint32_t acceptTok, double tol, int* tolOut) {
+    int penLen = (int)sp->penaltyLength;
+    if (penLen > MAX_PENALTY_LEN) penLen = MAX_PENALTY_LEN;
+    double* a = (double*)malloc(sizeof(double) * V);
+    double* p = (double*)malloc(sizeof(double) * V);
+    unsigned char* seen = (unsigned char*)calloc(V, 1);
+    for (int j = 0; j < V; j++) a[j] = (double)logits[j] / (double)sp->temperature;
+    if (penLen > 0 && sp->repPenalty != 1.0f) {
+        for (int h = 0; h < penLen; h++) {
+            uint32_t id = history[h];
+            if (id < (uint32_t)V && !seen[id]) {
+                seen[id] = 1;
+                a[id] = (a[id] > 0.0) ? (a[id] / (double)sp->repPenalty) : (a[id] * (double)sp->repPenalty);
+            }
+        }
+    }
+
+    double mx = -1e300;
+    for (int j = 0; j < V; j++) if (a[j] > mx) mx = a[j];
+    for (int j = 0; j < V; j++) {
+        p[j] = exp(a[j] - mx);
+        logits[j] = (float)p[j];
+    }
+
+    sampler_pair* arr = (sampler_pair*)malloc(sizeof(sampler_pair) * V);
+    for (int j = 0; j < V; j++) {
+        arr[j].a = a[j];
+        arr[j].p = p[j];
+    }
+    qsort(arr, V, sizeof(sampler_pair), sampler_pair_desc);
+
+    int topK = (int)sp->topK;
+    if (topK > V) topK = V;
+    double thrL = -1e300;
+    int kept = V;
+    if (topK > 0) {
+        thrL = arr[topK - 1].a;
+        kept = 0;
+        while (kept < V && arr[kept].a >= thrL) kept++;
+    }
+
+    if (sp->topP < 1.0f && sp->topP > 0.0f) {
+        double Zk = 0.0;
+        for (int i = 0; i < kept; i++) Zk += arr[i].p;
+        double target = (double)sp->topP * Zk;
+        double acc = 0.0;
+        int i = 0;
+        for (; i < kept; i++) {
+            acc += arr[i].p;
+            if (acc >= target) break;
+        }
+        if (i >= kept) i = kept - 1;
+        thrL = arr[i].a;
+        kept = 0;
+        while (kept < V && arr[kept].a >= thrL) kept++;
+    }
+
+    double Zkept = 0.0;
+    for (int i = 0; i < kept; i++) Zkept += arr[i].p;
+
+    uint32_t s = *rng;
+    if (s == 0u) s = 0x9E3779B9u;
+    double u = (double)(s >> 8) / 16777216.0;
+    double target = u * Zkept;
+    double acc = 0.0;
+    uint32_t chosen = 0;
+    int found = 0;
+    double qLo = -1.0;
+    double qHi = -1.0;
+    for (int j = 0; j < V; j++) {
+        if (a[j] >= thrL) {
+            if ((uint32_t)j == acceptTok) {
+                qLo = acc;
+                qHi = acc + p[j];
+            }
+            acc += p[j];
+            if (!found) {
+                chosen = (uint32_t)j;
+                if (target < acc) found = 1;
+            }
+            if (found && (uint32_t)j >= acceptTok) break;
+        }
+    }
+    if (!found) {
+        for (int j = V - 1; j >= 0; j--) {
+            if (a[j] >= thrL) { chosen = (uint32_t)j; break; }
+        }
+    }
+    if (tolOut != NULL) *tolOut = 0;
+    if (acceptTok != 0xFFFFFFFFu && acceptTok != chosen && qLo >= 0.0) {
+        double dist = target > qHi ? target - qHi : (target < qLo ? qLo - target : 0.0);
+        if (dist <= tol * Zkept) {
+            chosen = acceptTok;
+            if (tolOut != NULL) *tolOut = 1;
+        }
+    }
+
+    if (penLen > 0) history[*pos % (uint32_t)penLen] = chosen;
+    *rng = xorshift32_ref(s);
+    *pos = *pos + 1u;
+
+    free(a);
+    free(p);
+    free(seen);
+    free(arr);
+    return chosen;
+}
+
+void validateArgMaxSampler(session s, int vocabSize) {
+    int numGroups = (vocabSize + 255) / 256;
+    int drawsPerCase = 3;
+    double uTol = 5e-4;
+
+    float* logitsHost = getData(777001, 1, vocabSize);
+    uint32_t* histInit = (uint32_t*)malloc(sizeof(uint32_t) * MAX_PENALTY_LEN);
+    for (int h = 0; h < MAX_PENALTY_LEN; h++) histInit[h] = 0xFFFFFFFFu;
+    for (int h = 0; h < 256; h++) {
+        histInit[h] = (uint32_t)((h * 4099 + 17) % vocabSize);
+        if ((h & 7) == 3) histInit[h] = histInit[h - 1];
+        if ((h & 31) == 5) histInit[h] = 0xFFFFFFFFu;
+    }
+
+    float* dummyMax = (float*)calloc(numGroups, sizeof(float));
+    uint32_t* dummyIdx = (uint32_t*)calloc(numGroups, sizeof(uint32_t));
+    uint32_t posInit = 7;
+    uint32_t rngInit = 0x2545F491u;
+    uint32_t resultVal = 0;
+    uint32_t tokenVal = 0;
+    sample_params spCase[2] = {{0.1f, 1.2f, 256u, 40u, 0.9f}, {0.1f, 1.0f, 0u, 0u, 1.0f}};
+    uint32_t rngSeed[2] = {0x2545F491u, 0x9E3779B9u};
+
+    buffer maxValueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dummyMax, sizeof(float) * numGroups, MEMORY_VRAM);
+    buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dummyIdx, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
+    buffer logitsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, logitsHost, sizeof(float) * vocabSize, MEMORY_VRAM);
+    buffer sampleParamsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &spCase[0], sizeof(sample_params), MEMORY_RAM);
+    buffer historyBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, histInit, sizeof(uint32_t) * MAX_PENALTY_LEN, MEMORY_VRAM);
+    buffer rngBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &rngInit, sizeof(uint32_t), MEMORY_RAM);
+    buffer resultBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &resultVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer posBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &posInit, sizeof(uint32_t), MEMORY_VRAM);
+    buffer tokenIdsBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, &tokenVal, sizeof(uint32_t), MEMORY_VRAM);
+    buffer bufs[] = {maxValueBuffer, maxIndexBuffer, logitsBuffer, sampleParamsBuffer, historyBuffer, rngBuffer, resultBuffer, posBuffer, tokenIdsBuffer};
+    createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 9);
+    free(dummyMax);
+    free(dummyIdx);
+
+    uint32_t* refHist = (uint32_t*)malloc(sizeof(uint32_t) * MAX_PENALTY_LEN);
+    memcpy(refHist, histInit, sizeof(uint32_t) * MAX_PENALTY_LEN);
+    uint32_t posRef = posInit;
+    uint32_t rngRef = rngSeed[0];
+
+    for (int c = 0; c < 2; c++) {
+        const char* name = c == 0 ? "ArgMax-Sampler-A" : "ArgMax-Sampler-B";
+        memcpy(sampleParamsBuffer.mappedMemory, &spCase[c], sizeof(sample_params));
+        rngRef = rngSeed[c];
+        memcpy(rngBuffer.mappedMemory, &rngRef, sizeof(uint32_t));
+        double ms = 0.0;
+
+        for (int d = 0; d < drawsPerCase; d++) {
+            operation op = {
+                .shader = "ArgMax-Reduce.spv",
+                .buffers = {maxValueBuffer, maxIndexBuffer, logitsBuffer, sampleParamsBuffer, historyBuffer, rngBuffer, resultBuffer, posBuffer, tokenIdsBuffer},
+                .bufferCount = 9,
+                .pushConstants = {vocabSize, 1, 0, 1},
+                .pushConstantCount = 4,
+                .dispatchX = 1, .dispatchY = 1, .dispatchZ = 1
+            };
+            ms += run_ops(s, &op, 1);
+            readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, resultBuffer, &resultVal);
+
+            int tol = 0;
+            uint32_t ref = sampler_ref(logitsHost, vocabSize, &spCase[c], refHist, &posRef, &rngRef, resultVal, uTol, &tol);
+            int match = (resultVal == ref);
+            printf("%s draw %d: shader= %u ref= %u match= %d%s\n", name, d, resultVal, ref, match, tol ? " (tolerance)" : "");
+        }
+        printf("%s time: %.3f ms\n", name, ms);
+    }
+
+    uint32_t posRead = 0;
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, posBuffer, &posRead);
+    printf("ArgMax-Sampler-pos: shader= %u ref= %u match= %d\n", posRead, posRef, posRead == posRef);
+
+    uint32_t* histRead = (uint32_t*)malloc(sizeof(uint32_t) * MAX_PENALTY_LEN);
+    readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, historyBuffer, histRead);
+    int histErr = 0;
+    for (int h = 0; h < MAX_PENALTY_LEN; h++) {
+        if (histRead[h] != refHist[h]) histErr++;
+    }
+    printf("ArgMax-Sampler-history: mismatches= %d\n", histErr);
+
+    destroy_buffers(s, bufs, 9);
+    free(logitsHost);
+    free(histInit);
+    free(refHist);
+    free(histRead);
+}
+
 void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_t token, float* gamma, uint16_t* lmHeadFP16, uint16_t* w_inFP16) {
     int proj_n = 8256;
     float* emb = (float*)malloc(sizeof(float) * K);
@@ -5338,7 +5554,8 @@ void validation(void) {
 
     int vocab_size = 81920;
     uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
-    // validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
+    validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
+    validateArgMaxSampler(s, vocab_size);
 
     int Mg = 64;
     // uint32_t token = 12345 % vocab_size;

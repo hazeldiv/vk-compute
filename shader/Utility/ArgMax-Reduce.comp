@@ -1,6 +1,10 @@
 #version 450
-#define TS 256
+#extension GL_KHR_shader_subgroup_arithmetic : enable
+#extension GL_KHR_shader_subgroup_basic : enable
+#define TS 1024
 #define MAX_PENALTY 1024
+#define PEN_WORDS 8192
+#define BISECT 28
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -13,7 +17,7 @@ layout(push_constant) uniform Params {
 
 layout(set = 0, binding = 0) readonly restrict buffer MaxValueBuffer { float maxValue[]; };
 layout(set = 0, binding = 1) readonly restrict buffer MaxIndexBuffer { uint maxIndex[]; };
-layout(set = 0, binding = 2) buffer LogitsBuffer { float logits[]; };
+layout(set = 0, binding = 2) buffer LogitsBuffer { vec4 logits[]; };
 layout(set = 0, binding = 3) readonly restrict buffer SamplerParamsBuffer {
     float temperature;
     float repPenalty;
@@ -31,15 +35,21 @@ shared float redVal[TS];
 shared uint redIdx[TS];
 shared float blockSum[TS];
 shared float cumBase[TS];
-shared uint histSh[MAX_PENALTY];
-shared float gMax;
-shared float gMin;
-shared float gLo;
-shared float gHi;
-shared float gThr;
+shared uint penBits[PEN_WORDS];
+shared float subSum[TS / 64];
+shared uint subCnt[TS / 64];
+shared float allSum;
+shared uint allCnt;
+shared float gThrP;
 shared float gTarget;
 shared uint winBlock;
 shared uint outTok;
+
+uint base4;
+uint cnt4;
+float mySum;
+float myMax;
+float myMin;
 
 uint xorshift32(uint x) {
     x ^= x << 13u;
@@ -48,12 +58,80 @@ uint xorshift32(uint x) {
     return x;
 }
 
+float maxAll(float v, uint tid) {
+    v = subgroupMax(v);
+    if (subgroupElect()) subSum[gl_SubgroupID] = v;
+    barrier();
+    if (tid == 0u) {
+        uint ns = (TS + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        float t = subSum[0];
+        for (uint i = 1u; i < ns; i++) t = max(t, subSum[i]);
+        allSum = t;
+    }
+    barrier();
+    return allSum;
+}
+
+float minAll(float v, uint tid) {
+    v = subgroupMin(v);
+    if (subgroupElect()) subSum[gl_SubgroupID] = v;
+    barrier();
+    if (tid == 0u) {
+        uint ns = (TS + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        float t = subSum[0];
+        for (uint i = 1u; i < ns; i++) t = min(t, subSum[i]);
+        allSum = t;
+    }
+    barrier();
+    return allSum;
+}
+
+float sumAll(float v, uint tid) {
+    v = subgroupAdd(v);
+    if (subgroupElect()) subSum[gl_SubgroupID] = v;
+    barrier();
+    if (tid == 0u) {
+        uint ns = (TS + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        float t = 0.0f;
+        for (uint i = 0u; i < ns; i++) t += subSum[i];
+        allSum = t;
+    }
+    barrier();
+    return allSum;
+}
+
+uint countAll(uint c, uint tid) {
+    c = subgroupAdd(c);
+    if (subgroupElect()) subCnt[gl_SubgroupID] = c;
+    barrier();
+    if (tid == 0u) {
+        uint ns = (TS + gl_SubgroupSize - 1u) / gl_SubgroupSize;
+        uint t = 0u;
+        for (uint i = 0u; i < ns; i++) t += subCnt[i];
+        allCnt = t;
+    }
+    barrier();
+    return allCnt;
+}
+
+float massAbove(float thr) {
+    if (myMax < thr) return 0.0f;
+    if (myMin >= thr) return mySum;
+    float s = 0.0f;
+    for (uint k = 0u; k < cnt4; k++) {
+        vec4 p = logits[base4 + k];
+        s += (p.x >= thr ? p.x : 0.0f) + (p.y >= thr ? p.y : 0.0f);
+        s += (p.z >= thr ? p.z : 0.0f) + (p.w >= thr ? p.w : 0.0f);
+    }
+    return s;
+}
+
 void main() {
     uint tid = gl_LocalInvocationID.x;
     uint V = params.vocabSize;
 
     if (params.mode == 0u) {
-        uint numGroups = (V + TS - 1u) / TS;
+        uint numGroups = (V + 255u) / 256u;
         float bestValue = uintBitsToFloat(0xFF800000u);
         uint bestIndex = 0u;
         for (uint i = tid; i < numGroups; i += TS) {
@@ -86,10 +164,11 @@ void main() {
         return;
     }
 
-    uint E = (V + TS - 1u) / TS;
-    uint base = tid * E;
-    uint cnt = 0u;
-    if (base < V) cnt = ((V - base) < E) ? (V - base) : E;
+    uint V4 = (V + 3u) / 4u;
+    uint E4 = (V4 + TS - 1u) / TS;
+    base4 = tid * E4;
+    cnt4 = 0u;
+    if (base4 < V4) cnt4 = min(E4, V4 - base4);
 
     float penalty = sp.repPenalty;
     uint penLen = sp.penaltyLength;
@@ -98,123 +177,103 @@ void main() {
     if (topK > V) topK = V;
     float topP = sp.topP;
     bool doPen = (penLen > 0u) && (penalty != 1.0f);
+    float invT = 1.0f / sp.temperature;
 
-    for (uint i = tid; i < penLen; i += TS) histSh[i] = history[i];
-    barrier();
+    if (doPen) {
+        for (uint i = tid; i < PEN_WORDS; i += TS) penBits[i] = 0u;
+        barrier();
+        if (tid < penLen) {
+            uint id = history[tid];
+            if (id < PEN_WORDS * 32u) atomicOr(penBits[id >> 5u], 1u << (id & 31u));
+        }
+        barrier();
+    }
 
     float lmax = -3.4e38f;
     float lmin = 3.4e38f;
-    for (uint k = 0u; k < cnt; k++) {
-        uint j = base + k;
-        float a = logits[j] / sp.temperature;
+    for (uint k = 0u; k < cnt4; k++) {
+        uint j = base4 * 4u + k * 4u;
+        vec4 t = logits[base4 + k] * invT;
         if (doPen) {
-            bool hit = false;
-            for (uint h = 0u; h < penLen; h++) {
-                if (histSh[h] == j) { hit = true; break; }
-            }
-            if (hit) a = (a > 0.0f) ? (a / penalty) : (a * penalty);
+            uint bits = (penBits[j >> 5u] >> (j & 31u)) & 0xFu;
+            if ((bits & 1u) != 0u) t.x = (t.x > 0.0f) ? (t.x / penalty) : (t.x * penalty);
+            if ((bits & 2u) != 0u) t.y = (t.y > 0.0f) ? (t.y / penalty) : (t.y * penalty);
+            if ((bits & 4u) != 0u) t.z = (t.z > 0.0f) ? (t.z / penalty) : (t.z * penalty);
+            if ((bits & 8u) != 0u) t.w = (t.w > 0.0f) ? (t.w / penalty) : (t.w * penalty);
         }
-        logits[j] = a;
-        if (a > lmax) lmax = a;
-        if (a < lmin) lmin = a;
+        if (j + 1u >= V) t.y = -3.4e38f;
+        if (j + 2u >= V) t.z = -3.4e38f;
+        if (j + 3u >= V) t.w = -3.4e38f;
+        logits[base4 + k] = t;
+        lmax = max(lmax, max(max(t.x, t.y), max(t.z, t.w)));
+        lmin = min(lmin, min(min(t.x, t.y), min(t.z, t.w)));
     }
-    redVal[tid] = lmax;
-    blockSum[tid] = lmin;
-    barrier();
-    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
-        if (tid < stride) {
-            float ov = redVal[tid + stride];
-            float ov2 = blockSum[tid + stride];
-            if (ov > redVal[tid]) redVal[tid] = ov;
-            if (ov2 < blockSum[tid]) blockSum[tid] = ov2;
-        }
-        barrier();
-    }
-    if (tid == 0u) { gMax = redVal[0]; gMin = blockSum[0]; }
-    barrier();
+    float gMax = maxAll(lmax, tid);
+    float gMin = minAll(lmin, tid);
 
-    float m = 0.0f;
-    for (uint k = 0u; k < cnt; k++) m += exp(logits[base + k] - gMax);
-    redVal[tid] = m;
-    barrier();
-    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
-        if (tid < stride) redVal[tid] += redVal[tid + stride];
-        barrier();
+    mySum = 0.0f;
+    myMax = 0.0f;
+    myMin = 1.0f;
+    for (uint k = 0u; k < cnt4; k++) {
+        vec4 p = exp(logits[base4 + k] - gMax);
+        logits[base4 + k] = p;
+        mySum += (p.x + p.y) + (p.z + p.w);
+        myMax = max(myMax, max(max(p.x, p.y), max(p.z, p.w)));
+        myMin = min(myMin, min(min(p.x, p.y), min(p.z, p.w)));
     }
-    float Zall = redVal[0];
-    barrier();
+    float Zall = sumAll(mySum, tid);
 
-    if (tid == 0u) gThr = gMin;
+    if (tid == 0u) gThrP = 0.0f;
     barrier();
 
     if (topK > 0u) {
-        if (tid == 0u) { gLo = gMin; gHi = gMax; }
-        barrier();
-        for (uint it = 0u; it < 48u; it++) {
-            if (tid == 0u) gThr = 0.5f * (gLo + gHi);
+        float gLo = gMin;
+        float gHi = gMax;
+        for (uint it = 0u; it < BISECT; it++) {
+            if (tid == 0u) gThrP = exp(0.5f * (gLo + gHi) - gMax);
             barrier();
             uint c = 0u;
-            for (uint k = 0u; k < cnt; k++) { if (logits[base + k] >= gThr) c++; }
-            redIdx[tid] = c;
-            barrier();
-            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
-                if (tid < stride) redIdx[tid] += redIdx[tid + stride];
-                barrier();
+            if (myMax >= gThrP) {
+                for (uint k = 0u; k < cnt4; k++) {
+                    vec4 p = logits[base4 + k];
+                    c += (p.x >= gThrP ? 1u : 0u) + (p.y >= gThrP ? 1u : 0u);
+                    c += (p.z >= gThrP ? 1u : 0u) + (p.w >= gThrP ? 1u : 0u);
+                }
             }
-            if (tid == 0u) { if (redIdx[0] >= topK) gLo = gThr; else gHi = gThr; }
+            uint total = countAll(c, tid);
+            if (tid == 0u) {
+                float mid = 0.5f * (gLo + gHi);
+                if (total >= topK) gLo = mid; else gHi = mid;
+            }
             barrier();
         }
-        if (tid == 0u) gThr = gLo;
+        if (tid == 0u) gThrP = exp(gLo - gMax);
         barrier();
     }
 
     if (topP < 1.0f && topP > 0.0f) {
         float Zk = Zall;
-        if (topK > 0u) {
-            float mk = 0.0f;
-            for (uint k = 0u; k < cnt; k++) {
-                float a = logits[base + k];
-                if (a >= gThr) mk += exp(a - gMax);
-            }
-            redVal[tid] = mk;
-            barrier();
-            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
-                if (tid < stride) redVal[tid] += redVal[tid + stride];
-                barrier();
-            }
-            Zk = redVal[0];
-            barrier();
-        }
-        if (tid == 0u) { gLo = gThr; gHi = gMax; redVal[0] = topP * Zk; }
+        float gLo = gMin;
+        float gHi = gMax;
+        if (topK > 0u) Zk = sumAll(massAbove(gThrP), tid);
+        if (tid == 0u) allSum = topP * Zk;
         barrier();
-        float target = redVal[0];
-        for (uint it = 0u; it < 48u; it++) {
-            if (tid == 0u) gThr = 0.5f * (gLo + gHi);
+        float target = allSum;
+        for (uint it = 0u; it < BISECT; it++) {
+            if (tid == 0u) gThrP = exp(0.5f * (gLo + gHi) - gMax);
             barrier();
-            float s = 0.0f;
-            for (uint k = 0u; k < cnt; k++) {
-                float a = logits[base + k];
-                if (a >= gThr) s += exp(a - gMax);
+            float s = sumAll(massAbove(gThrP), tid);
+            if (tid == 0u) {
+                float mid = 0.5f * (gLo + gHi);
+                if (s >= target) gLo = mid; else gHi = mid;
             }
-            redVal[tid] = s;
-            barrier();
-            for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
-                if (tid < stride) redVal[tid] += redVal[tid + stride];
-                barrier();
-            }
-            if (tid == 0u) { if (redVal[0] >= target) gLo = gThr; else gHi = gThr; }
             barrier();
         }
-        if (tid == 0u) gThr = gLo;
+        if (tid == 0u) gThrP = exp(gLo - gMax);
         barrier();
     }
 
-    float bm = 0.0f;
-    for (uint k = 0u; k < cnt; k++) {
-        float a = logits[base + k];
-        if (a >= gThr) bm += exp(a - gMax);
-    }
-    blockSum[tid] = bm;
+    blockSum[tid] = massAbove(gThrP);
     barrier();
 
     if (tid == 0u) {
@@ -233,16 +292,15 @@ void main() {
 
     if (tid == winBlock) {
         float acc = cumBase[tid];
-        uint chosen = base;
+        uint chosen = base4 * 4u;
         bool found = false;
-        for (uint k = 0u; k < cnt; k++) {
-            uint j = base + k;
-            float a = logits[j];
-            if (a >= gThr) {
-                acc += exp(a - gMax);
-                if (!found) chosen = j;
-                if (!found && gTarget < acc) found = true;
-            }
+        for (uint k = 0u; k < cnt4; k++) {
+            vec4 p = logits[base4 + k];
+            uint j = base4 * 4u + k * 4u;
+            if (!found && j < V && p.x >= gThrP) { acc += p.x; chosen = j; if (gTarget < acc) found = true; }
+            if (!found && j + 1u < V && p.y >= gThrP) { acc += p.y; chosen = j + 1u; if (gTarget < acc) found = true; }
+            if (!found && j + 2u < V && p.z >= gThrP) { acc += p.z; chosen = j + 2u; if (gTarget < acc) found = true; }
+            if (!found && j + 3u < V && p.w >= gThrP) { acc += p.w; chosen = j + 3u; if (gTarget < acc) found = true; }
         }
         outTok = chosen;
     }
