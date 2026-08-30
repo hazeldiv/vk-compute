@@ -62,6 +62,12 @@ void memInfo(void) {
     destroySession(s);
 }
 
+static void emitToken(uint32_t token, void* ctx) {
+    (void)ctx;
+    fwrite(&token, sizeof(uint32_t), 1, stdout);
+    fflush(stdout);
+}
+
 void serverMain(int argc, char** argv) {
     const char* weightDir = argval(argc, argv, "--weights", "../model/Qwen3.5-9B-weight");
     const char* vocabHead = argval(argc, argv, "--vocab-head", NULL);
@@ -85,7 +91,6 @@ void serverMain(int argc, char** argv) {
 
     uint32_t* prompt = NULL;
     int promptCap = 0;
-    uint32_t* out = (uint32_t*)malloc(sizeof(uint32_t) * maxNew);
 
     for (;;) {
         uint32_t n = 0;
@@ -98,17 +103,13 @@ void serverMain(int argc, char** argv) {
         if (fread(prompt, sizeof(uint32_t), n, stdin) != n) break;
 
         resetGenerator(g);
-        int count = 0;
-        generateTokens(g, prompt, (int)n, maxNew, out, &count);
-
-        uint32_t m = (uint32_t)count;
-        fwrite(&m, sizeof(uint32_t), 1, stdout);
-        fwrite(out, sizeof(uint32_t), count, stdout);
+        generateTokens(g, prompt, (int)n, maxNew, emitToken, NULL);
+        uint32_t sentinel = 0xFFFFFFFFu;
+        fwrite(&sentinel, sizeof(uint32_t), 1, stdout);
         fflush(stdout);
     }
 
     free(prompt);
-    free(out);
     destroyGenerator(g);
     destroySession(s);
 }

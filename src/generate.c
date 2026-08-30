@@ -5,6 +5,29 @@
 #include "generate.h"
 
 #define ATT_SPLIT_THRESHOLD 256
+#define FIRST_TOKEN_DELAY_MS 25.0
+
+static double g_qpcFreqMs = 0.0;
+
+static double nowMs(void) {
+    if (g_qpcFreqMs == 0.0) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        g_qpcFreqMs = (double)f.QuadPart / 1000.0;
+    }
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / g_qpcFreqMs;
+}
+
+static void sleepMs(double ms) {
+    if (ms <= 0.0) return;
+    double target = nowMs() + ms;
+    double coarse = ms - 1.0;
+    if (coarse > 0.0) Sleep((DWORD)coarse);
+    while (nowMs() < target) {
+    }
+}
 
 static void addOp(operation* ops, int* n, const char* shader, int layer, buffer* bufs, int bc, const int* push, int pc, int dx, int dy) {
     operation* op = &ops[*n];
@@ -695,17 +718,16 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     return results[0];
 }
 
-uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, uint32_t* out, int* outCount) {
+void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, void (*emit)(uint32_t token, void* ctx), void* ctx) {
     int limit = g->maxCtx - nPrompt;
     if (limit < 1) limit = 1;
     if (maxNewTokens > limit) maxNewTokens = limit;
 
     uint32_t token = runPrefill(g, prompt, nPrompt);
     int count = 1;
-    out[0] = token;
+    emit(token, ctx);
     if (token == (uint32_t)g->eos || maxNewTokens <= 1) {
-        *outCount = count;
-        return token;
+        return;
     }
 
     int decodeTokens = maxNewTokens - 1;
@@ -730,6 +752,7 @@ uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int m
 
     int eos = 0;
     int units = fullGroups + (rem > 0 ? 1 : 0);
+    double prevDelay = FIRST_TOKEN_DELAY_MS;
     for (int u = 0; u < units && !eos; u++) {
         int cur = (u == fullGroups) ? rem : DECODE_GROUP;
         int next = ((rem > 0) && (u + 1 == fullGroups)) ? rem : DECODE_GROUP;
@@ -739,28 +762,32 @@ uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int m
         int nextCount = nextSplit ? g->groupOpCount : g->groupOpCountShort;
 
         uint32_t tokens[DECODE_GROUP];
+        double t0 = nowMs();
         executeRecord(&g->s, nextOps, next * (nextCount / DECODE_GROUP));
         executeWaitLast(&g->s);
         readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, g->st.result, tokens);
+        double t1 = nowMs();
         ((uint32_t*)g->st.tokenIds.mappedMemory)[0] = tokens[cur - 1];
         executeSubmitNow(&g->s);
         g->nextPos += cur;
 
         for (int j = 0; j < cur && count < maxNewTokens; j++) {
-            out[count++] = tokens[j];
+            emit(tokens[j], ctx);
+            count++;
             if (tokens[j] == (uint32_t)g->eos) {
                 eos = 1;
                 break;
             }
+            sleepMs(prevDelay);
         }
+
+        prevDelay = (t1 - t0) / (double)cur;
 
         curSplit = nextSplit;
         curOps = nextOps;
         curCount = nextCount;
     }
     executeWaitLast(&g->s);
-    *outCount = count;
-    return token;
 }
 
 void resetGenerator(generator* g) {

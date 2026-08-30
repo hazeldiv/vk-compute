@@ -34,7 +34,7 @@ typedef struct generator {
 generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
-uint32_t generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, uint32_t* out, int* outCount);
+void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, void (*emit)(uint32_t token, void* ctx), void* ctx);
 void resetGenerator(generator* g);
 void generatorSetDumpDir(generator* g, const char* dir);
 void generatorDumpPrefill(generator* g, int rows);

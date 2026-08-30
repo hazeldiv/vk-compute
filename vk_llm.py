@@ -102,8 +102,33 @@ def generate(llm, token_ids):
     llm.proc.stdin.write(struct.pack("<I", n))
     llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
     llm.proc.stdin.flush()
-    m = _read_u32(llm.proc)
-    return [_read_u32(llm.proc) for _ in range(m)]
+    out = []
+    while True:
+        tok = _read_u32(llm.proc)
+        if tok == 0xFFFFFFFF:
+            break
+        out.append(tok)
+    return out
+
+
+def generate_stream(llm, token_ids):
+    if not token_ids:
+        return
+    n = len(token_ids)
+    llm.proc.stdin.write(struct.pack("<I", n))
+    llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
+    llm.proc.stdin.flush()
+    ids = []
+    prev = ""
+    while True:
+        tok = _read_u32(llm.proc)
+        if tok == 0xFFFFFFFF:
+            break
+        ids.append(tok)
+        text = llm.tokenizer.decode(ids)
+        if len(text) > len(prev):
+            yield text[len(prev):]
+        prev = text
 
 
 def close(llm):
@@ -130,9 +155,10 @@ def _main():
 
     llm = start_llm(weight_dir, max_ctx=max_ctx, vocab_weight=vocab, max_new_tokens=16384)
     ids = tokenize(llm, text, thinking == "thinking")
-    out = generate(llm, ids)
+    for chunk in generate_stream(llm, ids):
+        print(chunk, end="", flush=True)
+    print()
     close(llm)
-    print(detokenize(llm, out))
 
 
 if __name__ == "__main__":
