@@ -10,7 +10,7 @@ static buffer createZeroed(session s, int64_t size, const char* name) {
     return b;
 }
 
-model_state createState(session s, const model_config* spec, int maxM, int vocab) {
+model_state createState(session s, const model_config* spec, int maxM, int vocab, int verbose) {
     model_state st = {0};
     st.maxM = maxM;
     int mn = maxM * MODEL_K;
@@ -48,9 +48,9 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
                 st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nkz);
                 st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvs);
                 st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvz);
-                fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
+                if (verbose) fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
             } else {
-                fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
+                if (verbose) fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
                 st.kCache[L] = createZeroed(s, cacheBytes * 2, nk);
                 st.vCache[L] = createZeroed(s, cacheBytes * 2, nv);
             }

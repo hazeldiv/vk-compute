@@ -517,7 +517,7 @@ static int compileFinal(generator* g) {
     return n;
 }
 
-generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx) {
+generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx, int verboseWeights) {
     static generator g;
     memset(&g, 0, sizeof(generator));
     g.s = s;
@@ -525,9 +525,9 @@ generator* createGenerator(session s, const model_config* spec, int maxM, const 
     g.maxM = maxM;
     g.eos = eos;
     g.maxCtx = maxCtx;
-    g.w = createWeights(s, spec, weightDir, customHead, customEmbed);
+    g.w = createWeights(s, spec, weightDir, customHead, customEmbed, verboseWeights);
     g.vocab = g.w.vocab;
-    g.st = createState(s, spec, maxM, g.vocab);
+    g.st = createState(s, spec, maxM, g.vocab, verboseWeights);
     g.groupOpCount = compileDecodeGroup(&g, g.groupOps, 1);
     g.groupOpCountShort = compileDecodeGroup(&g, g.groupOpsShort, 0);
     g.prefillOpCount = compilePrefill(&g, g.maxM, 0);

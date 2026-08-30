@@ -7,6 +7,17 @@
 #include "safetensors.h"
 
 static int64_t weightBytes = 0;
+static int verboseWeights = 0;
+
+static const char* SPINNER = "-\\|/";
+static int spinnerIdx = 0;
+
+static void printProgress(void) {
+    if (verboseWeights) return;
+    fprintf(stderr, "\r[%c] loading weights: %.2f MB      ",
+            SPINNER[spinnerIdx++ % 4],
+            (double)weightBytes / (1024.0 * 1024.0));
+}
 
 #define TENSOR_CACHE_MAX 256
 #define TENSOR_FILE_MAGIC 0x54454E53
@@ -180,9 +191,13 @@ static cachedTensor* tensorBuild(const char* path, const char* name, QuantType q
 
 static void countBuffer(const char* name, int layer, buffer b) {
     weightBytes += b.size;
-    fprintf(stderr, "%s[%d]: %lld bytes (%.2f MB) | Total: %lld bytes (%.2f MB)\n",
-            name, layer, (long long)b.size, (double)b.size / (1024.0 * 1024.0),
-            (long long)weightBytes, (double)weightBytes / (1024.0 * 1024.0));
+    if (verboseWeights) {
+        fprintf(stderr, "%s[%d]: %lld bytes (%.2f MB) | Total: %lld bytes (%.2f MB)\n",
+                name, layer, (long long)b.size, (double)b.size / (1024.0 * 1024.0),
+                (long long)weightBytes, (double)weightBytes / (1024.0 * 1024.0));
+    } else {
+        printProgress();
+    }
 }
 
 static tensor createTensor(session s, const char* name, int layer, int rows, int cols, QuantType q, float wscale, const float* mat) {
@@ -376,9 +391,10 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     return b;
 }
 
-model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed) {
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed, int verbose) {
     model_weights w = {0};
     weightBytes = 0;
+    verboseWeights = verbose;
     g_wbufsCount = 0;
     cacheClear();
     _mkdir(CACHE_DIR);
@@ -541,6 +557,10 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 
     createTransferAndCopy(s.dev.device, s.dev.queue, g_wbufs, g_wbufsCount);
 
+    if (!verboseWeights) {
+        fprintf(stderr, "\r[OK] loaded weights: %.2f MB             \n",
+                (double)weightBytes / (1024.0 * 1024.0));
+    }
     fprintf(stderr, "total weights: %lld bytes (%.2f MB, %.2f GB)\n",
             (long long)weightBytes,
             (double)weightBytes / (1024.0 * 1024.0),

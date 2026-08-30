@@ -56,6 +56,13 @@ static const char* argval(int argc, char** argv, const char* name, const char* d
     return def;
 }
 
+static int argflag(int argc, char** argv, const char* name) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 void memInfo(void) {
     session s = createSession();
     dumpMemoryInfo(s.dev.physicalDevice);
@@ -77,13 +84,14 @@ void serverMain(int argc, char** argv) {
     int maxNew = atoi(argval(argc, argv, "--max-new", "128"));
     const char* dumpDir = argval(argc, argv, "--dump", NULL);
     int dumpLayers = atoi(argval(argc, argv, "--dump-layers", "0"));
+    int verboseWeights = argflag(argc, argv, "--verbose-weights");
     if (maxNew < 1) maxNew = 1;
 
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
 
     session s = createSession();
-    generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK, weightDir, vocabHead, vocabEmbed, eos, maxCtx);
+    generator* g = createGenerator(s, &spec, MODEL_PREFILL_CHUNK, weightDir, vocabHead, vocabEmbed, eos, maxCtx, verboseWeights);
     if (dumpDir != NULL) {
         generatorSetDumpDir(g, dumpDir);
         generatorSetDumpLayers(g, dumpLayers);

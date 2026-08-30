@@ -1,6 +1,7 @@
 import struct
 import sys
 import subprocess
+import time
 from pathlib import Path
 
 from tokenizers import Tokenizer
@@ -95,35 +96,28 @@ def detokenize(llm, token_ids):
     return llm.tokenizer.decode(token_ids)
 
 
-def generate(llm, token_ids):
-    if not token_ids:
-        return []
-    n = len(token_ids)
-    llm.proc.stdin.write(struct.pack("<I", n))
-    llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
-    llm.proc.stdin.flush()
-    out = []
-    while True:
-        tok = _read_u32(llm.proc)
-        if tok == 0xFFFFFFFF:
-            break
-        out.append(tok)
-    return out
-
-
-def generate_stream(llm, token_ids):
+def _stream_ids(llm, token_ids):
     if not token_ids:
         return
     n = len(token_ids)
     llm.proc.stdin.write(struct.pack("<I", n))
     llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
     llm.proc.stdin.flush()
-    ids = []
-    prev = ""
     while True:
         tok = _read_u32(llm.proc)
         if tok == 0xFFFFFFFF:
-            break
+            return
+        yield tok
+
+
+def generate(llm, token_ids):
+    return list(_stream_ids(llm, token_ids))
+
+
+def generate_stream(llm, token_ids):
+    ids = []
+    prev = ""
+    for tok in _stream_ids(llm, token_ids):
         ids.append(tok)
         text = llm.tokenizer.decode(ids)
         if len(text) > len(prev):
@@ -155,9 +149,22 @@ def _main():
 
     llm = start_llm(weight_dir, max_ctx=max_ctx, vocab_weight=vocab, max_new_tokens=16384)
     ids = tokenize(llm, text, thinking == "thinking")
-    for chunk in generate_stream(llm, ids):
-        print(chunk, end="", flush=True)
+    decoded_ids = []
+    prev = ""
+    timestamps = []
+    for tok in _stream_ids(llm, ids):
+        timestamps.append(time.perf_counter())
+        decoded_ids.append(tok)
+        text = llm.tokenizer.decode(decoded_ids)
+        if len(text) > len(prev):
+            print(text[len(prev):], end="", flush=True)
+        prev = text
     print()
+    if len(timestamps) > 4:
+        n = len(timestamps) - 4
+        elapsed = timestamps[-1] - timestamps[3]
+        if elapsed > 0:
+            print(f"{len(timestamps)} tokens, {n / elapsed:.1f} tokens/s")
     close(llm)
 
 

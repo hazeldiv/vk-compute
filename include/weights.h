@@ -37,7 +37,7 @@ typedef struct model_weights {
     int vocab;
 } model_weights;
 
-model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed);
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed, int verbose);
 void destroyWeights(session s, model_weights* w);
 
 #endif
