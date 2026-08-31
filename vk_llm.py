@@ -10,12 +10,13 @@ from tokenizers import Tokenizer
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "bin" / "main.exe"
 
-is_sampling = False
-temperature = 0.5
-rep_penalty = 1.1
-penalty_len = 16
-top_k = 40
-top_p = 0.9
+is_sampling = True
+temperature = 0.6
+rep_penalty = 1.05
+penalty_len = 64
+top_k = 20
+top_p = 0.95
+min_p = 0.0
 seed = None
 
 
@@ -91,7 +92,8 @@ def apply_chat_template(llm, messages, system="", enable_thinking=True):
     parts = []
     if (system != ""):
         parts.append("<|im_start|>system\n")
-        parts.append(system+eos+"\n")
+        parts.append(system)
+        parts.append(eos+"\n")
     for msg in messages:
         parts.append(f"{bos}{msg['role']}\n{msg['content']}{eos}\n")
     parts.append(f"{bos}assistant\n")
@@ -116,10 +118,10 @@ def _stream_ids(llm, token_ids):
         s = seed if seed is not None else random.getrandbits(32)
         if s == 0:
             s = 1
-        header = (temperature, rep_penalty, penalty_len, top_k, top_p, s)
+        header = (temperature, rep_penalty, penalty_len, top_k, top_p, min_p, s)
     else:
-        header = (0.0, 1.0, 0, 0, 1.0, 1)
-    llm.proc.stdin.write(struct.pack("<ffIIfI", *header))
+        header = (0.0, 1.0, 0, 0, 1.0, 0.0, 1)
+    llm.proc.stdin.write(struct.pack("<ffIIffI", *header))
     llm.proc.stdin.write(struct.pack("<%dI" % n, *token_ids))
     llm.proc.stdin.flush()
     while True:

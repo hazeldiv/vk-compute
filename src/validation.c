@@ -5022,6 +5022,15 @@ static uint32_t sampler_ref(float* logits, int V, const sample_params* sp, uint3
         while (kept < V && arr[kept].a >= thrL) kept++;
     }
 
+    if (sp->minP > 0.0f) {
+        double thrMin = mx + log((double)sp->minP);
+        if (thrMin > thrL) {
+            thrL = thrMin;
+            kept = 0;
+            while (kept < V && arr[kept].a >= thrL) kept++;
+        }
+    }
+
     double Zkept = 0.0;
     for (int i = 0; i < kept; i++) Zkept += arr[i].p;
 
@@ -5093,8 +5102,8 @@ void validateArgMaxSampler(session s, int vocabSize) {
     uint32_t rngInit = 0x2545F491u;
     uint32_t resultVal = 0;
     uint32_t tokenVal = 0;
-    sample_params spCase[2] = {{0.1f, 1.2f, 256u, 40u, 0.9f}, {0.1f, 1.0f, 0u, 0u, 1.0f}};
-    uint32_t rngSeed[2] = {0x2545F491u, 0x9E3779B9u};
+    sample_params spCase[3] = {{0.1f, 1.2f, 256u, 40u, 0.9f, 0.0f}, {0.1f, 1.0f, 0u, 0u, 1.0f, 0.0f}, {0.1f, 1.0f, 0u, 0u, 1.0f, 0.001f}};
+    uint32_t rngSeed[3] = {0x2545F491u, 0x9E3779B9u, 0x85EBCA6Bu};
 
     buffer maxValueBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dummyMax, sizeof(float) * numGroups, MEMORY_VRAM);
     buffer maxIndexBuffer = createBuffer(s.dev.device, s.dev.physicalDevice, dummyIdx, sizeof(uint32_t) * numGroups, MEMORY_VRAM);
@@ -5115,8 +5124,8 @@ void validateArgMaxSampler(session s, int vocabSize) {
     uint32_t posRef = posInit;
     uint32_t rngRef = rngSeed[0];
 
-    for (int c = 0; c < 2; c++) {
-        const char* name = c == 0 ? "ArgMax-Sampler-A" : "ArgMax-Sampler-B";
+    for (int c = 0; c < 3; c++) {
+        const char* name = c == 0 ? "ArgMax-Sampler-A" : (c == 1 ? "ArgMax-Sampler-B" : "ArgMax-Sampler-C");
         memcpy(sampleParamsBuffer.mappedMemory, &spCase[c], sizeof(sample_params));
         rngRef = rngSeed[c];
         memcpy(rngBuffer.mappedMemory, &rngRef, sizeof(uint32_t));

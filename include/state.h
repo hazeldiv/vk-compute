@@ -11,6 +11,7 @@ typedef struct {
     uint32_t penaltyLength;
     uint32_t topK;
     float topP;
+    float minP;
 } sample_params;
 
 typedef struct model_state {

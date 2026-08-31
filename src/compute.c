@@ -120,6 +120,7 @@ void serverMain(int argc, char** argv) {
         if (fread(&sp.penaltyLength, sizeof(uint32_t), 1, stdin) != 1) break;
         if (fread(&sp.topK, sizeof(uint32_t), 1, stdin) != 1) break;
         if (fread(&sp.topP, sizeof(float), 1, stdin) != 1) break;
+        if (fread(&sp.minP, sizeof(float), 1, stdin) != 1) break;
         if (fread(&seed, sizeof(uint32_t), 1, stdin) != 1) break;
         if (sp.penaltyLength > MAX_PENALTY_LEN) sp.penaltyLength = MAX_PENALTY_LEN;
         if (seed == 0) seed = 1;

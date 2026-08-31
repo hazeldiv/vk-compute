@@ -24,6 +24,7 @@ layout(set = 0, binding = 3) readonly restrict buffer SamplerParamsBuffer {
     uint penaltyLength;
     uint topK;
     float topP;
+    float minP;
 } sp;
 layout(set = 0, binding = 4) buffer HistoryBuffer { uint history[]; };
 layout(set = 0, binding = 5) buffer RngBuffer { uint rng[]; };
@@ -270,6 +271,11 @@ void main() {
             barrier();
         }
         if (tid == 0u) gThrP = exp(gLo - gMax);
+        barrier();
+    }
+
+    if (sp.minP > 0.0f) {
+        if (tid == 0u && gThrP < sp.minP) gThrP = sp.minP;
         barrier();
     }
 
