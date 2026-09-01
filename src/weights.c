@@ -94,6 +94,16 @@ static void cacheClear(void) {
     tensorCacheCount = 0;
 }
 
+static void cacheRelease(cachedTensor* ct) {
+    if (ct == NULL) return;
+    free(ct->data);
+    free(ct->scale);
+    free(ct->zero);
+    ct->data = NULL;
+    ct->scale = NULL;
+    ct->zero = NULL;
+}
+
 static void tensorWriteFile(const char* path, QuantType q, int rows, int cols, const uint8_t* data, int dataBytes, const float* scale, const float* zero, int scaleCount) {
     FILE* f = fopen(path, "wb");
     if (!f) return;
@@ -227,6 +237,7 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
         countBuffer(label, layer, t.zero);
         registerWeightBuffer(t.zero);
     }
+    cacheRelease(ct);
 
     return t;
 }
@@ -287,7 +298,11 @@ static float* buildEngineMatrix(const safetensors* sf, const char** hfNames, int
         const sa_tensor* t = safetensors_find(sf, hfNames[i]);
         int64_t n = 0;
         float* src = safetensors_load_f32(sf, t, &n);
-        if (!src || n != (int64_t)sizes[i] * engineRows) fatal("matrix length mismatch");
+        if (!src || n != (int64_t)sizes[i] * engineRows) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "matrix length mismatch: %s got=%lld want=%lld", hfNames[i], (long long)n, (long long)sizes[i] * engineRows);
+            fatal(buf);
+        }
         memcpy(hf + (size_t)off * engineRows, src, sizeof(float) * n);
         free(src);
         off += sizes[i];
@@ -375,6 +390,7 @@ static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, 
     *out = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->data, ct->dataBytes, MEMORY_VRAM, name);
     countBuffer(name, -1, *out);
     registerWeightBuffer(*out);
+    cacheRelease(ct);
 }
 
 static buffer loadConv(session s, const safetensors* sf, const char* name, int layer) {

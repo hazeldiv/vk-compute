@@ -91,6 +91,7 @@ void serverMain(int argc, char** argv) {
     int dumpLayers = atoi(argval(argc, argv, "--dump-layers", "0"));
     int verboseWeights = argflag(argc, argv, "--verbose-weights");
     int timing = argflag(argc, argv, "--timing");
+    const char* dumpHiddenDir = argval(argc, argv, "--dump-hidden", NULL);
     dbgSampling = argflag(argc, argv, "--debug-sampling");
     if (maxNew < 1) maxNew = 1;
 
@@ -104,6 +105,7 @@ void serverMain(int argc, char** argv) {
         generatorSetDumpDir(g, dumpDir);
         generatorSetDumpLayers(g, dumpLayers);
     }
+    int reqIdx = 0;
 
     uint32_t* prompt = NULL;
     int promptCap = 0;
@@ -132,6 +134,8 @@ void serverMain(int argc, char** argv) {
         if (fread(prompt, sizeof(uint32_t), n, stdin) != n) break;
 
         generatorSetSampling(g, &sp, seed);
+        if (dumpHiddenDir != NULL) generatorSetDumpHidden(g, dumpHiddenDir, reqIdx);
+        reqIdx++;
         resetGenerator(g);
         dbgCount = 0;
         generateTokens(g, prompt, (int)n, maxNew, emitToken, NULL);

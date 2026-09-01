@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 #include "safetensors.h"
 #include "data.h"
 
@@ -276,7 +277,10 @@ float* safetensors_load_f32(const safetensors* sf, const sa_tensor* t, int64_t* 
         while (done < n) {
             int64_t c = n - done;
             if (c > 8192) c = 8192;
-            if (fread(chunk, sizeof(uint16_t), (size_t)c, f) != (size_t)c) {
+            size_t got = fread(chunk, sizeof(uint16_t), (size_t)c, f);
+            if (got != (size_t)c) {
+                fprintf(stderr, "bf16 read fail: %s offset=%lld done=%lld want=%lld got=%zu errno=%d ferror=%d feof=%d\n",
+                        t->name, (long long)t->offset, (long long)done, (long long)c, got, errno, ferror(f), feof(f));
                 free(out);
                 return NULL;
             }

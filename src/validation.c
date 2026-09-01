@@ -9,6 +9,7 @@
 #include "data.h"
 #include "state.h"
 #include "validation.h"
+#include "generated_vocab.h"
 
 static void validate_softmax_v(const float* x, const float* v, float* o, int n) {
     float max_val = -FLT_MAX;
@@ -5561,7 +5562,7 @@ void validation(void) {
     // validateGEMVINT8(s, M, N, K, input, weightINT8);
     // validateGEMVINT4(s, M, N, K, input, weightINT4);
 
-    int vocab_size = 81920;
+    int vocab_size = MODEL_VOCAB;
     uint16_t* lmHeadFP16 = getDataFP16(15001, K, vocab_size);
     validateLmHeadArgMaxFP16(s, vocab_size, K, input, gamma, lmHeadFP16);
     validateArgMaxSampler(s, vocab_size);

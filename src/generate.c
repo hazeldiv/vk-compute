@@ -609,6 +609,19 @@ static void executeChunked(session s, operation* ops, int opCount, const char* p
     }
 }
 
+static void dumpHiddenStates(generator* g, int padded, int cur, int done) {
+    model_state* st = &g->st;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/hidden_%d_%d_%d.f32", g->dumpHiddenDir, g->dumpHiddenReq, done, cur);
+    FILE* f = fopen(path, "wb");
+    if (f == NULL) return;
+    float* host = (float*)malloc(sizeof(float) * (size_t)g->maxM * MODEL_K);
+    readBuffer(g->s.dev.device, g->s.dev.physicalDevice, g->s.dev.queue, st->h, host);
+    fwrite(host, sizeof(float) * MODEL_K, cur, f);
+    free(host);
+    fclose(f);
+}
+
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
     model_state* st = &g->st;
     int m = g->maxM;
@@ -702,6 +715,9 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
         } else {
             g->prefillOpCount = compilePrefill(g, padded, done);
             executeChunked(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)(g->nextPos + done));
+        }
+        if (g->dumpHiddenDir[0] != '\0') {
+            dumpHiddenStates(g, padded, cur, done);
         }
         done += cur;
         lastCur = cur;
@@ -834,6 +850,15 @@ void generatorSetDumpDir(generator* g, const char* dir) {
         return;
     }
     snprintf(g->dumpDir, sizeof(g->dumpDir), "%s", dir);
+}
+
+void generatorSetDumpHidden(generator* g, const char* dir, int reqIdx) {
+    if (dir == NULL) {
+        g->dumpHiddenDir[0] = '\0';
+        return;
+    }
+    snprintf(g->dumpHiddenDir, sizeof(g->dumpHiddenDir), "%s", dir);
+    g->dumpHiddenReq = reqIdx;
 }
 
 void generatorDumpPrefill(generator* g, int rows) {

@@ -60,11 +60,11 @@ def start_llm(weight_dir, max_ctx=32768, vocab_weight=None, max_new_tokens=128, 
         "--max-ctx", str(max_ctx),
         "--max-new", str(max_new_tokens),
     ]
-    if head_file is not None:
-        cmd += ["--vocab-head", str(head_file), "--vocab-embed", str(embed_file)]
     if dump_dir is not None:
         Path(dump_dir).mkdir(parents=True, exist_ok=True)
         cmd += ["--dump", str(dump_dir), "--dump-layers", str(dump_layers)]
+    if head_file is not None:
+        cmd += ["--vocab-head", str(head_file), "--vocab-embed", str(embed_file)]
     if debug_sampling:
         cmd += ["--debug-sampling"]
 

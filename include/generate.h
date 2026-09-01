@@ -30,6 +30,8 @@ typedef struct generator {
     char dumpDir[256];
     int dumpLayers;
     int sampling;
+    char dumpHiddenDir[256];
+    int dumpHiddenReq;
 } generator;
 
 generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx, int verboseWeights);
@@ -42,6 +44,7 @@ void generatorDumpPrefill(generator* g, int rows);
 void generatorSetDumpLayers(generator* g, int layers);
 void generatorDumpDecodeStep(generator* g, int step);
 void generatorSetSampling(generator* g, const sample_params* p, uint32_t seed);
+void generatorSetDumpHidden(generator* g, const char* dir, int reqIdx);
 void generatorDumpSamplingDebug(generator* g, const uint32_t* generated, int nGen, int nPrompt);
 
 #endif
