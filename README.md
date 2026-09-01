@@ -1,10 +1,10 @@
 # VK Compute
 
-A Vulkan-based LLM inference engine, written from scratch in C and GLSL compute shaders. It runs **Qwen3.5-9B** locally on an **AMD RX 580 8 GB** — a GPU with no AI acceleration — at ~25 tokens per second, with no ML framework involved: no PyTorch, no CUDA, no llama.cpp.
+A Vulkan-based LLM inference engine, written from scratch in C and GLSL compute shaders. It runs **Qwen3.5-9B** locally on an **AMD RX 580 8 GB**, a GPU with no AI acceleration, at ~25 tokens per second, with no ML framework involved: no PyTorch, no CUDA, no llama.cpp.
 
-The engine implements the model's full text stack: 32 transformer layers with hybrid attention (gated delta-net and full attention), per-layer FP16/INT8/INT4 quantization to fit 8 GB of VRAM, chunked prefill, look-ahead decode, and an on-GPU sampler (temperature, top-k, top-p, min-p, repetition penalty). Output is verified against the HuggingFace reference: prefill layers track it at 0.96–0.9999 cosine correlation, and greedy decode matches it token-for-token.
+The engine implements the model's full text stack: 32 transformer layers with hybrid attention (gated delta-net and full attention), per-layer FP16/INT8/INT4 quantization to fit 8 GB of VRAM, chunked prefill, look-ahead decode, and an on-GPU sampler (temperature, top-k, top-p, min-p, repetition penalty). The architecture is the exact same as HuggingFace's Qwen3.5-9B; greedy decode produces identical output, token for token.
 
-To fit the vocabulary in VRAM, the model's 248,320-token head is pruned to 86,016 rows. A companion toolchain (`tools/pruner`) keeps that prune loss-free: it detects which tokens the model actually wants to use — by replaying generated sequences against the full lm_head on CPU — and protects them through every re-prune.
+To fit the vocabulary in VRAM, the model's 248,320-token head is pruned to 86,016 rows.
 
 ## Project Layout
 
@@ -13,7 +13,6 @@ To fit the vocabulary in VRAM, the model's 248,320-token head is pruned to 86,01
 | `src/`, `include/` | C engine: weight loading, op dispatch, token server |
 | `shader/` | 121 GLSL compute shaders (GEMV/GEMM, attention, sampler) |
 | `vk_llm.py` | Python frontend: chat template, tokenization, streaming, sampling config |
-| `tools/pruner/` | Vocab pruning toolchain and verification harness |
 | `docs/VK-COMPUTE-SUMMARY.md` | Full technical documentation |
 | `model/` | Weights and vocab artifacts (not in git) |
 
@@ -47,4 +46,4 @@ Sampling behavior is set by the constants at the top of `vk_llm.py` (`is_samplin
 
 ## Documentation
 
-`docs/VK-COMPUTE-SUMMARY.md` covers the architecture in depth: every shader's algorithm and memory layout, the server wire protocol, the VRAM budget, the validation harness, and the engineering notes behind the quantization, decode, and vocab-pruning decisions.
+`docs/VK-COMPUTE-SUMMARY.md` covers the architecture in depth: every shader's algorithm and memory layout, the server wire protocol, the VRAM budget, the validation harness, and the engineering notes behind the quantization and decode decisions.
