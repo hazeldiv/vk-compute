@@ -3,15 +3,10 @@
 #extension GL_EXT_shader_16bit_storage : require
 #define TS 16
 #define vec 4
-#define K_OFF 2048
-#define V_OFF 4096
-#define Z_OFF 8192
-#define A_OFF 12288
-#define B_OFF 12320
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions { uint M; uint N; uint K; } dims;
+layout(push_constant) uniform Dimensions { uint M; uint N; uint K; uint kOff; uint vOff; uint zOff; uint aOff; uint bOff; } dims;
 
 const float EPSILON = 1e-6;
 
@@ -84,10 +79,10 @@ void main() {
         barrier();
     }
 
-    if (nGlobal < K_OFF)         qOut[mGlobal * 2048 + nGlobal] = acc;
-    else if (nGlobal < V_OFF)    kOut[mGlobal * 2048 + (nGlobal - K_OFF)] = acc;
-    else if (nGlobal < Z_OFF)    vOut[mGlobal * 4096 + (nGlobal - V_OFF)] = acc;
-    else if (nGlobal < A_OFF)    zOut[mGlobal * 4096 + (nGlobal - Z_OFF)] = acc;
-    else if (nGlobal < B_OFF)    aOut[mGlobal * 32 + (nGlobal - A_OFF)] = acc;
-    else                         bOut[mGlobal * 32 + (nGlobal - B_OFF)] = acc;
+    if (nGlobal < dims.kOff)         qOut[mGlobal * dims.kOff + nGlobal] = acc;
+    else if (nGlobal < dims.vOff)    kOut[mGlobal * dims.kOff + (nGlobal - dims.kOff)] = acc;
+    else if (nGlobal < dims.zOff)    vOut[mGlobal * (dims.zOff - dims.vOff) + (nGlobal - dims.vOff)] = acc;
+    else if (nGlobal < dims.aOff)    zOut[mGlobal * (dims.zOff - dims.vOff) + (nGlobal - dims.zOff)] = acc;
+    else if (nGlobal < dims.bOff)    aOut[mGlobal * (dims.bOff - dims.aOff) + (nGlobal - dims.aOff)] = acc;
+    else                         bOut[mGlobal * (dims.bOff - dims.aOff) + (nGlobal - dims.bOff)] = acc;
 }

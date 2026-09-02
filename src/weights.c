@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <direct.h>
+#include <windows.h>
 #include "weights.h"
 #include "safetensors.h"
 
@@ -21,7 +22,6 @@ static void printProgress(void) {
 
 #define TENSOR_CACHE_MAX 256
 #define TENSOR_FILE_MAGIC 0x54454E53
-#define CACHE_DIR "weights"
 
 typedef struct {
     char name[64];
@@ -37,6 +37,7 @@ typedef struct {
 
 static cachedTensor tensorCache[TENSOR_CACHE_MAX];
 static int tensorCacheCount = 0;
+static char cacheDir[256] = "weights";
 
 static const char* quantSuffix(QuantType q) {
     if (q == QUANT_FP16) return "FP16";
@@ -162,8 +163,8 @@ static cachedTensor* cacheGet(const char* name, QuantType q, int rows, int cols)
     cachedTensor* ct = cacheFind(name, q);
     if (ct != NULL) return ct;
     int blocks = (cols + 255) / 256;
-    char path[160];
-    snprintf(path, sizeof(path), CACHE_DIR "/%s_%s.bin", name, quantSuffix(q));
+    char path[384];
+    snprintf(path, sizeof(path), "%s/%s_%s.bin", cacheDir, name, quantSuffix(q));
     return tensorLoadFile(path, name, q, rows, cols, blocks);
 }
 
@@ -218,8 +219,8 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
 
     cachedTensor* ct = cacheGet(name, q, rows, cols);
     if (ct == NULL) {
-        char path[160];
-        snprintf(path, sizeof(path), CACHE_DIR "/%s_%s.bin", name, quantSuffix(q));
+        char path[384];
+        snprintf(path, sizeof(path), "%s/%s_%s.bin", cacheDir, name, quantSuffix(q));
         ct = tensorBuild(path, name, q, rows, cols, wscale, mat);
     }
 
@@ -227,7 +228,7 @@ static tensor createTensor(session s, const char* name, int layer, int rows, int
     countBuffer(name, layer, t.data);
     registerWeightBuffer(t.data);
     if (q != QUANT_FP16) {
-        char label[64];
+        char label[80];
         snprintf(label, sizeof(label), "%s-scale", name);
         t.scale = createBufferNamed(s.dev.device, s.dev.physicalDevice, ct->scale, sizeof(float) * ct->scaleCount, MEMORY_VRAM, label);
         countBuffer(label, layer, t.scale);
@@ -314,7 +315,7 @@ static float* buildEngineMatrix(const safetensors* sf, const char** hfNames, int
     return eng;
 }
 
-static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* kn, const char* vn, int engineRows, int* outCols) {
+static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* kn, const char* vn, int engineRows, int headDim, int heads, int* outCols) {
     const sa_tensor* tq = require(sf, qn);
     const sa_tensor* tk = require(sf, kn);
     const sa_tensor* tv = require(sf, vn);
@@ -322,8 +323,8 @@ static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* 
     int kRows = (int)tk->shape[0];
     int vRows = (int)tv->shape[0];
     int total = qRows + kRows + vRows;
-    int hd = MODEL_HEAD_DIM;
-    int qPart = MODEL_HEADS * hd;
+    int hd = headDim;
+    int qPart = heads * hd;
 
     float* hf = (float*)malloc(sizeof(float) * (size_t)total * engineRows);
 
@@ -362,10 +363,9 @@ static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* 
     return eng;
 }
 
-static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, const char* name, int V, buffer* out) {
-    int K = MODEL_K;
-    char path[160];
-    snprintf(path, sizeof(path), CACHE_DIR "/%s_%d_FP16.bin", name, V);
+static void loadEmbedLike(session s, const safetensors* sf, const char* hfName, const char* name, int V, int K, buffer* out) {
+    char path[384];
+    snprintf(path, sizeof(path), "%s/%s_%d_FP16.bin", cacheDir, name, V);
     cachedTensor* ct = tensorLoadFile(path, name, QUANT_FP16, K, V, (V + 255) / 256);
     if (ct == NULL) {
         const sa_tensor* t = require(sf, hfName);
@@ -407,62 +407,148 @@ static buffer loadConv(session s, const safetensors* sf, const char* name, int l
     return b;
 }
 
-model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed, int verbose) {
+static int findShards(const char* dir, char out[][512], int max) {
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s/model.safetensors*.safetensors", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int count = 0;
+    do {
+        if (count >= max) break;
+        snprintf(out[count], 512, "%s/%s", dir, fd.cFileName);
+        count++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (strcmp(out[i], out[j]) > 0) {
+                char tmp[512];
+                strcpy(tmp, out[i]);
+                strcpy(out[i], out[j]);
+                strcpy(out[j], tmp);
+            }
+        }
+    }
+    return count;
+}
+
+static int findVocabFile(const char* dir, const char* prefix, char* out, size_t cap) {
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s/vocab/%s.*.safetensors", dir, prefix);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    snprintf(out, cap, "%s/vocab/%s", dir, fd.cFileName);
+    FindClose(h);
+    return 1;
+}
+
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, int verbose) {
     model_weights w = {0};
+    const model_dims* d = &spec->dims;
     weightBytes = 0;
     verboseWeights = verbose;
     g_wbufsCount = 0;
     cacheClear();
-    _mkdir(CACHE_DIR);
+    snprintf(cacheDir, sizeof(cacheDir), "weights/%s", spec->name);
+    _mkdir("weights");
+    _mkdir(cacheDir);
 
-    char p1[320], p2[320], p3[320], p4[320];
-    snprintf(p1, sizeof(p1), "%s/model.safetensors-00001-of-00004.safetensors", weightDir);
-    snprintf(p2, sizeof(p2), "%s/model.safetensors-00002-of-00004.safetensors", weightDir);
-    snprintf(p3, sizeof(p3), "%s/model.safetensors-00003-of-00004.safetensors", weightDir);
-    snprintf(p4, sizeof(p4), "%s/model.safetensors-00004-of-00004.safetensors", weightDir);
-    const char* shards[4] = {p1, p2, p3, p4};
+    char shardPaths[16][512];
+    const char* shardPtrs[16];
+    int shardCount = findShards(weightDir, shardPaths, 16);
+    for (int i = 0; i < shardCount; i++) shardPtrs[i] = shardPaths[i];
+    if (shardCount == 0) fatal("no model.safetensors shards found");
 
-    safetensors sf, sfEmb, sfLm;
-    if (safetensors_open(&sf, shards, 4) != 0) fatal("shard open failed");
+    safetensors sf;
+    if (safetensors_open(&sf, shardPtrs, shardCount) != 0) fatal("shard open failed");
 
-    int customVocab = (customHead != NULL && customEmbed != NULL);
-    if (customVocab) {
-        if (safetensors_open(&sfLm, &customHead, 1) != 0) fatal("custom lm head open failed");
-        if (safetensors_open(&sfEmb, &customEmbed, 1) != 0) fatal("custom embedding open failed");
+    char headPath[512];
+    char embedPath[512];
+    int hasHead = findVocabFile(weightDir, "lm_head", headPath, sizeof(headPath));
+    int hasEmbed = findVocabFile(weightDir, "embed_tokens", embedPath, sizeof(embedPath));
+    if (d->tied) hasHead = 0;
+    if (d->tied && !hasEmbed) {
+        hasEmbed = findVocabFile(weightDir, "lm_head", embedPath, sizeof(embedPath));
+    }
+    if (!hasEmbed && !hasHead) fatal("vocab/embedding weights not found in vocab folder");
+
+    safetensors sfVocabHead, sfVocabEmbed;
+    if (hasHead) {
+        const char* headPtr = headPath;
+        if (safetensors_open(&sfVocabHead, &headPtr, 1) != 0) fatal("vocab lm head open failed");
+    }
+    if (hasEmbed) {
+        const char* embedPtr = embedPath;
+        if (safetensors_open(&sfVocabEmbed, &embedPtr, 1) != 0) fatal("vocab embed open failed");
     }
 
-    float* theta = (float*)malloc(sizeof(float) * (MODEL_ROTARY_DIM / 2));
-    for (int i = 0; i < MODEL_ROTARY_DIM / 2; i++) {
-        theta[i] = (float)pow(1e7, -((double)i) / (MODEL_ROTARY_DIM / 2));
+    int rotaryHalf = d->rotaryDim / 2;
+    float* theta = (float*)malloc(sizeof(float) * rotaryHalf);
+    for (int i = 0; i < rotaryHalf; i++) {
+        theta[i] = (float)pow(d->ropeTheta, -((double)i) / rotaryHalf);
     }
-    w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * (MODEL_ROTARY_DIM / 2), MEMORY_VRAM, "theta");
+    w.theta = createBufferNamed(s.dev.device, s.dev.physicalDevice, theta, sizeof(float) * rotaryHalf, MEMORY_VRAM, "theta");
     countBuffer("theta", -1, w.theta);
     registerWeightBuffer(w.theta);
     free(theta);
 
-    w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", MODEL_K, "gammaFinal", -1, 1);
+    w.gammaFinal = loadVecBuffer(s, &sf, "model.language_model.norm.weight", d->K, "gammaFinal", -1, 1);
 
-    const safetensors* sfHead = customVocab ? &sfLm : &sf;
-    const safetensors* sfEmbUse = customVocab ? &sfEmb : &sf;
-    const sa_tensor* headT = require(sfHead, "lm_head.weight");
-    if (headT->ndim < 2) fatal("lm head not a matrix");
-    int V = (int)headT->shape[0];
+    const safetensors* sfHead = hasHead ? &sfVocabHead : &sf;
+    const safetensors* sfEmbUse = hasEmbed ? &sfVocabEmbed : &sf;
+
+    int V = d->vocab;
+    const sa_tensor* headT = safetensors_find(sfHead, "lm_head.weight");
+    if (headT == NULL && hasHead) headT = require(sfHead, "lm_head.weight");
+    if (headT != NULL) {
+        if (headT->ndim < 2) fatal("lm head not a matrix");
+        if ((int)headT->shape[0] != V) fatal("lm head vocab size mismatch vs quant_config");
+    } else {
+        const sa_tensor* embT = require(sfEmbUse, "model.language_model.embed_tokens.weight");
+        if ((int)embT->shape[0] != V) fatal("embed vocab size mismatch vs quant_config");
+    }
     w.vocab = V;
+    w.layerCount = d->layerCount;
 
-    loadEmbedLike(s, sfHead, "lm_head.weight", "lmHead", V, &w.lmHead);
-    loadEmbedLike(s, sfEmbUse, "model.language_model.embed_tokens.weight", "embed", V, &w.embed);
+    w.layerBufs = (buffer*)calloc((size_t)d->layerCount * 13, sizeof(buffer));
+    w.gammaIn = w.layerBufs + 0 * d->layerCount;
+    w.gammaF = w.layerBufs + 1 * d->layerCount;
+    w.qNorm = w.layerBufs + 2 * d->layerCount;
+    w.kNorm = w.layerBufs + 3 * d->layerCount;
+    w.conv = w.layerBufs + 4 * d->layerCount;
+    w.aLog = w.layerBufs + 5 * d->layerCount;
+    w.dtBias = w.layerBufs + 6 * d->layerCount;
+    w.attnNorm = w.layerBufs + 7 * d->layerCount;
+    w.tensorBufs = (tensor*)calloc((size_t)d->layerCount * 5, sizeof(tensor));
+    w.proj = w.tensorBufs + 0 * d->layerCount;
+    w.out = w.tensorBufs + 1 * d->layerCount;
+    w.gate = w.tensorBufs + 2 * d->layerCount;
+    w.up = w.tensorBufs + 3 * d->layerCount;
+    w.down = w.tensorBufs + 4 * d->layerCount;
+
+    loadEmbedLike(s, sfEmbUse, "model.language_model.embed_tokens.weight", "embed", V, d->K, &w.embed);
+    if (d->tied) {
+        w.lmHead = w.embed;
+    } else if (hasHead) {
+        loadEmbedLike(s, sfHead, "lm_head.weight", "lmHead", V, d->K, &w.lmHead);
+    } else {
+        loadEmbedLike(s, sfEmbUse, "lm_head.weight", "lmHead", V, d->K, &w.lmHead);
+    }
 
     char n1[256], n2[256], n3[256], n4[256];
 
-    for (int L = 0; L < spec->layerCount; L++) {
+    for (int L = 0; L < spec->dims.layerCount; L++) {
         const layer* ly = &spec->layers[L];
         QuantType q = ly->attn.q;
         QuantType f = ly->ffn.q;
 
         lname(n1, sizeof(n1), L, "input_layernorm.weight");
-        w.gammaIn[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaIn", L, 1);
+        w.gammaIn[L] = loadVecBuffer(s, &sf, n1, d->K, "gammaIn", L, 1);
         lname(n1, sizeof(n1), L, "post_attention_layernorm.weight");
-        w.gammaF[L] = loadVecBuffer(s, &sf, n1, MODEL_K, "gammaF", L, 1);
+        w.gammaF[L] = loadVecBuffer(s, &sf, n1, d->K, "gammaF", L, 1);
 
         char projName[64], outName[64];
         snprintf(projName, sizeof(projName), "proj_%d", L);
@@ -470,39 +556,39 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 
         if (ly->attn.type == ATTENTION_FULL) {
             lname(n1, sizeof(n1), L, "self_attn.q_norm.weight");
-            w.qNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "qNorm", L, 1);
+            w.qNorm[L] = loadVecBuffer(s, &sf, n1, d->headDim, "qNorm", L, 1);
             lname(n1, sizeof(n1), L, "self_attn.k_norm.weight");
-            w.kNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_HEAD_DIM, "kNorm", L, 1);
+            w.kNorm[L] = loadVecBuffer(s, &sf, n1, d->headDim, "kNorm", L, 1);
 
             lname(n1, sizeof(n1), L, "self_attn.q_proj.weight");
             lname(n2, sizeof(n2), L, "self_attn.k_proj.weight");
             lname(n3, sizeof(n3), L, "self_attn.v_proj.weight");
             int cols = 0;
             float* mat = NULL;
-            if (cacheGet(projName, q, MODEL_K, MODEL_QKV_N) == NULL) {
-                mat = buildQkvMatrix(&sf, n1, n2, n3, MODEL_K, &cols);
-                if (cols != MODEL_QKV_N) fatal("qkv projection width mismatch");
+            if (cacheGet(projName, q, d->K, d->qkvN) == NULL) {
+                mat = buildQkvMatrix(&sf, n1, n2, n3, d->K, d->headDim, d->heads, &cols);
+                if (cols != d->qkvN) fatal("qkv projection width mismatch");
             }
-            w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_QKV_N, q, 1.0f, mat);
+            w.proj[L] = createTensor(s, projName, L, d->K, d->qkvN, q, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "self_attn.o_proj.weight");
             const char* on[1] = {n1};
             mat = NULL;
-            if (cacheGet(outName, q, MODEL_K, MODEL_K) == NULL) {
-                mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            if (cacheGet(outName, q, d->K, d->K) == NULL) {
+                mat = buildEngineMatrix(&sf, on, 1, d->K, &cols);
             }
-            w.out[L] = createTensor(s, outName, L, MODEL_K, MODEL_K, q, 1.0f, mat);
+            w.out[L] = createTensor(s, outName, L, d->K, d->K, q, 1.0f, mat);
             free(mat);
         } else {
             lname(n1, sizeof(n1), L, "linear_attn.conv1d.weight");
             w.conv[L] = loadConv(s, &sf, n1, L);
             lname(n1, sizeof(n1), L, "linear_attn.A_log");
-            w.aLog[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "aLog", L, 0);
+            w.aLog[L] = loadVecBuffer(s, &sf, n1, d->nV, "aLog", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.dt_bias");
-            w.dtBias[L] = loadVecBuffer(s, &sf, n1, MODEL_N_V, "dtBias", L, 0);
+            w.dtBias[L] = loadVecBuffer(s, &sf, n1, d->nV, "dtBias", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.norm.weight");
-            w.attnNorm[L] = loadVecBuffer(s, &sf, n1, MODEL_DIM, "attnNorm", L, 0);
+            w.attnNorm[L] = loadVecBuffer(s, &sf, n1, d->dim, "attnNorm", L, 0);
 
             lname(n1, sizeof(n1), L, "linear_attn.in_proj_qkv.weight");
             lname(n2, sizeof(n2), L, "linear_attn.in_proj_z.weight");
@@ -511,20 +597,20 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             const char* pn[4] = {n1, n2, n3, n4};
             int cols = 0;
             float* mat = NULL;
-            if (cacheGet(projName, q, MODEL_K, MODEL_PROJ_N) == NULL) {
-                mat = buildEngineMatrix(&sf, pn, 4, MODEL_K, &cols);
-                if (cols != MODEL_PROJ_N) fatal("delta projection width mismatch");
+            if (cacheGet(projName, q, d->K, d->projN) == NULL) {
+                mat = buildEngineMatrix(&sf, pn, 4, d->K, &cols);
+                if (cols != d->projN) fatal("delta projection width mismatch");
             }
-            w.proj[L] = createTensor(s, projName, L, MODEL_K, MODEL_PROJ_N, q, 1.0f, mat);
+            w.proj[L] = createTensor(s, projName, L, d->K, d->projN, q, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "linear_attn.out_proj.weight");
             const char* on[1] = {n1};
             mat = NULL;
-            if (cacheGet(outName, q, MODEL_K, MODEL_K) == NULL) {
-                mat = buildEngineMatrix(&sf, on, 1, MODEL_K, &cols);
+            if (cacheGet(outName, q, d->K, d->K) == NULL) {
+                mat = buildEngineMatrix(&sf, on, 1, d->K, &cols);
             }
-            w.out[L] = createTensor(s, outName, L, MODEL_K, MODEL_K, q, 1.0f, mat);
+            w.out[L] = createTensor(s, outName, L, d->K, d->K, q, 1.0f, mat);
             free(mat);
         }
 
@@ -538,37 +624,35 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             int cols = 0;
             lname(n1, sizeof(n1), L, "mlp.gate_proj.weight");
             float* mat = NULL;
-            if (cacheGet(gateName, f, MODEL_K, MODEL_FFN_N) == NULL) {
-                mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
-                if (cols != MODEL_FFN_N) fatal("gate width mismatch");
+            if (cacheGet(gateName, f, d->K, d->ffnN) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, d->K, &cols);
+                if (cols != d->ffnN) fatal("gate width mismatch");
             }
-            w.gate[L] = createTensor(s, gateName, L, MODEL_K, MODEL_FFN_N, f, 1.0f, mat);
+            w.gate[L] = createTensor(s, gateName, L, d->K, d->ffnN, f, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "mlp.up_proj.weight");
             mat = NULL;
-            if (cacheGet(upName, f, MODEL_K, MODEL_FFN_N) == NULL) {
-                mat = buildEngineMatrix(&sf, gn, 1, MODEL_K, &cols);
+            if (cacheGet(upName, f, d->K, d->ffnN) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, d->K, &cols);
             }
-            w.up[L] = createTensor(s, upName, L, MODEL_K, MODEL_FFN_N, f, 1.0f, mat);
+            w.up[L] = createTensor(s, upName, L, d->K, d->ffnN, f, 1.0f, mat);
             free(mat);
 
             lname(n1, sizeof(n1), L, "mlp.down_proj.weight");
             mat = NULL;
-            if (cacheGet(downName, f, MODEL_FFN_N, MODEL_K) == NULL) {
-                mat = buildEngineMatrix(&sf, gn, 1, MODEL_FFN_N, &cols);
-                if (cols != MODEL_K) fatal("down projection width mismatch");
+            if (cacheGet(downName, f, d->ffnN, d->K) == NULL) {
+                mat = buildEngineMatrix(&sf, gn, 1, d->ffnN, &cols);
+                if (cols != d->K) fatal("down projection width mismatch");
             }
-            w.down[L] = createTensor(s, downName, L, MODEL_FFN_N, MODEL_K, f, 1.0f, mat);
+            w.down[L] = createTensor(s, downName, L, d->ffnN, d->K, f, 1.0f, mat);
             free(mat);
         }
     }
 
     safetensors_close(&sf);
-    if (customVocab) {
-        safetensors_close(&sfLm);
-        safetensors_close(&sfEmb);
-    }
+    if (hasHead) safetensors_close(&sfVocabHead);
+    if (hasEmbed) safetensors_close(&sfVocabEmbed);
     cacheClear();
 
     createTransferAndCopy(s.dev.device, s.dev.queue, g_wbufs, g_wbufsCount);
@@ -586,7 +670,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 }
 
 void destroyWeights(session s, model_weights* w) {
-    for (int L = 0; L < MODEL_LAYERS; L++) {
+    for (int L = 0; L < w->layerCount; L++) {
         destroyTensor(s, &w->proj[L]);
         destroyTensor(s, &w->out[L]);
         destroyTensor(s, &w->gate[L]);
@@ -601,7 +685,13 @@ void destroyWeights(session s, model_weights* w) {
         if (w->dtBias[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, w->dtBias[L]);
         if (w->attnNorm[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, w->attnNorm[L]);
     }
+    free(w->layerBufs);
+    free(w->tensorBufs);
     destroyBuffer(s.dev.device, w->theta);
     destroyBuffer(s.dev.device, w->gammaFinal);
     destroyBuffer(s.dev.device, w->lmHead);
+    if (w->lmHead.buffer != w->embed.buffer) {
+        destroyBuffer(s.dev.device, w->embed);
+    }
 }
+

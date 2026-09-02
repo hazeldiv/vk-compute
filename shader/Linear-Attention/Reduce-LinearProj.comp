@@ -4,6 +4,11 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Params {
     uint N;
+    uint kOff;
+    uint vOff;
+    uint zOff;
+    uint aOff;
+    uint bOff;
 } prm;
 
 layout(set = 0, binding = 0) readonly restrict buffer PartialBuffer { float P[]; };
@@ -14,12 +19,6 @@ layout(set = 0, binding = 4) buffer zOutBuffer { float zOut[]; };
 layout(set = 0, binding = 5) buffer aOutBuffer { float aOut[]; };
 layout(set = 0, binding = 6) buffer bOutBuffer { float bOut[]; };
 
-#define K_OFF 2048
-#define V_OFF 4096
-#define Z_OFF 8192
-#define A_OFF 12288
-#define B_OFF 12320
-
 void main() {
     uint globalCol = gl_GlobalInvocationID.x;
     if (globalCol >= prm.N) return;
@@ -29,17 +28,17 @@ void main() {
         acc += P[z * prm.N + globalCol];
     }
 
-    if (globalCol < K_OFF) {
+    if (globalCol < prm.kOff) {
         qOut[globalCol] = acc;
-    } else if (globalCol < V_OFF) {
-        kOut[globalCol - K_OFF] = acc;
-    } else if (globalCol < Z_OFF) {
-        vOut[globalCol - V_OFF] = acc;
-    } else if (globalCol < A_OFF) {
-        zOut[globalCol - Z_OFF] = acc;
-    } else if (globalCol < B_OFF) {
-        aOut[globalCol - A_OFF] = acc;
+    } else if (globalCol < prm.vOff) {
+        kOut[globalCol - prm.kOff] = acc;
+    } else if (globalCol < prm.zOff) {
+        vOut[globalCol - prm.vOff] = acc;
+    } else if (globalCol < prm.aOff) {
+        zOut[globalCol - prm.zOff] = acc;
+    } else if (globalCol < prm.bOff) {
+        aOut[globalCol - prm.aOff] = acc;
     } else {
-        bOut[globalCol - B_OFF] = acc;
+        bOut[globalCol - prm.bOff] = acc;
     }
 }

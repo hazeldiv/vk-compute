@@ -12,28 +12,41 @@ static buffer createZeroed(session s, int64_t size, const char* name) {
 
 model_state createState(session s, const model_config* spec, int maxM, int vocab, int verbose) {
     model_state st = {0};
+    const model_dims* d = &spec->dims;
     st.maxM = maxM;
-    int mn = maxM * MODEL_K;
+    st.layerCount = d->layerCount;
+    int maxCtx = d->maxCtx;
+    int mn = maxM * d->K;
+
+    st.layerBufs = (buffer*)calloc((size_t)d->layerCount * 8, sizeof(buffer));
+    st.kCache = st.layerBufs + 0 * d->layerCount;
+    st.vCache = st.layerBufs + 1 * d->layerCount;
+    st.kScale = st.layerBufs + 2 * d->layerCount;
+    st.kZero = st.layerBufs + 3 * d->layerCount;
+    st.vScale = st.layerBufs + 4 * d->layerCount;
+    st.vZero = st.layerBufs + 5 * d->layerCount;
+    st.stateS = st.layerBufs + 6 * d->layerCount;
+    st.convHist = st.layerBufs + 7 * d->layerCount;
 
     st.h = createZeroed(s, (int64_t)sizeof(float) * mn, "h");
-    st.act = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "act");
+    st.act = createZeroed(s, (int64_t)sizeof(float) * maxM * d->ffnN, "act");
     st.embOut = createZeroed(s, (int64_t)sizeof(float) * mn, "embOut");
     st.embStaged = createZeroed(s, (int64_t)sizeof(float) * mn, "embStaged");
     st.yGated = createZeroed(s, (int64_t)sizeof(float) * mn, "yGated");
     st.attnOut = createZeroed(s, (int64_t)sizeof(float) * mn, "attnOut");
-    st.gAttn = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_Q_OFF, "gAttn");
+    st.gAttn = createZeroed(s, (int64_t)sizeof(float) * maxM * d->qOff, "gAttn");
     st.qOut = createZeroed(s, (int64_t)sizeof(float) * mn, "qOut");
-    st.qProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "qProj");
-    st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_QK * MODEL_DIM), "kProj");
-    st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "vProj");
-    st.zProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (MODEL_N_V * MODEL_DIM), "zProj");
-    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "aProj");
-    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_N_V, "bProj");
+    st.qProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (d->nQk * d->dim), "qProj");
+    st.kProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (d->nQk * d->dim), "kProj");
+    st.vProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (d->nV * d->dim), "vProj");
+    st.zProj = createZeroed(s, (int64_t)sizeof(float) * maxM * (d->nV * d->dim), "zProj");
+    st.aProj = createZeroed(s, (int64_t)sizeof(float) * maxM * d->nV, "aProj");
+    st.bProj = createZeroed(s, (int64_t)sizeof(float) * maxM * d->nV, "bProj");
 
-    for (int L = 0; L < spec->layerCount; L++) {
+    for (int L = 0; L < spec->dims.layerCount; L++) {
         const layer* ly = &spec->layers[L];
         if (ly->attn.type == ATTENTION_FULL) {
-            int64_t cacheBytes = (int64_t)MODEL_KV_ROWS * MODEL_MAX_CTX;
+            int64_t cacheBytes = (int64_t)d->kvRows * maxCtx;
             char nk[64], nv[64], nks[64], nkz[64], nvs[64], nvz[64];
             snprintf(nk, sizeof(nk), "kCache_%d", L);
             snprintf(nv, sizeof(nv), "vCache_%d", L);
@@ -44,10 +57,10 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
             if (ly->attn.q != QUANT_FP16) {
                 st.kCache[L] = createZeroed(s, cacheBytes, nk);
                 st.vCache[L] = createZeroed(s, cacheBytes, nv);
-                st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nks);
-                st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nkz);
-                st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvs);
-                st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_KV_HEADS * MODEL_MAX_CTX, nvz);
+                st.kScale[L] = createZeroed(s, (int64_t)sizeof(float) * d->kvHeads * maxCtx, nks);
+                st.kZero[L] = createZeroed(s, (int64_t)sizeof(float) * d->kvHeads * maxCtx, nkz);
+                st.vScale[L] = createZeroed(s, (int64_t)sizeof(float) * d->kvHeads * maxCtx, nvs);
+                st.vZero[L] = createZeroed(s, (int64_t)sizeof(float) * d->kvHeads * maxCtx, nvz);
                 if (verbose) fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 2 / (1024 * 1024), L);
             } else {
                 if (verbose) fprintf(stderr, "Allocating %lld MB for layer %d KV cache\n", (long long)cacheBytes * 4 / (1024 * 1024), L);
@@ -57,10 +70,10 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
         } else if (ly->attn.type == ATTENTION_DELTA) {
             char ns[64];
             snprintf(ns, sizeof(ns), "stateS_%d", L);
-            st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_N_V * MODEL_DIM * MODEL_DIM, ns);
+            st.stateS[L] = createZeroed(s, (int64_t)sizeof(float) * d->nV * d->dim * d->dim, ns);
             char nh[64];
             snprintf(nh, sizeof(nh), "convHist_%d", L);
-            st.convHist[L] = createZeroed(s, (int64_t)sizeof(float) * MODEL_CONV_HIST * MODEL_ZQKV_N, nh);
+            st.convHist[L] = createZeroed(s, (int64_t)sizeof(float) * d->convHist * d->zqkvN, nh);
         }
     }
 
@@ -69,8 +82,8 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
     uint32_t* tokenInit = (uint32_t*)calloc(maxM, sizeof(uint32_t));
     st.tokenIds = createBufferNamed(s.dev.device, s.dev.physicalDevice, tokenInit, (int64_t)sizeof(uint32_t) * maxM, MEMORY_RAM, "tokenIds");
     free(tokenInit);
-    float* lastInit = (float*)calloc(MODEL_K, sizeof(float));
-    st.lastRow = createBufferNamed(s.dev.device, s.dev.physicalDevice, lastInit, (int64_t)sizeof(float) * MODEL_K, MEMORY_RAM, "lastRow");
+    float* lastInit = (float*)calloc(d->K, sizeof(float));
+    st.lastRow = createBufferNamed(s.dev.device, s.dev.physicalDevice, lastInit, (int64_t)sizeof(float) * d->K, MEMORY_RAM, "lastRow");
     free(lastInit);
     int numGroups = (vocab + 255) / 256;
     st.maxValue = createZeroed(s, (int64_t)sizeof(float) * numGroups, "maxValue");
@@ -85,17 +98,17 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
     for (int i = 0; i < MAX_PENALTY_LEN; i++) hist[i] = 0xFFFFFFFFu;
     st.sampleHistory = createBufferNamed(s.dev.device, s.dev.physicalDevice, hist, (int64_t)sizeof(uint32_t) * MAX_PENALTY_LEN, MEMORY_VRAM, "sampleHistory");
     free(hist);
-    st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_K, "gemvPartial");
-    st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_QKV_N, "qkvPartial");
-    st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * MODEL_FFN_N, "ffnPartial");
-    st.linprojPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * MODEL_PROJ_N, "linprojPartial");
-    st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 528384, "attPartial");
+    st.gemvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * d->K, "gemvPartial");
+    st.qkvPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * d->qkvN, "qkvPartial");
+    st.ffnPartial = createZeroed(s, (int64_t)sizeof(float) * 8 * d->ffnN, "ffnPartial");
+    st.linprojPartial = createZeroed(s, (int64_t)sizeof(float) * 4 * d->projN, "linprojPartial");
+    st.attPartial = createZeroed(s, (int64_t)sizeof(float) * 128 * d->heads * (2 + d->headDim), "attPartial");
     st.invRms = createZeroed(s, (int64_t)sizeof(float) * maxM, "invRms");
-    st.attScores = createZeroed(s, (int64_t)maxM * MODEL_MAX_CTX * 4 * 2, "attScores");
-    st.smSum = createZeroed(s, (int64_t)sizeof(float) * maxM * 4, "smSum");
-    st.qkvRaw = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_QKV_N, "qkvRaw");
-    st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "gAct");
-    st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * MODEL_FFN_N, "uAct");
+    st.attScores = createZeroed(s, (int64_t)maxM * maxCtx * d->kvHeads * 2, "attScores");
+    st.smSum = createZeroed(s, (int64_t)sizeof(float) * maxM * d->kvHeads, "smSum");
+    st.qkvRaw = createZeroed(s, (int64_t)sizeof(float) * maxM * d->qkvN, "qkvRaw");
+    st.gAct = createZeroed(s, (int64_t)sizeof(float) * maxM * d->ffnN, "gAct");
+    st.uAct = createZeroed(s, (int64_t)sizeof(float) * maxM * d->ffnN, "uAct");
 
     buffer bufs[] = {
         st.h, st.act, st.embOut, st.yGated, st.attnOut, st.gAttn, st.qOut,
@@ -103,7 +116,7 @@ model_state createState(session s, const model_config* spec, int maxM, int vocab
         st.maxValue, st.maxIndex, st.result
     };
     createTransferAndCopy(s.dev.device, s.dev.queue, bufs, 16);
-    for (int L = 0; L < MODEL_LAYERS; L++) {
+    for (int L = 0; L < d->layerCount; L++) {
         if (st.kCache[L].buffer != VK_NULL_HANDLE) {
             buffer ks[] = {st.kCache[L], st.vCache[L], st.kScale[L], st.kZero[L], st.vScale[L], st.vZero[L]};
             createTransferAndCopy(s.dev.device, s.dev.queue, ks, 6);
@@ -136,7 +149,7 @@ void destroyState(session s, model_state* st) {
     destroyBuffer(s.dev.device, st->zProj);
     destroyBuffer(s.dev.device, st->aProj);
     destroyBuffer(s.dev.device, st->bProj);
-    for (int L = 0; L < MODEL_LAYERS; L++) {
+    for (int L = 0; L < st->layerCount; L++) {
         if (st->kCache[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->kCache[L]);
         if (st->vCache[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->vCache[L]);
         if (st->kScale[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->kScale[L]);
@@ -146,6 +159,7 @@ void destroyState(session s, model_state* st) {
         if (st->stateS[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->stateS[L]);
         if (st->convHist[L].buffer != VK_NULL_HANDLE) destroyBuffer(s.dev.device, st->convHist[L]);
     }
+    free(st->layerBufs);
     destroyBuffer(s.dev.device, st->position);
     destroyBuffer(s.dev.device, st->tokenIds);
     destroyBuffer(s.dev.device, st->maxValue);
@@ -180,4 +194,8 @@ uint32_t stateReadPosition(session s, model_state* st) {
     uint32_t pos = 0;
     readBuffer(s.dev.device, s.dev.physicalDevice, s.dev.queue, st->position, &pos);
     return pos;
+}
+
+int stateLayerCount(const model_state* st) {
+    return st->layerCount;
 }

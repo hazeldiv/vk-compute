@@ -1039,7 +1039,7 @@ void validateAttentionFP16(session s, int att_seq, int att_heads, int att_kv_hea
 
     operation ops[] = {
         {.shader = "Att-full-FP16.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, posBuffer}, .bufferCount = 5,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1144,7 +1144,7 @@ void validateAttentionINT8(session s, int att_seq, int att_heads, int att_kv_hea
 
     operation ops[] = {
         {.shader = "Att-full-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1255,7 +1255,7 @@ void validateAttentionINT4(session s, int att_seq, int att_heads, int att_kv_hea
 
     operation ops[] = {
         {.shader = "Att-full-INT4.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, outBuffer, kScaleBuf, kZeroBuf, vScaleBuf, vZeroBuf, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1636,7 +1636,7 @@ void validateQkvRopeFP16(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     operation ops[] = {
         {.shader = "RmsNorm-QKV-FP16.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 11,
-         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset}, .pushConstantCount = 6,
+         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset, 32768, 256, 64}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1748,7 +1748,7 @@ void validateQkvRopeINT8(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     operation ops[] = {
         {.shader = "RmsNorm-QKV-INT8.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 17,
-         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset}, .pushConstantCount = 6,
+         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset, 32768, 256, 64}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -1870,7 +1870,7 @@ void validateQkvRopeINT4(session s, int K, int qkv_heads, int qkv_kv_heads, int 
 
     operation ops[] = {
         {.shader = "RmsNorm-QKV-INT4.spv", .buffers = {xBuffer, gammaBuffer, weightBuffer, scaleBuffer, zeroBuffer, thetaBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 17,
-         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset}, .pushConstantCount = 6,
+         .pushConstants = {1, n_total, k, g_offset, k_offset, v_offset, 32768, 256, 64}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -2056,7 +2056,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2065,7 +2065,7 @@ void validateGatedDeltaNetFP16(session s, int K, float* input, float* input2, fl
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "RmsNorm-LinearProj-FP16.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2176,7 +2176,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2185,7 +2185,7 @@ void validateGatedDeltaNetINT8(session s, int K, float* input, float* input2, fl
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "RmsNorm-LinearProj-INT8.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2296,7 +2296,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2305,7 +2305,7 @@ void validateGatedDeltaNetINT4(session s, int K, float* input, float* input2, fl
          .pushConstants = {1, out_n, K}, .pushConstantCount = 3,
          .dispatchX = out_n / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "RmsNorm-LinearProj-INT4.spv", .buffers = {x2Buffer, gammaBuffer, wInBuffer, wInScale, wInZero, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 11,
-         .pushConstants = {1, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GatedDeltaNet.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
          .pushConstants = {n_v, n_qk, dim}, .pushConstantCount = 3,
@@ -2412,10 +2412,10 @@ void validateGatedDeltaNetGEMMFP16(session s, int M, int K, float* input, float*
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, zOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 9,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1},
         {.shader = "GatedDeltaNet-GEMM.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer, zOutBuffer, wnBuffer, aLogBuffer, dtBiasBuffer}, .bufferCount = 11,
-         .pushConstants = {M}, .pushConstantCount = 1,
+         .pushConstants = {M, 32, 16}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMM-FP16.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer}, .bufferCount = 3,
          .pushConstants = {M, out_n, K}, .pushConstantCount = 3,
@@ -2511,10 +2511,10 @@ void validateGatedDeltaNetGEMMINT8(session s, int M, int K, float* input, float*
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, wInScale, wInZero}, .bufferCount = 10,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1},
         {.shader = "GatedDeltaNet-GEMM.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
-         .pushConstants = {M}, .pushConstantCount = 1,
+         .pushConstants = {M, 32, 16}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMM-INT8.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
          .pushConstants = {M, out_n, K}, .pushConstantCount = 3,
@@ -2609,10 +2609,10 @@ void validateGatedDeltaNetGEMMINT4(session s, int M, int K, float* input, float*
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, wInScale, wInZero}, .bufferCount = 10,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1},
         {.shader = "GatedDeltaNet-GEMM.spv", .buffers = {qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, sBuffer, yGatedBuffer}, .bufferCount = 7,
-         .pushConstants = {M}, .pushConstantCount = 1,
+         .pushConstants = {M, 32, 16}, .pushConstantCount = 3,
          .dispatchX = n_v, .dispatchY = 1, .dispatchZ = 1},
         {.shader = "GEMM-INT4.spv", .buffers = {yGatedBuffer, wOutBuffer, outBuffer, wOutScale, wOutZero}, .bufferCount = 5,
          .pushConstants = {M, out_n, K}, .pushConstantCount = 3,
@@ -2786,7 +2786,7 @@ void validateQkvRopeSplitKFP16(session s, int K, int qkv_heads, int qkv_kv_heads
          .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
          .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
         {.shader = "Reduce-Rope-FP16.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, thetaBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 9,
-         .pushConstants = {n_total, g_offset, k_offset, v_offset}, .pushConstantCount = 4,
+         .pushConstants = {n_total, g_offset, k_offset, v_offset, 32768, 256, 64, 16, 4}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -2899,7 +2899,7 @@ void validateQkvRopeSplitKINT8(session s, int K, int qkv_heads, int qkv_kv_heads
          .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
          .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
         {.shader = "Reduce-Rope-INT8.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, thetaBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 13,
-         .pushConstants = {n_total, g_offset, k_offset, v_offset}, .pushConstantCount = 4,
+         .pushConstants = {n_total, g_offset, k_offset, v_offset, 32768, 256, 64, 16, 4}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -3023,7 +3023,7 @@ void validateQkvRopeSplitKINT4(session s, int K, int qkv_heads, int qkv_kv_heads
          .pushConstants = {1, n_total, k}, .pushConstantCount = 3,
          .dispatchX = n_total / 256, .dispatchY = 4, .dispatchZ = 1},
         {.shader = "Reduce-Rope-INT4.spv", .buffers = {partialBuffer, qOutBuffer, kCacheBuffer, vCacheBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, thetaBuffer, posBuffer, qGammaBuffer, kGammaBuffer, gOutBuffer}, .bufferCount = 13,
-         .pushConstants = {n_total, g_offset, k_offset, v_offset}, .pushConstantCount = 4,
+         .pushConstants = {n_total, g_offset, k_offset, v_offset, 32768, 256, 64, 16, 4}, .pushConstantCount = 9,
          .dispatchX = n_total / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -3473,7 +3473,7 @@ void validateRmsNormLinearProjGEMMFP16(session s, int M, int K, float* input, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer}, .bufferCount = 8,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -3531,7 +3531,7 @@ void validateRmsNormLinearProjGEMMINT8(session s, int M, int K, float* input, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-INT8.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, wInScale, wInZero}, .bufferCount = 10,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -3589,7 +3589,7 @@ void validateRmsNormLinearProjGEMMINT4(session s, int M, int K, float* input, fl
 
     operation ops[] = {
         {.shader = "RmsNorm-LinearProj-GEMM-INT4.spv", .buffers = {xBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, wInScale, wInZero}, .bufferCount = 10,
-         .pushConstants = {M, proj_n, K}, .pushConstantCount = 3,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320}, .pushConstantCount = 8,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -4129,7 +4129,12 @@ static double linear_proj_split_run(session s, int M, int K, float* input, float
     ops[1].buffers[3] = vOut; ops[1].buffers[4] = zOut; ops[1].buffers[5] = aOut; ops[1].buffers[6] = bOut;
     ops[1].bufferCount = 7;
     ops[1].pushConstants[0] = nTotal;
-    ops[1].pushConstantCount = 1;
+    ops[1].pushConstants[1] = 2048;
+    ops[1].pushConstants[2] = 4096;
+    ops[1].pushConstants[3] = 8192;
+    ops[1].pushConstants[4] = 12288;
+    ops[1].pushConstants[5] = 12320;
+    ops[1].pushConstantCount = 6;
     ops[1].dispatchX = (nTotal + 255) / 256; ops[1].dispatchY = 1; ops[1].dispatchZ = 1;
 
     if (hasScale) {
@@ -4347,10 +4352,10 @@ void validateAttentionSplitKFP16(session s, int att_seq, int att_heads, int att_
 
     operation ops[] = {
         {.shader = "Att-SplitK-FP16.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, partialBuffer, posBuffer}, .bufferCount = 5,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 32, .dispatchZ = 1},
         {.shader = "Reduce-Att.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {16}, .pushConstantCount = 1,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4453,10 +4458,10 @@ void validateAttentionSplitKINT8(session s, int att_seq, int att_heads, int att_
 
     operation ops[] = {
         {.shader = "Att-SplitK-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, partialBuffer, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 32, .dispatchZ = 1},
         {.shader = "Reduce-Att.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-.pushConstants = {0}, .pushConstantCount = 0,
+.pushConstants = {16}, .pushConstantCount = 1,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4565,10 +4570,10 @@ void validateAttentionSplitKINT4(session s, int att_seq, int att_heads, int att_
 
     operation ops[] = {
         {.shader = "Att-SplitK-INT4.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, partialBuffer, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 32, .dispatchZ = 1},
         {.shader = "Reduce-Att.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-.pushConstants = {0}, .pushConstantCount = 0,
+.pushConstants = {16}, .pushConstantCount = 1,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4630,10 +4635,10 @@ void validateAttentionSplitK2FP16(session s, int att_seq, int att_heads, int att
 
     operation ops[] = {
         {.shader = "Att-SplitK2-FP16.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, partialBuffer, posBuffer}, .bufferCount = 5,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 128, .dispatchZ = 1},
         {.shader = "Reduce-Att2.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4741,10 +4746,10 @@ void validateAttentionSplitK2INT8(session s, int att_seq, int att_heads, int att
 
     operation ops[] = {
         {.shader = "Att-SplitK2-INT8.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, partialBuffer, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 128, .dispatchZ = 1},
         {.shader = "Reduce-Att2.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -4858,10 +4863,10 @@ void validateAttentionSplitK2INT4(session s, int att_seq, int att_heads, int att
 
     operation ops[] = {
         {.shader = "Att-SplitK2-INT4.spv", .buffers = {keyBuffer, valueBuffer, queryBuffer, kScaleBuffer, kZeroBuffer, vScaleBuffer, vZeroBuffer, partialBuffer, posBuffer}, .bufferCount = 9,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads, .dispatchY = 128, .dispatchZ = 1},
         {.shader = "Reduce-Att2.spv", .buffers = {partialBuffer, outBuffer, posBuffer}, .bufferCount = 3,
-         .pushConstants = {0}, .pushConstantCount = 0,
+         .pushConstants = {32768, 4, 1024, 16, 256}, .pushConstantCount = 5,
          .dispatchX = heads * dim / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 2);
@@ -5220,7 +5225,7 @@ void validateEmbedRmsNormLinearProjFP16(session s, int vocabSize, int K, uint32_
 
     operation ops[] = {
         {.shader = "Embed-RmsNorm-LinearProj-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer}, .bufferCount = 10,
-         .pushConstants = {1, proj_n, K, vocabSize}, .pushConstantCount = 4,
+         .pushConstants = {1, proj_n, K, 2048, 4096, 8192, 12288, 12320, vocabSize}, .pushConstantCount = 9,
          .dispatchX = (proj_n + 255) / 256, .dispatchY = 1, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -5304,7 +5309,7 @@ void validateEmbedRmsNormLinearProjGEMMFP16(session s, int M, int vocabSize, int
 
     operation ops[] = {
         {.shader = "Embed-RmsNorm-LinearProj-GEMM-FP16.spv", .buffers = {tokenBuffer, weightBuffer, gammaBuffer, wInBuffer, qOutBuffer, kOutBuffer, vOutBuffer, aOutBuffer, bOutBuffer, embOutBuffer}, .bufferCount = 10,
-         .pushConstants = {M, proj_n, K, vocabSize}, .pushConstantCount = 4,
+         .pushConstants = {M, proj_n, K, 2048, 4096, 8192, 12288, 12320, vocabSize}, .pushConstantCount = 9,
          .dispatchX = proj_n / 16, .dispatchY = M / 16, .dispatchZ = 1}
     };
     double ms = run_ops(s, ops, 1);
@@ -5385,7 +5390,7 @@ static void conv_silu_run(session s, const float* z, const float* conv, buffer h
     operation ops[] = {{
         .shader = "Conv-SiLU.spv",
         .buffers = {qB, kB, vB, convB, histB}, .bufferCount = 5,
-        .pushConstants = {M}, .pushConstantCount = 1,
+        .pushConstants = {M, 2048, 4096, 8192}, .pushConstantCount = 4,
         .dispatchX = 8192 / 256, .dispatchY = 1, .dispatchZ = 1}};
     *ms = run_ops(s, ops, 1);
 

@@ -2,10 +2,6 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : require
 #define TS 256
-#define HEAD_DIM 256
-#define ROTARY_DIM 64
-#define ROTARY_HALF 32
-#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -15,6 +11,11 @@ layout(push_constant) uniform Params {
     uint kOffset;
     uint vOffset;
     uint tokBase;
+    uint maxCtx;
+    uint headDim;
+    uint rotaryDim;
+    uint heads;
+    uint kvHeads;
 } param;
 
 layout(set = 0, binding = 0) readonly restrict buffer RawBuffer { float raw[]; };
@@ -33,6 +34,10 @@ shared float shared_sum2;
 const float EPSILON = 1e-6;
 
 void main() {
+    uint HEAD_DIM = param.headDim;
+    uint ROTARY_DIM = param.rotaryDim;
+    uint ROTARY_HALF = ROTARY_DIM / 2u;
+    uint MAXCTX = param.maxCtx;
     uint col = gl_LocalInvocationID.x;
     uint head = gl_WorkGroupID.x;
     uint row = gl_WorkGroupID.y;
@@ -114,5 +119,5 @@ void main() {
         acc = rope_shared[col];
     }
 
-    qOut[row * param.gOffset + globalCol] = acc * 0.0625;
+    qOut[row * param.gOffset + globalCol] = acc * inversesqrt(float(HEAD_DIM));
 }

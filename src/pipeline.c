@@ -27,6 +27,19 @@ uint32_t* readShaderFile(const char filename[], size_t* outSize) {
     return buffer;
 }
 
+static uint32_t specValues[MAX_SPEC_CONSTANTS];
+static int specCount = 0;
+
+void pipelineSetSpecInt(int index, int value) {
+    if (index >= MAX_SPEC_CONSTANTS) return;
+    specValues[index] = (uint32_t)value;
+    if (index + 1 > specCount) specCount = index + 1;
+}
+
+void pipelineClearSpec(void) {
+    specCount = 0;
+}
+
 pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout, const char shaderPath[], uint32_t pushConstantSize) {
     pipeline pipeline = {0};
     size_t shaderSize = 0;
@@ -63,6 +76,20 @@ pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout,
         exit(EXIT_FAILURE);
     }
 
+    VkSpecializationMapEntry specEntries[MAX_SPEC_CONSTANTS];
+    for (int i = 0; i < specCount; i++) {
+        specEntries[i].constantID = (uint32_t)i;
+        specEntries[i].offset = sizeof(uint32_t) * i;
+        specEntries[i].size = sizeof(uint32_t);
+    }
+    VkSpecializationInfo specInfo = {0};
+    if (specCount > 0) {
+        specInfo.mapEntryCount = (uint32_t)specCount;
+        specInfo.pMapEntries = specEntries;
+        specInfo.dataSize = sizeof(uint32_t) * (size_t)specCount;
+        specInfo.pData = specValues;
+    }
+
     VkComputePipelineCreateInfo pipelineInfo = {0};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipelineInfo.layout = pipeline.layout;
@@ -70,7 +97,7 @@ pipeline createPipeline(VkDevice device, VkDescriptorSetLayout descriptorLayout,
     pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     pipelineInfo.stage.module = shaderModule;
     pipelineInfo.stage.pName = "main";
-    pipelineInfo.stage.pSpecializationInfo = NULL;
+    pipelineInfo.stage.pSpecializationInfo = (specCount > 0) ? &specInfo : NULL;
 
     if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, NULL, &pipeline.pipeline) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to compile compute pipeline for %s\n", shaderPath);

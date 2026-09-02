@@ -5,12 +5,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #define TS 256
 #define vec 4
-#define d_model 4096
-#define K_OFF 2048
-#define V_OFF 4096
-#define Z_OFF 8192
-#define A_OFF 12288
-#define B_OFF 12320
+layout(constant_id = 0) const int d_model = 4096;
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
@@ -18,6 +13,12 @@ layout(push_constant) uniform Dimensions {
     uint M;
     uint N;
     uint K;
+    uint kOff;
+    uint vOff;
+    uint zOff;
+    uint aOff;
+    uint bOff;
+    uint V;
 } param;
 
 const float EPSILON = 1e-6;
@@ -81,17 +82,17 @@ void main() {
         baseRow += param.N;
     }
 
-    if (globalCol < K_OFF) {
+    if (globalCol < param.kOff) {
         qOut[globalCol] = acc;
-    } else if (globalCol < V_OFF) {
-        kOut[globalCol - K_OFF] = acc;
-    } else if (globalCol < Z_OFF) {
-        vOut[globalCol - V_OFF] = acc;
-    } else if (globalCol < A_OFF) {
-        zOut[globalCol - Z_OFF] = acc;
-    } else if (globalCol < B_OFF) {
-        aOut[globalCol - A_OFF] = acc;
+    } else if (globalCol < param.vOff) {
+        kOut[globalCol - param.kOff] = acc;
+    } else if (globalCol < param.zOff) {
+        vOut[globalCol - param.vOff] = acc;
+    } else if (globalCol < param.aOff) {
+        zOut[globalCol - param.zOff] = acc;
+    } else if (globalCol < param.bOff) {
+        aOut[globalCol - param.aOff] = acc;
     } else {
-        bOut[globalCol - B_OFF] = acc;
+        bOut[globalCol - param.bOff] = acc;
     }
 }

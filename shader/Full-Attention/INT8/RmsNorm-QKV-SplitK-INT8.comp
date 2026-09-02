@@ -6,7 +6,7 @@
 #extension GL_EXT_shader_8bit_storage : require
 #define TS 256
 #define vec 4
-#define d_model 4096
+layout(constant_id = 0) const int d_model = 4096;
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 

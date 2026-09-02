@@ -14,7 +14,12 @@ typedef struct generator {
     model_weights w;
     model_state st;
     const model_config* spec;
+    const model_dims* dims;
     int maxM;
+    int maxCtx;
+    int eos;
+    int vocab;
+    int layerCount;
     operation groupOps[MODEL_MAX_OPS];
     int groupOpCount;
     operation groupOpsShort[MODEL_MAX_OPS];
@@ -24,9 +29,6 @@ typedef struct generator {
     operation finalOps[MODEL_MAX_OPS];
     int finalOpCount;
     uint32_t nextPos;
-    int vocab;
-    int eos;
-    int maxCtx;
     char dumpDir[256];
     int dumpLayers;
     int sampling;
@@ -34,7 +36,7 @@ typedef struct generator {
     int dumpHiddenReq;
 } generator;
 
-generator* createGenerator(session s, const model_config* spec, int maxM, const char* weightDir, const char* customHead, const char* customEmbed, int eos, int maxCtx, int verboseWeights);
+generator* createGenerator(session s, const model_config* spec, const char* weightDir, int verboseWeights);
 void destroyGenerator(generator* g);
 uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens);
 void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNewTokens, void (*emit)(uint32_t token, void* ctx), void* ctx);

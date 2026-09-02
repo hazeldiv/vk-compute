@@ -3,12 +3,11 @@
 #extension GL_KHR_shader_subgroup_basic : enable
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_16bit_storage : require
-#define MAXCTX 32768
 #define NEG_INF -1e30
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; } param;
+layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; uint maxCtx; uint kvHeads; uint qDim; uint kvRows; } param;
 
 layout(set = 0, binding = 0) buffer S { float16_t s[]; };
 layout(set = 0, binding = 1) writeonly restrict buffer SmSum { float smSum[]; };
@@ -20,6 +19,7 @@ void main() {
     uint row = gl_WorkGroupID.x;
     uint hL = gl_WorkGroupID.y;
     uint lane = gl_LocalInvocationID.x;
+    uint MAXCTX = param.maxCtx;
     uint pRow = (hL * param.mRows + row) * MAXCTX;
     uint limit = param.qOff + row;
 

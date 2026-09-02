@@ -45,6 +45,19 @@ static FILE* timingFile = NULL;
 static timing_agg aggTable[TIMING_AGG_MAX];
 static int aggCount = 0;
 static double grandTotalMs = 0.0;
+static char shaderRoot[128] = "";
+
+const char* shaderRootDir(void) {
+    return shaderRoot;
+}
+
+void setShaderRootDir(const char* dir) {
+    if (dir == NULL) {
+        shaderRoot[0] = '\0';
+        return;
+    }
+    snprintf(shaderRoot, sizeof(shaderRoot), "%s", dir);
+}
 
 void setTimingEnabled(int enabled) {
     timingEnabled = enabled;
@@ -140,8 +153,13 @@ static pipe_entry* getPipeEntry(session s, const operation* op) {
     e->bufCount = op->bufferCount;
     e->setLayout = createDescriptorSetLayout(s.dev.device, op->bufferCount);
 
-    char shaderPath[160];
-    snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
+    char shaderPath[288];
+    const char* root = shaderRootDir();
+    if (root[0] != '\0') {
+        snprintf(shaderPath, sizeof(shaderPath), "%s/%s", root, op->shader);
+    } else {
+        snprintf(shaderPath, sizeof(shaderPath), "shader/%s", op->shader);
+    }
     pipeline p = createPipeline(s.dev.device, e->setLayout, shaderPath, (uint32_t)pushSize);
     e->pipeline = p.pipeline;
     e->layout = p.layout;

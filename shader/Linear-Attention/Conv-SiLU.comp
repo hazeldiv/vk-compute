@@ -1,12 +1,8 @@
 #version 450
 
-#define K_OFF 2048
-#define V_OFF 4096
-#define ZQKV 8192
-
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions { uint M; } dims;
+layout(push_constant) uniform Dimensions { uint M; uint kOff; uint vOff; uint zqkv; } dims;
 
 layout(set = 0, binding = 0) buffer qBuffer { float q[]; };
 layout(set = 0, binding = 1) buffer kBuffer { float k[]; };
@@ -16,6 +12,9 @@ layout(set = 0, binding = 4) buffer histBuffer { float hist[]; };
 
 void main() {
     uint c = gl_GlobalInvocationID.x;
+    uint K_OFF = dims.kOff;
+    uint V_OFF = dims.vOff;
+    uint ZQKV = dims.zqkv;
     if (c >= ZQKV) return;
 
     float w0 = conv[c * 4 + 0];
@@ -36,7 +35,7 @@ void main() {
         stride = K_OFF;
         off = c - K_OFF;
     } else {
-        stride = V_OFF;
+        stride = ZQKV - V_OFF;
         off = c - V_OFF;
     }
 

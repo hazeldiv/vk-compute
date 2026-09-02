@@ -40,7 +40,7 @@ void main() {
     for (uint i = tid; i < (HEAD_DIM / 4) * TS; i += TS * TS) {
         uint dv = i / TS;
         uint tok = i % TS;
-        Qs[dv][tok] = query[(mBase + tok) * 1024 + h * (HEAD_DIM / 4) + dv];
+        Qs[dv][tok] = query[(mBase + tok) * (Q_DIM / 4) +  h * (HEAD_DIM / 4) + dv];
     }
     barrier();
 

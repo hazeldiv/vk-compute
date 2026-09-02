@@ -5,15 +5,13 @@
 #extension GL_EXT_shader_16bit_storage : require
 #define TS 64
 #define LOOPS 16
-#define HEADS 16
-#define KV_HEADS 4
 #define HEAD_DIM 256
-#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
 #define NEG_INF -1e30
-#define ACC_BASE (MAXC * HEADS * 2)
 #define MAXC 32
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
 
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uint16_t key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uint16_t value[]; };
@@ -29,6 +27,10 @@ float halfAt(uint h) {
 }
 
 void main() {
+    uint HEADS = param.heads;
+    uint KV_HEADS = param.kvHeads;
+    uint KV_TOTAL_ROWS = param.kvRows;
+    uint ACC_BASE = MAXC * HEADS * 2;
     uint lane = gl_LocalInvocationID.x;
     uint h = gl_WorkGroupID.x;
     uint c = gl_WorkGroupID.y;

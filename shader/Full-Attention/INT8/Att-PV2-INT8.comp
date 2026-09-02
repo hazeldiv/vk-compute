@@ -3,15 +3,10 @@
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_8bit_storage : require
 #define TS 16
-#define HEAD_DIM 256
-#define KV_HEADS 4
-#define Q_DIM 4096
-#define KV_TOTAL_ROWS 1024
-#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
-layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; } param;
+layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; uint maxCtx; uint kvHeads; uint qDim; uint kvRows; } param;
 
 layout(set = 0, binding = 0) readonly restrict buffer S { float16_t s[]; };
 layout(set = 0, binding = 1) readonly restrict buffer V { uint8_t value[]; };
@@ -24,6 +19,11 @@ shared vec4 Vsub[TS][TS + 1];
 shared float p_sh[TS][TS + 1];
 
 void main() {
+    uint HEAD_DIM = 256u;
+    uint KV_HEADS = param.kvHeads;
+    uint Q_DIM = param.qDim;
+    uint KV_TOTAL_ROWS = param.kvRows;
+    uint MAXCTX = param.maxCtx;
     uint row = gl_LocalInvocationID.y;
     uint col = gl_LocalInvocationID.x;
     uint tid = row * TS + col;

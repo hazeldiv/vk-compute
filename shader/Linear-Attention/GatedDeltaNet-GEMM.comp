@@ -4,7 +4,7 @@
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions { uint M; } param;
+layout(push_constant) uniform Dimensions { uint M; uint nV; uint nQk; } param;
 
 layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
 layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
@@ -38,7 +38,7 @@ void main() {
     uint c = gl_LocalInvocationID.x;
     uint tid = r * TS + c;
     uint h = gl_WorkGroupID.x;
-    uint qk = h >> 1;
+    uint qk = h * param.nQk / param.nV;
 
     uint numChunks = param.M / TS;
 
@@ -47,8 +47,8 @@ void main() {
 
         if (tid == 0) {
             for (uint m = 0; m < TS; m++) {
-                float a = aRaw[(mBase + m) * 32 + h];
-                float b = bRaw[(mBase + m) * 32 + h];
+                float a = aRaw[(mBase + m) * param.nV + h];
+                float b = bRaw[(mBase + m) * param.nV + h];
                 g_sh[m] = -exp(aLog[h]) * log(1.0 + exp(a + dtBias[h]));
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
             }
@@ -60,8 +60,8 @@ void main() {
         for (uint i = tid; i < TS * DIM; i += TS * TS) {
             uint m = i / DIM;
             uint d = i % DIM;
-            Ks[m][d] = K[(mBase + m) * (16 * DIM) + qk * DIM + d];
-            Qs[m][d] = Q[(mBase + m) * (16 * DIM) + qk * DIM + d];
+            Ks[m][d] = K[(mBase + m) * (param.nQk * DIM) + qk * DIM + d];
+            Qs[m][d] = Q[(mBase + m) * (param.nQk * DIM) + qk * DIM + d];
         }
         barrier();
 
@@ -133,7 +133,7 @@ void main() {
                     p += e * bj * Dk[j][m] * dj;
                     qc += e * bj * Dq[j][m] * dj;
                 }
-                float vm = V[(mBase + m) * (32 * DIM) + h * DIM + i];
+                float vm = V[(mBase + m) * (param.nV * DIM) + h * DIM + i];
                 float dv = vm - ecur * skv[i] - p;
                 delta[m][i] = dv;
 
@@ -148,7 +148,7 @@ void main() {
             }
             barrier();
             if (tid < DIM) {
-                uint gi = (mBase + m) * (32 * DIM) + h * DIM + tid;
+                uint gi = (mBase + m) * (param.nV * DIM) + h * DIM + tid;
                 float zv = z[gi];
                 yGated[gi] = y_sh[tid] * yinv * wnorm[tid] * (zv / (1.0 + exp(-zv)));
             }

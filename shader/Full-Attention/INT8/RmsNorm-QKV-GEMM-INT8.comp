@@ -215,7 +215,7 @@ void main() {
         #pragma unroll
         for (uint j = 0; j < 16; j++) {
             uint d = col * 16 + j;
-            qOut[mGlobal * param.gOffset + nBase + d] = norm_sh[row][d] * 0.0625;
+            qOut[mGlobal * param.gOffset + nBase + d] = norm_sh[row][d] * inversesqrt(float(HEAD_DIM));
         }
     } else {
         uint kvHead = head - kHeadBase;

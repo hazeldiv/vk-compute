@@ -9,7 +9,7 @@
 #include "session.h"
 
 #define MAX_OP_BUFFERS 18
-#define MAX_PUSH_CONSTANTS 8
+#define MAX_PUSH_CONSTANTS 16
 
 typedef struct operation {
     char shader[128];
@@ -33,5 +33,7 @@ void setTimingEnabled(int enabled);
 int isTimingEnabled(void);
 void closeTimingLog(void);
 double getExecutionTime(session s);
+const char* shaderRootDir(void);
+void setShaderRootDir(const char* dir);
 
 #endif

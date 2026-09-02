@@ -2,19 +2,20 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-#define HEADS 16
 #define HEAD_DIM 256
 #define TILE 64
 #define LOOPS 4
 #define NEG_INF -1e30
-#define ACC_BASE (MAXC * HEADS * 2)
 #define MAXC 128
+
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
 
 layout(set = 0, binding = 0) readonly buffer PartialBuffer { float P[]; };
 layout(set = 0, binding = 1) writeonly buffer OutBuffer { float y[]; };
 layout(set = 0, binding = 2) readonly buffer PositionBuffer { uint position[]; };
 
 void main() {
+    uint HEADS = param.heads;
     uint g = gl_GlobalInvocationID.x;
     uint h = g / HEAD_DIM;
     uint d = g % HEAD_DIM;
@@ -40,7 +41,7 @@ void main() {
         uint ml = c * HEADS + h;
         float w = exp(P[ml * 2] - m);
         l += w * P[ml * 2 + 1];
-        acc += w * P[ACC_BASE + ml * HEAD_DIM + d];
+        acc += w * P[MAXC * HEADS * 2 + ml * HEAD_DIM + d];
     }
     y[g] = (l > 0.0) ? (acc / l) : 0.0;
 }

@@ -3,30 +3,8 @@
 
 #include "data.h"
 
-#define MODEL_LAYERS 32
-#define MODEL_K 4096
-#define MODEL_QKV_N 10240
-#define MODEL_PROJ_N 12352
-#define MODEL_FFN_N 12288
-#define MODEL_HEADS 16
-#define MODEL_KV_HEADS 4
-#define MODEL_HEAD_DIM 256
-#define MODEL_ROTARY_DIM 64
-#define MODEL_N_QK 16
-#define MODEL_N_V 32
-#define MODEL_DIM 128
-#define MODEL_VOCAB 81920
+#define MODEL_MAX_LAYERS 64
 #define MODEL_EOS 81896
-#define MODEL_MAX_CTX 32768
-#define MODEL_KV_ROWS (MODEL_KV_HEADS * MODEL_HEAD_DIM)
-#define MODEL_Q_OFF (MODEL_HEADS * MODEL_HEAD_DIM)
-#define MODEL_G_OFF MODEL_Q_OFF
-#define MODEL_K_OFF ((MODEL_HEADS + MODEL_HEADS) * MODEL_HEAD_DIM)
-#define MODEL_V_OFF ((MODEL_HEADS + MODEL_HEADS + MODEL_KV_HEADS) * MODEL_HEAD_DIM)
-#define MODEL_ZQKV_N 8192
-#define MODEL_CONV_HIST 3
-#define MODEL_MAX_GEMM 16384
-#define MODEL_PREFILL_CHUNK 512
 #define MODEL_MAX_OPS 1280
 #define MAX_PENALTY_LEN 1024
 
@@ -56,14 +34,51 @@ typedef struct layer {
     ffn ffn;
 } layer;
 
-typedef struct model_config {
-    const char* name;
+typedef struct model_dims {
     int layerCount;
-    layer layers[MODEL_LAYERS];
+    int K;
+    int qkvN;
+    int projN;
+    int ffnN;
+    int heads;
+    int kvHeads;
+    int headDim;
+    int rotaryDim;
+    int rotaryHalf;
+    int nQk;
+    int nV;
+    int dim;
+    int kvRows;
+    int qOff;
+    int gOff;
+    int kOff;
+    int vOff;
+    int projKOff;
+    int projVOff;
+    int projZOff;
+    int projAOff;
+    int projBOff;
+    int zqkvN;
+    int convHist;
+    int maxCtx;
+    int vocab;
+    int eos;
+    int prefillChunk;
+    double ropeTheta;
+    double partialRotary;
+    int tied;
+} model_dims;
+
+typedef struct model_config {
+    char name[128];
+    char shaderDir[160];
+    model_dims dims;
+    layer layers[MODEL_MAX_LAYERS];
     QuantType embedQ;
     QuantType lmHeadQ;
 } model_config;
 
+int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride);
 const char* model_shader(const char* base, QuantType q);
 
 #endif

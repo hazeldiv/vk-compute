@@ -21,23 +21,26 @@ typedef struct model_weights {
     buffer embed;
     buffer lmHead;
     buffer gammaFinal;
-    buffer gammaIn[MODEL_LAYERS];
-    buffer gammaF[MODEL_LAYERS];
-    buffer qNorm[MODEL_LAYERS];
-    buffer kNorm[MODEL_LAYERS];
-    tensor proj[MODEL_LAYERS];
-    tensor out[MODEL_LAYERS];
-    tensor gate[MODEL_LAYERS];
-    tensor up[MODEL_LAYERS];
-    tensor down[MODEL_LAYERS];
-    buffer conv[MODEL_LAYERS];
-    buffer aLog[MODEL_LAYERS];
-    buffer dtBias[MODEL_LAYERS];
-    buffer attnNorm[MODEL_LAYERS];
+    buffer* gammaIn;
+    buffer* gammaF;
+    buffer* qNorm;
+    buffer* kNorm;
+    tensor* proj;
+    tensor* out;
+    tensor* gate;
+    tensor* up;
+    tensor* down;
+    buffer* conv;
+    buffer* aLog;
+    buffer* dtBias;
+    buffer* attnNorm;
+    buffer* layerBufs;
+    tensor* tensorBufs;
     int vocab;
+    int layerCount;
 } model_weights;
 
-model_weights createWeights(session s, const model_config* spec, const char* weightDir, const char* customHead, const char* customEmbed, int verbose);
+model_weights createWeights(session s, const model_config* spec, const char* weightDir, int verbose);
 void destroyWeights(session s, model_weights* w);
 
 #endif

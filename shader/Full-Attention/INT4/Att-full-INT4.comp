@@ -3,12 +3,11 @@
 
 #define TS 256
 #define HEAD_DIM 256
-#define KV_HEADS 4
-#define KV_TOTAL_ROWS (KV_HEADS * HEAD_DIM)
 #define NEG_INF -1e30
-#define MAXCTX 32768
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
 
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uint8_t key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
@@ -29,6 +28,9 @@ shared float vscale_s[TS];
 shared float vzero_s[TS];
 
 void main() {
+    uint KV_HEADS = param.kvHeads;
+    uint KV_TOTAL_ROWS = param.kvRows;
+    uint MAXCTX = param.maxCtx;
     uint tid = gl_LocalInvocationID.x;
     uint q_head_id = gl_WorkGroupID.x;
     uint kv_block_id = q_head_id / KV_HEADS;

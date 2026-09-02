@@ -33,18 +33,19 @@ shared float k_inv;
 shared float q_inv;
 
 void main() {
+    uint DIM = param.head_dim;
     uint i = gl_LocalInvocationID.x;
     uint h = gl_WorkGroupID.x;
-    uint qk = h >> 1;
+    uint qk = h * param.qk_heads / param.v_heads;
     uint r = i >> 1;
     uint hlf = i & 1u;
 
-    float vv = V[h * HEAD_DIM + r];
+    float vv = V[h * DIM + r];
     float a_raw = aRaw[h];
     float b_raw = bRaw[h];
 
-    if (i < HEAD_DIM / 4) {
-        uint b = qk * HEAD_DIM + i * 4;
+    if (i < DIM / 4) {
+        uint b = qk * DIM + i * 4;
         k4[i] = vec4(K[b], K[b+1], K[b+2], K[b+3]);
         q4[i] = vec4(Q[b], Q[b+1], Q[b+2], Q[b+3]);
     }
@@ -53,15 +54,15 @@ void main() {
     if (i == 0u) {
         float ksum = 0.0;
         float qsum = 0.0;
-        for (uint j = 0; j < HEAD_DIM / 4; j++) {
+        for (uint j = 0; j < DIM / 4; j++) {
             ksum += dot(k4[j], k4[j]);
             qsum += dot(q4[j], q4[j]);
         }
         k_inv = inversesqrt(ksum + 1e-6);
-        q_inv = inversesqrt(qsum + 1e-6) * (1.0 / sqrt(float(HEAD_DIM)));
+        q_inv = inversesqrt(qsum + 1e-6) * (1.0 / sqrt(float(DIM)));
     }
     barrier();
-    if (i < HEAD_DIM / 4) {
+    if (i < DIM / 4) {
         k4[i] = k4[i] * k_inv;
         q4[i] = q4[i] * q_inv;
     }
@@ -71,9 +72,9 @@ void main() {
     float alpha = exp(g);
     float beta = 1.0 / (1.0 + exp(-b_raw));
 
-    uint e = i & 127u;
+    uint e = i & (DIM - 1u);
     uvec2 cc = uvec2(e >> 2, e & 3u);
-    float kq_p = (i < 128u) ? k4[cc.x][cc.y] * q4[cc.x][cc.y] : 0.0;
+    float kq_p = (i < DIM) ? k4[cc.x][cc.y] * q4[cc.x][cc.y] : 0.0;
     float kq_wave = subgroupAdd(kq_p);
     if (subgroupElect()) {
         wave_kq[gl_SubgroupID] = kq_wave;
@@ -89,16 +90,16 @@ void main() {
     barrier();
     float kq_dot = wave_kq[0];
 
-    uint base4 = h * (HEAD_DIM * HEAD_DIM / 4) + r * (HEAD_DIM / 4) + hlf * (HEAD_DIM / 8);
+    uint base4 = h * (DIM * DIM / 4) + r * (DIM / 4) + hlf * (DIM / 8);
     vec4 vhA = vec4(0.0), vhB = vec4(0.0);
     vec4 yA = vec4(0.0), yB = vec4(0.0);
-    for (uint j = 0; j < HEAD_DIM / 8; j += 2) {
+    for (uint j = 0; j < DIM / 8; j += 2) {
         vec4 s0 = S[base4 + j];
         vec4 s1 = S[base4 + j + 1];
-        vhA += s0 * k4[hlf * (HEAD_DIM / 8) + j];
-        vhB += s1 * k4[hlf * (HEAD_DIM / 8) + j + 1];
-        yA += s0 * q4[hlf * (HEAD_DIM / 8) + j];
-        yB += s1 * q4[hlf * (HEAD_DIM / 8) + j + 1];
+        vhA += s0 * k4[hlf * (DIM / 8) + j];
+        vhB += s1 * k4[hlf * (DIM / 8) + j + 1];
+        yA += s0 * q4[hlf * (DIM / 8) + j];
+        yB += s1 * q4[hlf * (DIM / 8) + j + 1];
     }
     vec4 vh4 = vhA + vhB;
     vec4 y4 = yA + yB;
@@ -113,8 +114,8 @@ void main() {
     float delta = vv - alpha * vhat;
 
     float bd = beta * delta;
-    for (uint j = 0; j < HEAD_DIM / 8; j++) {
-        S[base4 + j] = alpha * S[base4 + j] + bd * k4[hlf * (HEAD_DIM / 8) + j];
+    for (uint j = 0; j < DIM / 8; j++) {
+        S[base4 + j] = alpha * S[base4 + j] + bd * k4[hlf * (DIM / 8) + j];
     }
 
     float y = alpha * y0 + beta * delta * kq_dot;
@@ -133,10 +134,10 @@ void main() {
         wave_kq[0] = total;
     }
     barrier();
-    float inv = inversesqrt(wave_kq[0] / float(HEAD_DIM) + 1e-6);
+    float inv = inversesqrt(wave_kq[0] / float(DIM) + 1e-6);
 
     if (hlf == 0u) {
-        uint zidx = h * HEAD_DIM + r;
+        uint zidx = h * DIM + r;
         float zv = z[zidx];
         yGated[zidx] = y * inv * wnorm[r] * (zv / (1.0 + exp(-zv)));
     }
