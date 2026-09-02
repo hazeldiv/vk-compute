@@ -27,7 +27,7 @@ layout(set = 0, binding = 5) writeonly buffer PartialBuffer { float P[]; };
 
 shared float shared_sum;
 shared vec4 xsCache[2][TS];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 vec4 unpackUint8x4(uint packedData) {
     uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);

@@ -46,7 +46,7 @@ shared float shared_sum;
 shared vec4 cache[d_model/vec];
 shared vec4 scaleCache[d_model/vec];
 shared vec4 zeroCache[d_model/vec];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 shared float acc_shared[TS];
 shared float rope_shared[TS];
 shared float shared_sum2;

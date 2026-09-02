@@ -20,7 +20,7 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 
 shared vec4 asSub[2][TS];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 vec4 unpackInt4x4(uint packedComponent) {
     return vec4(uvec4(bitfieldExtract(packedComponent, 0, 4),
@@ -67,7 +67,7 @@ void main() {
 
     barrier();
     if (chunk < numTiles) {
-        ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+        for (uint i = 0; i < gl_NumSubgroups; i++) ztot += sub_sums[i];
     }
 
     uint it = 0;
@@ -84,7 +84,7 @@ void main() {
         }
         barrier();
         if (nextTile < numTiles) {
-            ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+            for (uint i = 0; i < gl_NumSubgroups; i++) ztot += sub_sums[i];
         }
 
         uint baseRow = t * (TS / 8) * dims.N;

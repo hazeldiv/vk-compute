@@ -21,10 +21,7 @@ device createDevice() {
     }
 
     uint32_t deviceCount = 1;
-    if (vkEnumeratePhysicalDevices(dev.instance, &deviceCount, &dev.physicalDevice) != VK_SUCCESS) {
-        fprintf(stderr, "Error: Failed to enumerate physical devices!\n");
-        exit(EXIT_FAILURE);
-    }
+    vkEnumeratePhysicalDevices(dev.instance, &deviceCount, &dev.physicalDevice);
     if (deviceCount == 0) {
         fprintf(stderr, "Error: No Vulkan-compatible GPU found!\n");
         exit(EXIT_FAILURE);

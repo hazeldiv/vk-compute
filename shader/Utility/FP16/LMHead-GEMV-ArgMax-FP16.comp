@@ -23,7 +23,7 @@ layout(set = 0, binding = 3) writeonly restrict buffer MaxIndexBuffer { uint max
 layout(set = 0, binding = 4) readonly restrict buffer GammaBuffer { vec4 gamma[]; };
 
 shared vec4 cache[d_model/vec];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 shared float shared_sum;
 shared float redValue[TS];
 shared uint redIndex[TS];

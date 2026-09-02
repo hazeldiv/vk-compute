@@ -39,7 +39,7 @@ shared float shared_sum;
 shared vec4 cache[d_model/vec];
 shared vec4 scaleCache[d_model/vec];
 shared vec4 zeroCache[d_model/vec];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);
 const uvec4 highShifts = uvec4(16, 20, 24, 28);
