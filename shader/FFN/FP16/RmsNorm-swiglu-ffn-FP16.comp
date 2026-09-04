@@ -25,7 +25,7 @@ layout(set = 0, binding = 4) writeonly restrict buffer MatrixE { float y[]; };
 
 shared float shared_sum;
 shared vec4 cache[d_model/vec];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 void main() {
     uint col = gl_LocalInvocationID.x;

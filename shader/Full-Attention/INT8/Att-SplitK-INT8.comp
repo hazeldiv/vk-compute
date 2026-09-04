@@ -10,7 +10,7 @@
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint gqa; uint headDim; } param;
 
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uint8_t key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
@@ -30,8 +30,8 @@ shared float vs_s[TS];
 shared float vz_s[TS];
 
 void main() {
-    uint HEADS = param.heads;
     uint KV_HEADS = param.kvHeads;
+    uint HEADS = param.gqa * KV_HEADS;
     uint KV_TOTAL_ROWS = param.kvRows;
     uint ACC_BASE = MAXC * HEADS * 2;
     uint lane = gl_LocalInvocationID.x;

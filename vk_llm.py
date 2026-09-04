@@ -31,9 +31,18 @@ def _read_u32(proc):
     return struct.unpack("<I", raw)[0]
 
 
-def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump_layers=0, debug_sampling=False):
+def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump_layers=0, debug_sampling=False, prune_vocab=None):
+    import shutil
     weight_dir = Path(weight_dir).resolve()
-    tokenizer_path = weight_dir / "vocab" / "tokenizer.json"
+    vocab_dir = weight_dir / "vocab"
+    tokenizer_path = vocab_dir / "tokenizer.json"
+
+    if prune_vocab is not None and not tokenizer_path.exists():
+        src = Path(prune_vocab).resolve()
+        vocab_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json"):
+            if (src / name).exists():
+                shutil.copy(src / name, vocab_dir / name)
 
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     eos = tokenizer.token_to_id("<|im_end|>")
@@ -51,6 +60,8 @@ def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump
         cmd += ["--dump", str(dump_dir), "--dump-layers", str(dump_layers)]
     if debug_sampling:
         cmd += ["--debug-sampling"]
+    if prune_vocab is not None:
+        cmd += ["--prune", str(Path(prune_vocab).resolve())]
 
     proc = subprocess.Popen(
         cmd,
@@ -149,8 +160,9 @@ def _main():
     if text is None: return
     weight_dir = sys.argv[1] if len(sys.argv) > 1 else "model/Qwen3.5-9B-weight"
     thinking = sys.argv[4] if len(sys.argv) > 4 else "none"
+    prune = sys.argv[5] if len(sys.argv) > 5 else None
 
-    llm = start_llm(weight_dir, max_ctx=max_ctx, max_new_tokens=16384)
+    llm = start_llm(weight_dir, max_ctx=max_ctx, max_new_tokens=16384, prune_vocab=prune)
     ids = tokenize(llm, text, thinking == "thinking")
     decoded_ids = []
     prev = ""

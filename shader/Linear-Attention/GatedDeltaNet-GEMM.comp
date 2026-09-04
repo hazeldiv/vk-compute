@@ -4,7 +4,7 @@
 
 layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions { uint M; uint nV; uint nQk; } param;
+layout(push_constant) uniform Dimensions { uint M; uint nV; uint nQk; uint realM; } param;
 
 layout(set = 0, binding = 0) readonly buffer QBuffer { float Q[]; };
 layout(set = 0, binding = 1) readonly buffer KBuffer { float K[]; };
@@ -51,6 +51,10 @@ void main() {
                 float b = bRaw[(mBase + m) * param.nV + h];
                 g_sh[m] = -exp(aLog[h]) * log(1.0 + exp(a + dtBias[h]));
                 beta_sh[m] = 1.0 / (1.0 + exp(-b));
+                if (mBase + m >= param.realM) {
+                    g_sh[m] = 0.0;
+                    beta_sh[m] = 0.0;
+                }
             }
             G[0] = 0.0;
             for (uint m = 0; m < TS; m++) G[m + 1] = G[m] + g_sh[m];

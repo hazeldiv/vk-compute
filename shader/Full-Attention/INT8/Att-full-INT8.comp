@@ -7,7 +7,7 @@
 
 layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint gqa; uint headDim; } param;
 
 layout(set = 0, binding = 0) readonly buffer keyBuffer { uint8_t key[]; };
 layout(set = 0, binding = 1) readonly buffer valueBuffer { uint8_t value[]; };
@@ -33,7 +33,7 @@ void main() {
     uint MAXCTX = param.maxCtx;
     uint tid = gl_LocalInvocationID.x;
     uint q_head_id = gl_WorkGroupID.x;
-    uint kv_block_id = q_head_id / KV_HEADS;
+    uint kv_block_id = q_head_id / param.gqa;
     uint kv_row_base = kv_block_id * HEAD_DIM;
     uint context = position[0] + 1u;
 

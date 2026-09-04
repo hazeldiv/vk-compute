@@ -33,7 +33,7 @@ shared vec4 scaleSubCacheGate[2][TS];
 shared vec4 zeroSubCacheGate[2][TS];
 shared vec4 scaleSubCacheUp[2][TS];
 shared vec4 zeroSubCacheUp[2][TS];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 const uvec4 lowShifts  = uvec4(0, 4, 8, 12);  
 const uvec4 highShifts = uvec4(16, 20, 24, 28);

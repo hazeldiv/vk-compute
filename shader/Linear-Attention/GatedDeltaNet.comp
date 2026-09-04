@@ -26,7 +26,7 @@ layout(set = 0, binding = 10) readonly restrict buffer DtBiasBuffer { float dtBi
 
 shared vec4 k4[HEAD_DIM / 4];
 shared vec4 q4[HEAD_DIM / 4];
-shared float wave_kq[TS / 64];
+shared float wave_kq[(TS + 31) / 32];
 shared float pairV[TS];
 shared float pairY[TS];
 shared float k_inv;
@@ -82,7 +82,7 @@ void main() {
     barrier();
     if (i == 0) {
         float total = 0.0;
-        for (uint w = 0; w < TS / 64; w++) {
+        for (uint w = 0; w < gl_NumSubgroups; w++) {
             total += wave_kq[w];
         }
         wave_kq[0] = total;
@@ -128,7 +128,7 @@ void main() {
     barrier();
     if (i == 0u) {
         float total = 0.0;
-        for (uint w = 0; w < TS / 64; w++) {
+        for (uint w = 0; w < gl_NumSubgroups; w++) {
             total += wave_kq[w];
         }
         wave_kq[0] = total;

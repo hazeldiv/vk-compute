@@ -8,7 +8,7 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 #define NEG_INF -1e30
 #define MAXC 128
 
-layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint heads; uint headDim; } param;
+layout(push_constant) uniform Pc { uint maxCtx; uint kvHeads; uint kvRows; uint gqa; uint headDim; uint heads; } param;
 
 layout(set = 0, binding = 0) readonly buffer PartialBuffer { float P[]; };
 layout(set = 0, binding = 1) writeonly buffer OutBuffer { float y[]; };

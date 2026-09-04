@@ -2,7 +2,7 @@
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(push_constant) uniform Dimensions { uint M; uint kOff; uint vOff; uint zqkv; } dims;
+layout(push_constant) uniform Dimensions { uint M; uint kOff; uint vOff; uint zqkv; uint realM; } dims;
 
 layout(set = 0, binding = 0) buffer qBuffer { float q[]; };
 layout(set = 0, binding = 1) buffer kBuffer { float k[]; };
@@ -39,7 +39,8 @@ void main() {
         off = c - V_OFF;
     }
 
-    for (uint m = 0; m < dims.M; m++) {
+    uint steps = min(dims.M, dims.realM);
+    for (uint m = 0; m < steps; m++) {
         float cur;
         if (c < K_OFF) {
             cur = q[m * stride + off];

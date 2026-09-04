@@ -22,7 +22,7 @@ layout(set = 0, binding = 2) writeonly restrict buffer LogitsBuffer { float logi
 layout(set = 0, binding = 3) readonly restrict buffer GammaBuffer { vec4 gamma[]; };
 
 shared vec4 cache[d_model/4];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 shared float shared_sum;
 
 void main() {

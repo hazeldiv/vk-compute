@@ -298,7 +298,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
               2 * d->heads + 2 * d->kvHeads, m);
 
         for (int hb = 0; hb < d->heads / d->kvHeads; hb++) {
-            int pushA[] = {ctx, offset, m, hb * d->kvHeads, d->maxCtx, d->kvHeads, d->qOff, d->kvRows};
+            int pushA[] = {ctx, offset, m, hb * d->kvHeads, d->maxCtx, d->kvHeads, d->qOff, d->kvRows, d->heads / d->kvHeads};
 
             buffer qkBufs[5];
             int bq = 0;
@@ -309,12 +309,12 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
                 qkBufs[bq++] = st->kZero[L];
             }
             qkBufs[bq++] = st->attScores;
-            addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 8, (ctx + 63) / 64, ((m + 15) / 16) * d->kvHeads);
+            addOp(ops, n, model_shader("Att-QK2", q), L, qkBufs, bq, pushA, 9, (ctx + 63) / 64, ((m + 15) / 16) * d->kvHeads);
 
             buffer smBufs[2];
             smBufs[0] = st->attScores;
             smBufs[1] = st->smSum;
-            addOp(ops, n, "Att-Softmax.spv", L, smBufs, 2, pushA, 8, m, d->kvHeads);
+            addOp(ops, n, "Att-Softmax.spv", L, smBufs, 2, pushA, 9, m, d->kvHeads);
 
             buffer pvBufs[6];
             int bp = 0;
@@ -326,7 +326,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
             }
             pvBufs[bp++] = st->attnOut;
             pvBufs[bp++] = st->smSum;
-            addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 8, d->headDim / 64, ((m + 15) / 16) * d->kvHeads);
+            addOp(ops, n, model_shader("Att-PV2", q), L, pvBufs, bp, pushA, 9, d->headDim / 64, ((m + 15) / 16) * d->kvHeads);
         }
 
         buffer gateBufs[2];
@@ -384,15 +384,15 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
         }
         attBufs[ba++] = st->attPartial;
         attBufs[ba++] = st->position;
-        int push0[5] = {d->maxCtx, d->kvHeads, d->kvRows, d->heads, d->headDim};
+        int push0[6] = {d->maxCtx, d->kvHeads, d->kvRows, d->heads / d->kvHeads, d->headDim, d->heads};
         if (splitAttn) {
-            addOp(ops, n, model_shader("Att-SplitK2", q), L, attBufs, ba, push0, 5, d->heads, 128);
+            addOp(ops, n, model_shader("Att-SplitK2", q), L, attBufs, ba, push0, 6, d->heads, 128);
 
             buffer attRedBufs[3];
             attRedBufs[0] = st->attPartial;
             attRedBufs[1] = st->attnOut;
             attRedBufs[2] = st->position;
-            addOp(ops, n, "Reduce-Att2.spv", L, attRedBufs, 3, push0, 5, d->heads * d->headDim / 256, 1);
+            addOp(ops, n, "Reduce-Att2.spv", L, attRedBufs, 3, push0, 6, d->heads * d->headDim / 256, 1);
         } else {
             buffer fullBufs[10];
             int bf = 0;
@@ -407,7 +407,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
                 fullBufs[bf++] = st->vZero[L];
             }
             fullBufs[bf++] = st->position;
-            addOp(ops, n, model_shader("Att-full", q), L, fullBufs, bf, push0, 5, d->heads, 1);
+            addOp(ops, n, model_shader("Att-full", q), L, fullBufs, bf, push0, 6, d->heads, 1);
         }
 
         buffer gateBufs[2];
@@ -421,7 +421,7 @@ static void buildAttention(generator* g, operation* ops, int* n, int L, int gemm
     addGemmAdd(g, ops, n, L, &w->out[L], st->attnOut, st->h, st->h, q, m);
 }
 
-static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, int m) {
+static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, int m, int realM) {
     model_state* st = &g->st;
     model_weights* w = &g->w;
     const model_dims* d = g->dims;
@@ -432,13 +432,13 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     }
 
     buffer convBufs[] = {st->qProj, st->kProj, st->vProj, w->conv[L], st->convHist[L]};
-    int pushConv[] = {m, d->projKOff, d->projVOff, d->zqkvN};
-    addOp(ops, n, "Conv-SiLU.spv", L, convBufs, 5, pushConv, 4, d->zqkvN / 256, 1);
+    int pushConv[] = {m, d->projKOff, d->projVOff, d->zqkvN, realM};
+    addOp(ops, n, "Conv-SiLU.spv", L, convBufs, 5, pushConv, 5, d->zqkvN / 256, 1);
 
     buffer dnBufs[] = {st->qProj, st->kProj, st->vProj, st->aProj, st->bProj, st->stateS[L], st->yGated, st->zProj, w->attnNorm[L], w->aLog[L], w->dtBias[L]};
     if (gemm) {
-        int pushDn[] = {m, d->nV, d->nQk};
-        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 11, pushDn, 3, d->nV, 1);
+        int pushDn[] = {m, d->nV, d->nQk, realM};
+        addOp(ops, n, "GatedDeltaNet-GEMM.spv", L, dnBufs, 11, pushDn, 4, d->nV, 1);
     } else {
         int pushDn[] = {d->nV, d->nQk, d->dim};
         addOp(ops, n, "GatedDeltaNet.spv", L, dnBufs, 11, pushDn, 3, d->nV, 1);
@@ -447,12 +447,12 @@ static void buildDelta(generator* g, operation* ops, int* n, int L, int gemm, in
     addGemmAdd(g, ops, n, L, &w->out[L], st->yGated, st->h, L == 0 ? st->embOut : st->h, q, m);
 }
 
-static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx, int offset) {
+static void buildLayer(generator* g, operation* ops, int* n, int L, int gemm, int m, int splitAttn, int ctx, int offset, int realM) {
     const layer* ly = &g->spec->layers[L];
     if (ly->attn.type == ATTENTION_FULL) {
         buildAttention(g, ops, n, L, gemm, m, splitAttn, ctx, offset);
     } else if (ly->attn.type == ATTENTION_DELTA) {
-        buildDelta(g, ops, n, L, gemm, m);
+        buildDelta(g, ops, n, L, gemm, m, realM);
     }
     if (ly->ffn.type == FFN_SWIGLU) {
         buildFfn(g, ops, n, L, gemm, m);
@@ -490,7 +490,7 @@ static int compileDecodeGroup(generator* g, operation* ops, int splitAttn) {
         addOp(ops, &n, "Embed-RmsNorm-LinearProj-FP16.spv", -1, embedBufs, 11, pushE, 9, (d->projN + 255) / 256, 1);
 
         for (int L = 0; L < g->layerCount; L++) {
-            buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0, 0);
+            buildLayer(g, ops, &n, L, 0, 1, splitAttn, 0, 0, 1);
         }
 
         buildLmHead(g, ops, &n, &st->h, 1, p);
@@ -517,11 +517,11 @@ static int compilePrefillHead(generator* g, operation* ops, int m) {
     return n;
 }
 
-static int compilePrefill(generator* g, int m, int offset) {
+static int compilePrefill(generator* g, int m, int offset, int realM) {
     operation* ops = g->prefillOps;
     int n = compilePrefillHead(g, ops, m);
     for (int L = 0; L < g->layerCount; L++) {
-        buildLayer(g, ops, &n, L, 1, m, 0, offset + m, offset);
+        buildLayer(g, ops, &n, L, 1, m, 0, offset + m, offset, realM);
     }
     return n;
 }
@@ -549,7 +549,7 @@ generator* createGenerator(session s, const model_config* spec, const char* weig
     g.st = createState(s, spec, g.maxM, g.vocab, verboseWeights);
     g.groupOpCount = compileDecodeGroup(&g, g.groupOps, 1);
     g.groupOpCountShort = compileDecodeGroup(&g, g.groupOpsShort, 0);
-    g.prefillOpCount = compilePrefill(&g, g.maxM, 0);
+    g.prefillOpCount = compilePrefill(&g, g.maxM, 0, g.maxM);
     g.finalOpCount = compileFinal(&g);
     return &g;
 }
@@ -661,7 +661,7 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
                 if (ly->attn.type == ATTENTION_FULL) {
                     buildAttention(g, g->prefillOps, &n, L, 1, padded, 0, done + padded, done);
                 } else if (ly->attn.type == ATTENTION_DELTA) {
-                    buildDelta(g, g->prefillOps, &n, L, 1, padded);
+                    buildDelta(g, g->prefillOps, &n, L, 1, padded, cur);
                 }
                 executeChunked(g->s, g->prefillOps, n, "prefill", (int)(g->nextPos + done));
                 char name[64];
@@ -725,11 +725,11 @@ uint32_t runPrefill(generator* g, const uint32_t* tokens, int nTokens) {
             }
             for (int L = g->dumpLayers; L < g->layerCount; L++) {
                 int n = 0;
-                buildLayer(g, g->prefillOps, &n, L, 1, padded, 0, done + padded, done);
+                buildLayer(g, g->prefillOps, &n, L, 1, padded, 0, done + padded, done, cur);
                 executeChunked(g->s, g->prefillOps, n, "prefill", (int)(g->nextPos + done));
             }
         } else {
-            g->prefillOpCount = compilePrefill(g, padded, done);
+            g->prefillOpCount = compilePrefill(g, padded, done, cur);
             executeChunked(g->s, g->prefillOps, g->prefillOpCount, "prefill", (int)(g->nextPos + done));
         }
         if (g->dumpHiddenDir[0] != '\0') {
@@ -781,9 +781,26 @@ void generateTokens(generator* g, const uint32_t* prompt, int nPrompt, int maxNe
     executeSubmitNow(&g->s);
     if (dumpFirst) {
         executeWaitLast(&g->s);
-        dumpBuffer(g, g->st.h, "decode_h", g->dims->K);
+        int passOps = curCount / DECODE_GROUP;
+        int done = 0;
+        int lastLayer = -2;
+        while (done < passOps) {
+            int seg = 1;
+            while (done + seg < passOps && curOps[done + seg].layer == curOps[done].layer) seg++;
+            executeRecord(&g->s, curOps + done, seg);
+            executeSubmitNow(&g->s);
+            executeWaitLast(&g->s);
+            int layer = curOps[done].layer;
+            if (layer != lastLayer) {
+                char name[64];
+                snprintf(name, sizeof(name), "decL%03d_h", layer + 1);
+                dumpBuffer(g, g->st.h, name, g->dims->K);
+                lastLayer = layer;
+            }
+            done += seg;
+        }
         dumpBuffer(g, g->st.embOut, "decode_emb", g->dims->K);
-        executeRecord(&g->s, curOps + curCount / DECODE_GROUP, curCount - curCount / DECODE_GROUP);
+        executeRecord(&g->s, curOps + passOps, curCount - passOps);
         executeSubmitNow(&g->s);
     }
 

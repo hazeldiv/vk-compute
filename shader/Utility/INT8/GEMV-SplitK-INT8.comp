@@ -21,7 +21,7 @@ layout(set = 0, binding = 3) readonly restrict buffer MatrixD { vec4 scale[]; };
 layout(set = 0, binding = 4) readonly restrict buffer MatrixE { vec4 zeroPoint[]; };
 
 shared vec4 asSub[2][TS];
-shared float sub_sums[TS / 64];
+shared float sub_sums[(TS + 31) / 32];
 
 vec4 unpackUint8x4(uint packedData) {
     uvec4 bytes = (uvec4(packedData) >> uvec4(0, 8, 16, 24)) & uvec4(0xFF);
