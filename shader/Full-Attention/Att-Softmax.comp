@@ -5,14 +5,17 @@
 #extension GL_EXT_shader_16bit_storage : require
 #define NEG_INF -1e30
 #define TS 256
+#define TS 256
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = TS, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform P { uint ctxLen; uint qOff; uint mRows; uint headBase; uint maxCtx; uint kvHeads; uint qDim; uint kvRows; uint gqa; } param;
 
 layout(set = 0, binding = 0) buffer S { float16_t s[]; };
 layout(set = 0, binding = 1) writeonly restrict buffer SmSum { float smSum[]; };
 
+shared float sub_max[(TS + 31) / 32];
+shared float sub_sum[(TS + 31) / 32];
 shared float sub_max[(TS + 31) / 32];
 shared float sub_sum[(TS + 31) / 32];
 
@@ -25,7 +28,7 @@ void main() {
     uint limit = param.qOff + row;
 
     float mx = NEG_INF;
-    for (uint t = lane; t < param.ctxLen; t += 256) {
+    for (uint t = lane; t < param.ctxLen; t += TS) {
         if (t <= limit) {
             float v = float(s[pRow + t]);
             if (v > mx) mx = v;
@@ -38,7 +41,7 @@ void main() {
     for (uint i = 1u; i < gl_NumSubgroups; i++) gmax = max(gmax, sub_max[i]);
 
     float sum = 0.0;
-    for (uint t = lane; t < param.ctxLen; t += 256) {
+    for (uint t = lane; t < param.ctxLen; t += TS) {
         float v = exp(float(s[pRow + t]) - gmax);
         s[pRow + t] = float16_t(v);
         sum += v;

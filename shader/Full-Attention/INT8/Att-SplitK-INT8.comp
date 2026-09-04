@@ -24,6 +24,33 @@ layout(set = 0, binding = 8) readonly buffer PositionBuffer { uint position[]; }
 
 shared float q_shared[HEAD_DIM];
 shared float p_sh[TS];
+shared float red_sh[TS];
+
+float wgMax(float v) {
+    uint lane = gl_LocalInvocationID.x;
+    red_sh[lane] = v;
+    barrier();
+    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) red_sh[lane] = max(red_sh[lane], red_sh[lane + stride]);
+        barrier();
+    }
+    float r = red_sh[0];
+    barrier();
+    return r;
+}
+
+float wgAdd(float v) {
+    uint lane = gl_LocalInvocationID.x;
+    red_sh[lane] = v;
+    barrier();
+    for (uint stride = TS / 2u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) red_sh[lane] += red_sh[lane + stride];
+        barrier();
+    }
+    float r = red_sh[0];
+    barrier();
+    return r;
+}
 shared float ks_s[TS];
 shared float kz_s[TS];
 shared float vs_s[TS];
@@ -85,10 +112,10 @@ void main() {
             }
         }
 
-        float m_next = max(m_prev, subgroupMax(score));
+        float m_next = max(m_prev, wgMax(score));
         float alpha = exp(m_prev - m_next);
         float p = exp(score - m_next);
-        l_prev = l_prev * alpha + subgroupAdd(p);
+        l_prev = l_prev * alpha + wgAdd(p);
         acc *= alpha;
         m_prev = m_next;
 
