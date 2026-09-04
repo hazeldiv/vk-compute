@@ -4,6 +4,7 @@
 #include <math.h>
 #include "model.h"
 #include "json.h"
+#include "generated_vocab.h"
 
 const char* model_shader(const char* base, QuantType q) {
     static char buf[160];
@@ -25,11 +26,49 @@ static void cfg_fatal(const char* msg) {
     exit(1);
 }
 
-static int parseEos(model_dims* d, const char* modelDir) {
+static int eosFromVocabJson(model_dims* d, const char* modelDir, const char* eosName) {
     char path[512];
-    snprintf(path, sizeof(path), "%s/vocab/tokenizer_config.json", modelDir);
+    snprintf(path, sizeof(path), "%s/vocab/vocab.json", modelDir);
+    json_value* vj = json_parse_file(path);
+    if (vj == NULL || vj->type != JSON_OBJECT) cfg_fatal("cannot parse vocab/vocab.json");
+    json_value* eosId = json_get(vj, eosName);
+    if (eosId == NULL || eosId->type != JSON_NUMBER) return 0;
+    d->eos = (int)eosId->number;
+    json_free(vj);
+    return 1;
+}
+
+static int eosFromTokenizerJson(model_dims* d, const char* modelDir, const char* eosName) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tokenizer.json", modelDir);
+    json_value* tj = json_parse_file(path);
+    if (tj == NULL) cfg_fatal("cannot parse tokenizer.json");
+    json_value* added = json_get(tj, "added_tokens");
+    if (added == NULL || added->type != JSON_ARRAY) cfg_fatal("tokenizer.json missing added_tokens");
+    int found = 0;
+    for (int i = 0; i < added->count; i++) {
+        json_value* tok = &added->items[i];
+        const char* content = json_get_str(tok, "content", NULL);
+        if (content != NULL && strcmp(content, eosName) == 0) {
+            d->eos = json_get_int(tok, "id", -1);
+            found = 1;
+            break;
+        }
+    }
+    json_free(tj);
+    return found;
+}
+
+int parseEos(model_dims* d, const char* modelDir, int pruned) {
+    char path[512];
+    const char* cfgName = pruned ? "vocab/tokenizer_config.json" : "tokenizer_config.json";
+    snprintf(path, sizeof(path), "%s/%s", modelDir, cfgName);
     json_value* tc = json_parse_file(path);
-    if (tc == NULL) cfg_fatal("cannot parse vocab/tokenizer_config.json");
+    if (tc == NULL) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "cannot parse %s", cfgName);
+        cfg_fatal(msg);
+    }
     const char* eosSrc = json_get_str(tc, "eos_token", "<|im_end|>");
     json_value* eosTok = json_get(tc, "eos_token");
     if (eosTok != NULL && eosTok->type == JSON_OBJECT) {
@@ -39,21 +78,36 @@ static int parseEos(model_dims* d, const char* modelDir) {
     snprintf(eosName, sizeof(eosName), "%s", eosSrc);
     json_free(tc);
 
-    snprintf(path, sizeof(path), "%s/vocab/vocab.json", modelDir);
-    json_value* vj = json_parse_file(path);
-    if (vj == NULL || vj->type != JSON_OBJECT) cfg_fatal("cannot parse vocab/vocab.json");
-    json_value* eosId = json_get(vj, eosName);
-    if (eosId == NULL || eosId->type != JSON_NUMBER) {
+    if (pruned) {
+        if (!eosFromVocabJson(d, modelDir, eosName)) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "eos token %s not found in vocab/vocab.json", eosName);
+            cfg_fatal(msg);
+        }
+        return 0;
+    }
+
+    char vocabPath[512];
+    snprintf(vocabPath, sizeof(vocabPath), "%s/vocab.json", modelDir);
+    json_value* vj = json_parse_file(vocabPath);
+    if (vj != NULL && vj->type == JSON_OBJECT) {
+        json_value* eosId = json_get(vj, eosName);
+        if (eosId != NULL && eosId->type == JSON_NUMBER) {
+            d->eos = (int)eosId->number;
+            json_free(vj);
+            return 0;
+        }
+        json_free(vj);
+    }
+    if (!eosFromTokenizerJson(d, modelDir, eosName)) {
         char msg[256];
-        snprintf(msg, sizeof(msg), "eos token %s not found in vocab.json", eosName);
+        snprintf(msg, sizeof(msg), "eos token %s not found", eosName);
         cfg_fatal(msg);
     }
-    d->eos = (int)eosId->number;
-    json_free(vj);
     return 0;
 }
 
-int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride) {
+int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride, int pruned) {
     memset(cfg, 0, sizeof(model_config));
 
     char path[512];
@@ -79,6 +133,7 @@ int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride)
     d->ropeTheta = json_get_num(txt, "rope_theta", 1e7);
     d->tied = json_get_bool(txt, "tie_word_embeddings", 0);
     double partial = json_get_num(txt, "partial_rotary_factor", 0.25);
+    int hfVocab = json_get_int(txt, "vocab_size", MODEL_VOCAB);
     json_value* rope = json_get(txt, "rope_parameters");
     if (rope != NULL) {
         d->ropeTheta = json_get_num(rope, "rope_theta", d->ropeTheta);
@@ -136,8 +191,8 @@ int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride)
     json_value* qc = json_parse_file(path);
     if (qc == NULL) cfg_fatal("cannot parse quant_config.json");
 
-    d->vocab = json_get_int(qc, "vocab_size", 0);
-    if (d->vocab <= 0) cfg_fatal("quant_config.json missing vocab_size");
+    d->vocab = pruned ? MODEL_VOCAB : hfVocab;
+    if (d->vocab <= 0) cfg_fatal("invalid vocab size");
     d->maxCtx = json_get_int(qc, "max_ctx", 32768);
     if (maxCtxOverride > 0 && maxCtxOverride < d->maxCtx) d->maxCtx = maxCtxOverride;
     d->prefillChunk = json_get_int(qc, "prefill_chunk", 512);
@@ -158,8 +213,6 @@ int loadModelConfig(model_config* cfg, const char* modelDir, int maxCtxOverride)
     snprintf(cfg->name, sizeof(cfg->name), "%s", json_get_str(qc, "name", "model"));
     snprintf(cfg->shaderDir, sizeof(cfg->shaderDir), "%s", json_get_str(qc, "shader_dir", ""));
     json_free(qc);
-
-    parseEos(d, modelDir);
 
     return 0;
 }

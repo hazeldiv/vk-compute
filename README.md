@@ -14,7 +14,8 @@ To fit the vocabulary in VRAM, the model's 248,320-token head is pruned to 86,01
 | `shader/` | 121 GLSL compute shaders (GEMV/GEMM, attention, sampler) |
 | `vk_llm.py` | Python frontend: chat template, tokenization, streaming, sampling config |
 | `docs/VK-COMPUTE-SUMMARY.md` | Full technical documentation |
-| `model/` | Weights and vocab artifacts (not in git) |
+| `model/` | Weights (not in git) |
+| `pruned-vocab/` | Pruned-vocab artifacts: mapping.npy, pruned tokenizer (not in git) |
 
 ## Requirements
 
@@ -22,7 +23,7 @@ To fit the vocabulary in VRAM, the model's 248,320-token head is pruned to 86,01
 - Vulkan SDK (tested with 1.4.350)
 - Python 3.9+ with [uv](https://docs.astral.sh/uv/), plus `tokenizers`
 - A GPU with 8 GB VRAM (built and tuned for the RX 580)
-- Qwen3.5-9B safetensors under `model/Qwen3.5-9B-weight/`, with the pruned `lm_head.*` / `embed_tokens.*` files alongside and the pruned tokenizer in `model/Qwen3.5-pruned-vocab/`
+- Qwen3.5 safetensors under `model/Qwen3.5-9B/` (or `model/Qwen3.5-2B/`), with the pruned-vocab artifacts (mapping, pruned tokenizer) under `pruned-vocab/`
 
 ## Build & Run
 
@@ -38,8 +39,16 @@ make
 # Validate every shader against its CPU reference
 cd bin && main.exe val
 
-# Generate
-.venv/Scripts/python.exe vk_llm.py model/Qwen3.5-9B-weight 4096 model/Qwen3.5-pruned-vocab "your prompt here" [thinking]
+# Generate (pruned 86,016-token vocab — fits both models)
+.venv/Scripts/python.exe vk_llm.py model/Qwen3.5-9B 4096 "your prompt here" --think
+
+# Original 248,320-token vocab, straight from the shards (2B only: ~1 GB embed;
+# the 9B's two untied heads would OOM on 8 GB)
+.venv/Scripts/python.exe vk_llm.py model/Qwen3.5-2B 4096 "your prompt here"
+
+# First run of a fresh model dir with --prune: gathers the pruned vocab
+# from the shards (skipped automatically when the weight cache or vocab/ exists)
+.venv/Scripts/python.exe vk_llm.py model/Qwen3.5-2B 8192 "why the sky is blue?" --think --prune
 ```
 
 Sampling behavior is set by the constants at the top of `vk_llm.py` (`is_sampling`, `temperature`, `top_k`, `top_p`, `min_p`, `rep_penalty`, `penalty_len`, `seed`).

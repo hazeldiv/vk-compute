@@ -9,6 +9,7 @@ from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "bin" / "main.exe"
+PRUNED_VOCAB = ROOT / "pruned-vocab"
 
 is_sampling = True
 temperature = 0.6
@@ -31,18 +32,18 @@ def _read_u32(proc):
     return struct.unpack("<I", raw)[0]
 
 
-def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump_layers=0, debug_sampling=False, prune_vocab=None):
+def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump_layers=0, debug_sampling=False, prune_vocab=False):
     import shutil
     weight_dir = Path(weight_dir).resolve()
-    vocab_dir = weight_dir / "vocab"
-    tokenizer_path = vocab_dir / "tokenizer.json"
+    tokenizer_path = (weight_dir / "vocab" / "tokenizer.json") if prune_vocab else (weight_dir / "tokenizer.json")
 
-    if prune_vocab is not None and not tokenizer_path.exists():
-        src = Path(prune_vocab).resolve()
+    if prune_vocab and not tokenizer_path.exists():
+        vocab_dir = weight_dir / "vocab"
         vocab_dir.mkdir(parents=True, exist_ok=True)
         for name in ("tokenizer.json", "tokenizer_config.json", "vocab.json"):
-            if (src / name).exists():
-                shutil.copy(src / name, vocab_dir / name)
+            src = PRUNED_VOCAB / name
+            if src.exists():
+                shutil.copy(src, vocab_dir / name)
 
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
     eos = tokenizer.token_to_id("<|im_end|>")
@@ -60,8 +61,8 @@ def start_llm(weight_dir, max_ctx=32768, max_new_tokens=128, dump_dir=None, dump
         cmd += ["--dump", str(dump_dir), "--dump-layers", str(dump_layers)]
     if debug_sampling:
         cmd += ["--debug-sampling"]
-    if prune_vocab is not None:
-        cmd += ["--prune", str(Path(prune_vocab).resolve())]
+    if prune_vocab:
+        cmd += ["--prune"]
 
     proc = subprocess.Popen(
         cmd,
@@ -155,15 +156,17 @@ def close(llm):
 
 
 def _main():
-    max_ctx = int(sys.argv[2]) if len(sys.argv) > 2 else 16384
-    text = sys.argv[3] if len(sys.argv) > 3 else None
-    if text is None: return
-    weight_dir = sys.argv[1] if len(sys.argv) > 1 else "model/Qwen3.5-9B-weight"
-    thinking = sys.argv[4] if len(sys.argv) > 4 else "none"
-    prune = sys.argv[5] if len(sys.argv) > 5 else None
+    args = [a for a in sys.argv[1:] if a not in ("--think", "--prune")]
+    thinking = "--think" in sys.argv[1:]
+    prune = "--prune" in sys.argv[1:]
+    weight_dir = args[0] if len(args) > 0 else "model/Qwen3.5-9B"
+    max_ctx = int(args[1]) if len(args) > 1 else 16384
+    text = args[2] if len(args) > 2 else None
+    if text is None:
+        return
 
     llm = start_llm(weight_dir, max_ctx=max_ctx, max_new_tokens=16384, prune_vocab=prune)
-    ids = tokenize(llm, text, thinking == "thinking")
+    ids = tokenize(llm, text, thinking)
     decoded_ids = []
     prev = ""
     timestamps = []

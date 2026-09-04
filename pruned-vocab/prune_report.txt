@@ -1,0 +1,43 @@
+vocab prune report
+mode                   : target (target 86016)
+rows original          : 248320
+base vocab             : 248044
+added tokens           : 26
+padding removed        : 250
+protected              : 5696
+lossless removed       : 62949
+tier removed           : 99105
+active vocab           : 86016
+final padded size      : 86016
+counts used            : True
+kept languages         : de en es fr id ja ru zh-Hans
+kept script groups     : cjk_symbol cyrillic han kana latin_extended
+embedding rows saved   : 162304
+est vram saved (fp16)  : 2.48 GB
+cascade stages         :
+  lossless     removed= 62949 active_after=185121
+  tier3_drop   removed=  2634 active_after=182487
+  tier2_drop   removed=  2706 active_after=179781
+  freq_trim    removed= 93765 active_after=86016
+tier removals by group :
+  arabic               1766
+  bengali              154
+  devanagari           371
+  ethiopic             20
+  georgian             84
+  greek                872
+  gujarati             74
+  gurmukhi             42
+  hangul               569
+  hebrew               280
+  kannada              6
+  khmer                33
+  lao                  27
+  malayalam            81
+  myanmar              57
+  oriya                5
+  sinhala              53
+  tamil                127
+  telugu               35
+  thai                 674
+  tibetan              10

@@ -7,6 +7,7 @@
 #include "session.h"
 #include "model.h"
 #include "generate.h"
+#include "prune.h"
 
 static const char* argval(int argc, char** argv, const char* name, const char* def) {
     for (int i = 1; i + 1 < argc; i++) {
@@ -40,7 +41,7 @@ static void emitToken(uint32_t token, void* ctx) {
 }
 
 void serverMain(int argc, char** argv) {
-    const char* weightDir = argval(argc, argv, "--weights", "../model/Qwen3.5-9B-weight");
+    const char* weightDir = argval(argc, argv, "--weights", "../model/Qwen3.5-9B");
     int maxCtxOverride = atoi(argval(argc, argv, "--max-ctx", "0"));
     int maxNew = atoi(argval(argc, argv, "--max-new", "128"));
     const char* dumpDir = argval(argc, argv, "--dump", NULL);
@@ -48,6 +49,7 @@ void serverMain(int argc, char** argv) {
     int verboseWeights = argflag(argc, argv, "--verbose-weights");
     int timing = argflag(argc, argv, "--timing");
     const char* dumpHiddenDir = argval(argc, argv, "--dump-hidden", NULL);
+    int doPrune = argflag(argc, argv, "--prune");
     dbgSampling = argflag(argc, argv, "--debug-sampling");
     if (maxNew < 1) maxNew = 1;
 
@@ -55,7 +57,9 @@ void serverMain(int argc, char** argv) {
     _setmode(_fileno(stdout), _O_BINARY);
 
     static model_config spec;
-    loadModelConfig(&spec, weightDir, maxCtxOverride);
+    loadModelConfig(&spec, weightDir, maxCtxOverride, doPrune);
+    if (doPrune) pruneVocab(weightDir, &spec);
+    parseEos(&spec.dims, weightDir, doPrune);
 
     if (timing) setTimingEnabled(1);
     session s = createSession();

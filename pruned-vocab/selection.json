@@ -1,0 +1,108 @@
+{
+  "rows": 248320,
+  "base_vocab": 248044,
+  "added_tokens": 26,
+  "padding_removed": 250,
+  "protected_count": 5696,
+  "lossless_removed": 62949,
+  "tier_removed": 99105,
+  "tier_by_group": {
+    "arabic": 1766,
+    "bengali": 154,
+    "devanagari": 371,
+    "ethiopic": 20,
+    "georgian": 84,
+    "greek": 872,
+    "gujarati": 74,
+    "gurmukhi": 42,
+    "hangul": 569,
+    "hebrew": 280,
+    "kannada": 6,
+    "khmer": 33,
+    "lao": 27,
+    "malayalam": 81,
+    "myanmar": 57,
+    "oriya": 5,
+    "sinhala": 53,
+    "tamil": 127,
+    "telugu": 35,
+    "thai": 674,
+    "tibetan": 10
+  },
+  "active": 86016,
+  "final_size": 86016,
+  "mode": "target",
+  "stages": [
+    {
+      "step": "lossless",
+      "removed": 62949,
+      "active_after": 185121
+    },
+    {
+      "step": "tier3_drop",
+      "removed": 2634,
+      "by_group": {
+        "bengali": 154,
+        "ethiopic": 20,
+        "georgian": 84,
+        "greek": 872,
+        "gujarati": 74,
+        "gurmukhi": 42,
+        "hebrew": 280,
+        "kannada": 6,
+        "khmer": 33,
+        "lao": 27,
+        "malayalam": 81,
+        "myanmar": 57,
+        "oriya": 5,
+        "sinhala": 53,
+        "tamil": 127,
+        "telugu": 35,
+        "thai": 674,
+        "tibetan": 10
+      },
+      "active_after": 182487
+    },
+    {
+      "step": "tier2_drop",
+      "removed": 2706,
+      "by_group": {
+        "arabic": 1766,
+        "devanagari": 371,
+        "hangul": 569
+      },
+      "active_after": 179781
+    },
+    {
+      "step": "freq_trim",
+      "removed": 93765,
+      "active_after": 86016
+    }
+  ],
+  "max_tier": null,
+  "target": 86016,
+  "kept_languages": [
+    "de",
+    "en",
+    "es",
+    "fr",
+    "id",
+    "ja",
+    "ru",
+    "zh-Hans"
+  ],
+  "kept_groups": [
+    "cjk_symbol",
+    "cyrillic",
+    "han",
+    "kana",
+    "latin_extended"
+  ],
+  "counts_used": true,
+  "lossless_mode": "usage",
+  "extra_protect": 1653,
+  "keep_lang": [
+    "id"
+  ],
+  "drop_lang": []
+}

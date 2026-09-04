@@ -523,9 +523,9 @@ static int findShards(const char* dir, char out[][512], int max) {
     return count;
 }
 
-static int findVocabFile(const char* dir, const char* prefix, char* out, size_t cap) {
+static int findVocabFile(const char* dir, const char* prefix, int V, char* out, size_t cap) {
     char pattern[512];
-    snprintf(pattern, sizeof(pattern), "%s/vocab/%s.*.safetensors", dir, prefix);
+    snprintf(pattern, sizeof(pattern), "%s/vocab/%s.%d.safetensors", dir, prefix, V);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return 0;
@@ -630,15 +630,13 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 
     char headPath[512];
     char embedPath[512];
-    int hasHead = findVocabFile(weightDir, "lm_head", headPath, sizeof(headPath));
-    int hasEmbed = findVocabFile(weightDir, "embed_tokens", embedPath, sizeof(embedPath));
-    if (d->tied) hasHead = 0;
-    if (d->tied && !hasEmbed) {
-        hasEmbed = findVocabFile(weightDir, "lm_head", embedPath, sizeof(embedPath));
-    }
+    int hasHead = 0;
+    int hasEmbed = 0;
+    headPath[0] = '\0';
+    embedPath[0] = '\0';
 
     const safetensors* sfMain = hasShards ? &sf : NULL;
-    if (!hasShards && !hasHead && !hasEmbed && !cacheComplete(spec)) {
+    if (!hasShards && !cacheComplete(spec)) {
         fatal("no safetensors found and weight cache is incomplete");
     }
 
@@ -657,6 +655,13 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     int V = d->vocab;
     w.vocab = V;
     w.layerCount = d->layerCount;
+
+    hasHead = findVocabFile(weightDir, "lm_head", V, headPath, sizeof(headPath));
+    hasEmbed = findVocabFile(weightDir, "embed_tokens", V, embedPath, sizeof(embedPath));
+    if (d->tied) hasHead = 0;
+    if (d->tied && !hasEmbed) {
+        hasEmbed = findVocabFile(weightDir, "lm_head", V, embedPath, sizeof(embedPath));
+    }
 
     w.layerBufs = (buffer*)calloc((size_t)d->layerCount * 13, sizeof(buffer));
     w.gammaIn = w.layerBufs + 0 * d->layerCount;

@@ -9,7 +9,9 @@
 #include "safetensors.h"
 
 #define EMBED_NAME "model.language_model.embed_tokens.weight"
+#define HEAD_NAME "lm_head.weight"
 #define GATHER_CHUNK 8192
+#define TENSOR_FILE_MAGIC 0x54454E53
 
 static void pfatal(const char* msg) {
     fprintf(stderr, "prune: %s\n", msg);
@@ -19,24 +21,6 @@ static void pfatal(const char* msg) {
 static void perr(const char* msg, const char* arg) {
     fprintf(stderr, "prune: %s: %s\n", msg, arg);
     exit(1);
-}
-
-static char* readAll(const char* path, long* outLen) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    char* buf = (char*)malloc((size_t)len + 1);
-    if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
-        free(buf);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
-    buf[len] = '\0';
-    *outLen = len;
-    return buf;
 }
 
 static int32_t* loadMapping(const char* path, int expected) {
@@ -58,7 +42,7 @@ static int32_t* loadMapping(const char* path, int expected) {
     char* shp = strstr(hdr, "'shape':");
     if (!shp || sscanf(shp, "'shape': (%d,", &count) != 1) pfatal("bad npy shape");
     free(hdr);
-    if (count != expected) pfatal("mapping length mismatch vs vocab_size");
+    if (count != expected) pfatal("mapping length mismatch vs vocab size");
     int32_t* m = (int32_t*)malloc(sizeof(int32_t) * count);
     if (!m || fread(m, sizeof(int32_t), count, f) != (size_t)count) pfatal("mapping read error");
     fclose(f);
@@ -76,11 +60,80 @@ static int copyFileTo(const char* src, const char* dstDir) {
     return 1;
 }
 
-static void writeSafetensorsHeader(FILE* f, const char* name, const char* dtype, int rows, int cols, long dataBytes) {
+static void ensureTokenizerFiles(const char* vocabDir, const char* sourceDir) {
+    _mkdir(vocabDir);
+    const char* tokFiles[] = {"tokenizer.json", "tokenizer_config.json", "vocab.json", "mapping.npy"};
+    char path[512];
+    for (int i = 0; i < 4; i++) {
+        snprintf(path, sizeof(path), "%s/%s", sourceDir, tokFiles[i]);
+        if (fopen(path, "rb") != NULL) copyFileTo(path, vocabDir);
+    }
+}
+
+static int cacheHeaderMatches(const char* path, int rows, int cols) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    int header[4];
+    int ok = (fread(header, sizeof(int), 4, f) == 4 &&
+              header[0] == TENSOR_FILE_MAGIC && header[1] == rows &&
+              header[2] == cols && header[3] == (int)QUANT_FP16);
+    fclose(f);
+    return ok;
+}
+
+static int embedCacheValid(const char* modelName, int K, int V) {
+    char path[512];
+    snprintf(path, sizeof(path), "weights/%s/embed_%d_FP16.bin", modelName, V);
+    return cacheHeaderMatches(path, K, V);
+}
+
+static int headCacheValid(const char* modelName, int K, int V) {
+    char path[512];
+    snprintf(path, sizeof(path), "weights/%s/lmHead_%d_FP16.bin", modelName, V);
+    return cacheHeaderMatches(path, K, V);
+}
+
+static int vocabFileExists(const char* dir, const char* prefix) {
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s/vocab/%s.*.safetensors", dir, prefix);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    return 1;
+}
+
+static int findShardPaths(const char* modelDir, char out[][512], int max) {
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%s/model.safetensors*.safetensors", modelDir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int count = 0;
+    do {
+        if (count >= max) break;
+        snprintf(out[count], 512, "%s/%s", modelDir, fd.cFileName);
+        count++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (strcmp(out[i], out[j]) > 0) {
+                char tmp[512];
+                strcpy(tmp, out[i]);
+                strcpy(out[i], out[j]);
+                strcpy(out[j], tmp);
+            }
+        }
+    }
+    return count;
+}
+
+static void writeSafetensorsHeader(FILE* f, const char* name, int rows, int cols, long dataBytes) {
     char entry[512];
     snprintf(entry, sizeof(entry),
-             "{\"%s\":{\"dtype\":\"%s\",\"shape\":[%d,%d],\"data_offsets\":[0,%ld]},\"__metadata__\":{\"format\":\"pt\"}}",
-             name, dtype, rows, cols, dataBytes);
+             "{\"%s\":{\"dtype\":\"BF16\",\"shape\":[%d,%d],\"data_offsets\":[0,%ld]},\"__metadata__\":{\"format\":\"pt\"}}",
+             name, rows, cols, dataBytes);
     int raw = (int)strlen(entry);
     int pad = (-raw) & 7;
     uint64_t total = (uint64_t)(raw + pad);
@@ -105,83 +158,73 @@ static void gatherRows(FILE* src, FILE* dst, int64_t dataStart, const int32_t* m
     free(chunk);
 }
 
-int pruneVocab(const char* modelDir, const char* sourceDir) {
+static void gatherTensor(safetensors* sf, const char* tensorName, const char* outPrefix,
+                         const char* vocabDir, const int32_t* mapping, int V, int K, int required) {
+    const sa_tensor* t = safetensors_find(sf, tensorName);
+    if (!t) {
+        if (!required) return;
+        perr("missing tensor in shard", tensorName);
+    }
+    if (t->dtype != SA_DTYPE_BF16 || t->ndim != 2 || t->shape[1] != K) pfatal("tensor shape/dtype mismatch vs config");
+    int srcRows = (int)t->shape[0];
+    for (int i = 0; i < V; i++) {
+        if (mapping[i] < 0 || mapping[i] >= srcRows) pfatal("mapping id out of range");
+    }
+    FILE* src = sf->files[t->fileIndex];
+    char dstPath[512];
+    snprintf(dstPath, sizeof(dstPath), "%s/%s.%d.safetensors", vocabDir, outPrefix, V);
+    FILE* dst = fopen(dstPath, "wb");
+    if (!dst) perr("cannot create", dstPath);
+    long dataBytes = (long)V * K * 2;
+    writeSafetensorsHeader(dst, tensorName, V, K, dataBytes);
+    gatherRows(src, dst, t->offset, mapping, V, K);
+    fclose(dst);
+    fprintf(stderr, "prune: wrote %s (%.1f MB, %d rows of %d)\n",
+            dstPath, dataBytes / (1024.0 * 1024.0), V, srcRows);
+}
+
+int pruneVocab(const char* modelDir, const model_config* spec) {
+    const model_dims* d = &spec->dims;
     char vocabDir[512];
     snprintf(vocabDir, sizeof(vocabDir), "%s/vocab", modelDir);
 
-    char probe[512];
-    snprintf(probe, sizeof(probe), "%s/embed_tokens.*.safetensors", vocabDir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(probe, &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        FindClose(h);
+    if (embedCacheValid(spec->name, d->K, d->vocab) &&
+        (d->tied || headCacheValid(spec->name, d->K, d->vocab))) {
+        ensureTokenizerFiles(vocabDir, PRUNED_VOCAB_DIR);
+        fprintf(stderr, "prune: weight cache present, skipping gather\n");
+        return 0;
+    }
+
+    int needEmbed = !vocabFileExists(modelDir, "embed_tokens");
+    int needHead = !d->tied && !vocabFileExists(modelDir, "lm_head");
+    if (!needEmbed && !needHead) {
+        ensureTokenizerFiles(vocabDir, PRUNED_VOCAB_DIR);
         return 0;
     }
 
     char path[512];
-    long len = 0;
+    snprintf(path, sizeof(path), "%s/mapping.npy", PRUNED_VOCAB_DIR);
+    int32_t* mapping = loadMapping(path, d->vocab);
 
-    snprintf(path, sizeof(path), "%s/config.json", modelDir);
-    char* cfgRaw = readAll(path, &len);
-    if (!cfgRaw) perr("cannot read", path);
-    const char* hs = strstr(cfgRaw, "\"hidden_size\"");
-    int K = 0;
-    if (!hs || sscanf(hs, "\"hidden_size\"%*[^0-9]%d", &K) != 1 || K <= 0) pfatal("bad hidden_size");
-    free(cfgRaw);
-
-    snprintf(path, sizeof(path), "%s/quant_config.json", modelDir);
-    char* qcRaw = readAll(path, &len);
-    if (!qcRaw) perr("cannot read", path);
-    const char* vs = strstr(qcRaw, "\"vocab_size\"");
-    int V = 0;
-    if (!vs || sscanf(vs, "\"vocab_size\"%*[^0-9]%d", &V) != 1 || V <= 0) pfatal("bad vocab_size");
-    free(qcRaw);
-
-    snprintf(path, sizeof(path), "%s/mapping.npy", sourceDir);
-    int32_t* mapping = loadMapping(path, V);
-
-    snprintf(path, sizeof(path), "%s/model.safetensors*.safetensors", modelDir);
-    HANDLE hs2 = FindFirstFileA(path, &fd);
-    if (hs2 == INVALID_HANDLE_VALUE) pfatal("no model shards found");
-    char shardPath[512];
-    snprintf(shardPath, sizeof(shardPath), "%s/%s", modelDir, fd.cFileName);
-    FindClose(hs2);
+    char shardPaths[16][512];
+    const char* shardPtrs[16];
+    int shardCount = findShardPaths(modelDir, shardPaths, 16);
+    if (shardCount == 0) pfatal("no model shards found");
+    for (int i = 0; i < shardCount; i++) shardPtrs[i] = shardPaths[i];
 
     safetensors sf;
-    const char* shardPtr = shardPath;
-    if (safetensors_open(&sf, &shardPtr, 1) != 0) perr("cannot open shard", shardPath);
-    const sa_tensor* t = safetensors_find(&sf, EMBED_NAME);
-    if (!t) perr("missing tensor in shard", EMBED_NAME);
-    int srcRows = (int)t->shape[0];
-    int srcCols = (int)t->shape[1];
-    if (srcCols != K) pfatal("embedding width mismatch vs config");
-    for (int i = 0; i < V; i++) {
-        if (mapping[i] < 0 || mapping[i] >= srcRows) pfatal("mapping id out of range");
-    }
-    FILE* src = sf.files[t->fileIndex];
+    if (safetensors_open(&sf, shardPtrs, shardCount) != 0) pfatal("cannot open shards");
 
     _mkdir(vocabDir);
-
-    char dstPath[512];
-    snprintf(dstPath, sizeof(dstPath), "%s/embed_tokens.%d.safetensors", vocabDir, V);
-    FILE* dst = fopen(dstPath, "wb");
-    if (!dst) perr("cannot create", dstPath);
-    long dataBytes = (long)V * K * 2;
-    writeSafetensorsHeader(dst, EMBED_NAME, "BF16", V, K, dataBytes);
-    gatherRows(src, dst, t->offset, mapping, V, K);
-    fclose(dst);
-    safetensors_close(&sf);
-    free(mapping);
-
-    const char* tokFiles[] = {"tokenizer.json", "tokenizer_config.json", "vocab.json", "mapping.npy"};
-    int copied = 0;
-    for (int i = 0; i < 4; i++) {
-        snprintf(path, sizeof(path), "%s/%s", sourceDir, tokFiles[i]);
-        if (readAll(path, &len) == NULL) continue;
-        if (copyFileTo(path, vocabDir)) copied++;
+    if (needEmbed) {
+        gatherTensor(&sf, EMBED_NAME, "embed_tokens", vocabDir, mapping, d->vocab, d->K, 1);
+    }
+    if (needHead) {
+        gatherTensor(&sf, HEAD_NAME, "lm_head", vocabDir, mapping, d->vocab, d->K, 1);
     }
 
-    fprintf(stderr, "prune: wrote %s (%.1f MB, %d rows of %d), copied %d vocab files\n",
-            dstPath, dataBytes / (1024.0 * 1024.0), V, srcRows, copied);
+    safetensors_close(&sf);
+    free(mapping);
+    ensureTokenizerFiles(vocabDir, PRUNED_VOCAB_DIR);
     return 1;
 }
