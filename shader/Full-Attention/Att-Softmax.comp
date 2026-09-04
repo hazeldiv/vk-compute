@@ -16,8 +16,6 @@ layout(set = 0, binding = 1) writeonly restrict buffer SmSum { float smSum[]; };
 
 shared float sub_max[(TS + 31) / 32];
 shared float sub_sum[(TS + 31) / 32];
-shared float sub_max[(TS + 31) / 32];
-shared float sub_sum[(TS + 31) / 32];
 
 void main() {
     uint row = gl_WorkGroupID.x;
