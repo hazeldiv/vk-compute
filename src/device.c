@@ -47,28 +47,24 @@ device createDevice() {
     vkGetPhysicalDeviceFeatures2(dev.physicalDevice, &feats2);
 
     requireFeature(v11.shaderDrawParameters, "shaderDrawParameters");
+    requireFeature(v11.storageBuffer16BitAccess, "storageBuffer16BitAccess");
+    requireFeature(v11.uniformAndStorageBuffer16BitAccess, "uniformAndStorageBuffer16BitAccess");
     requireFeature(v12.shaderFloat16, "shaderFloat16");
     requireFeature(v12.shaderInt8, "shaderInt8");
     requireFeature(v12.storageBuffer8BitAccess, "storageBuffer8BitAccess");
-    requireFeature(v12.storageBuffer16BitAccess, "storageBuffer16BitAccess");
     requireFeature(v12.uniformAndStorageBuffer8BitAccess, "uniformAndStorageBuffer8BitAccess");
-    requireFeature(v12.uniformAndStorageBuffer16BitAccess, "uniformAndStorageBuffer16BitAccess");
     requireFeature(v12.shaderSubgroupExtendedTypes, "shaderSubgroupExtendedTypes");
 
     v11.shaderDrawParameters = VK_TRUE;
+    v11.storageBuffer16BitAccess = VK_TRUE;
+    v11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
     v12.shaderFloat16 = VK_TRUE;
     v12.shaderInt8 = VK_TRUE;
     v12.storageBuffer8BitAccess = VK_TRUE;
-    v12.storageBuffer16BitAccess = VK_TRUE;
     v12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
-    v12.uniformAndStorageBuffer16BitAccess = VK_TRUE;
     v12.shaderSubgroupExtendedTypes = VK_TRUE;
 
     VkPhysicalDeviceFeatures core = feats2.features;
-    core.shaderFloat16 = VK_TRUE;
-    core.shaderInt8 = VK_TRUE;
-    core.shaderStorageBuffer8BitAccess = VK_TRUE;
-    core.shaderStorageBuffer16BitAccess = VK_TRUE;
 
     VkDeviceQueueCreateInfo queueCreateInfo = {0};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
