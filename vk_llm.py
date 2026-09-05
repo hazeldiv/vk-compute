@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "bin" / "main.exe"
 PRUNED_VOCAB = ROOT / "pruned-vocab"
 
-is_sampling = True
+is_sampling = False
 temperature = 0.6
 rep_penalty = 1.05
 penalty_len = 64
@@ -170,6 +170,7 @@ def _main():
     decoded_ids = []
     prev = ""
     timestamps = []
+    print(ids)
     for tok in _stream_ids(llm, ids):
         timestamps.append(time.perf_counter())
         decoded_ids.append(tok)
