@@ -1,4 +1,4 @@
-﻿#include <stdio.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -269,6 +269,35 @@ static const sa_tensor* require(const safetensors* sf, const char* name) {
 
 #define VEC_FILE_MAGIC 0x56454353
 
+static int findShards(const char* dir, char out[][512], int max);
+
+static char g_weightDir[512];
+static safetensors g_shards;
+static int g_shardState = 0;
+
+static const safetensors* shardSource(void) {
+    if (g_shardState != 0) return g_shardState == 1 ? &g_shards : NULL;
+    char shardPaths[16][512];
+    const char* shardPtrs[16];
+    int shardCount = findShards(g_weightDir, shardPaths, 16);
+    if (shardCount == 0) {
+        g_shardState = -1;
+        return NULL;
+    }
+    for (int i = 0; i < shardCount; i++) shardPtrs[i] = shardPaths[i];
+    if (safetensors_open(&g_shards, shardPtrs, shardCount) != 0) {
+        g_shardState = -1;
+        return NULL;
+    }
+    g_shardState = 1;
+    return &g_shards;
+}
+
+static void shardSourceClose(void) {
+    if (g_shardState == 1) safetensors_close(&g_shards);
+    g_shardState = 0;
+}
+
 static float* loadVecRaw(const char* cacheName, int len) {
     char path[384];
     snprintf(path, sizeof(path), "%s/%s.bin", cacheDir, cacheName);
@@ -322,11 +351,12 @@ static void saveVecRaw(const char* cacheName, const float* v, int len) {
     fclose(f);
 }
 
-static buffer loadVecBuffer(session s, const safetensors* sf, const char* hfName, int len, const char* label, int layer, int addOne) {
+static buffer loadVecBuffer(session s, const char* hfName, int len, const char* label, int layer, int addOne) {
     char cacheName[80];
     snprintf(cacheName, sizeof(cacheName), "vec_%s_%d", label, layer);
     float* v = loadVecRaw(cacheName, len);
     if (v == NULL) {
+        const safetensors* sf = shardSource();
         const sa_tensor* t = require(sf, hfName);
         int64_t n = 0;
         v = safetensors_load_f32(sf, t, &n);
@@ -423,7 +453,7 @@ static float* buildQkvMatrix(const safetensors* sf, const char* qn, const char* 
     return eng;
 }
 
-static void loadEmbedLike(session s, const safetensors* sfFallback, const char* const* candPaths, int candCount, const char* hfName, const char* name, int V, int K, buffer* out) {
+static void loadEmbedLike(session s, const char* const* candPaths, int candCount, const char* hfName, const char* name, int V, int K, buffer* out) {
     char path[384];
     snprintf(path, sizeof(path), "%s/%s_%d_FP16.bin", cacheDir, name, V);
     cachedTensor* ct = tensorLoadFile(path, name, QUANT_FP16, K, V, (V + 255) / 256);
@@ -443,7 +473,7 @@ static void loadEmbedLike(session s, const safetensors* sfFallback, const char* 
                 }
             }
         }
-        const safetensors* sfUse = opened ? &sfCand : sfFallback;
+        const safetensors* sfUse = opened ? &sfCand : shardSource();
         if (t == NULL && sfUse != NULL) t = safetensors_find(sfUse, hfName);
         if (t == NULL) t = require(sfUse, hfName);
         if (t->ndim < 2 || t->shape[0] != V || t->shape[1] != K) fatal("embedding shape mismatch");
@@ -471,23 +501,18 @@ static void loadEmbedLike(session s, const safetensors* sfFallback, const char* 
     cacheRelease(ct);
 }
 
-static buffer loadConv(session s, const safetensors* sf, const char* name, int layer) {
+static buffer loadConv(session s, const char* name, int layer) {
     char cacheName[80];
     snprintf(cacheName, sizeof(cacheName), "conv_%d", layer);
-    const sa_tensor* t = sf ? safetensors_find(sf, name) : NULL;
     float* v;
     int64_t n = 0;
-    if (t != NULL) {
+    v = loadVecRawAny(cacheName, &n);
+    if (v == NULL) {
+        const safetensors* sf = shardSource();
+        const sa_tensor* t = require(sf, name);
         v = safetensors_load_f32(sf, t, &n);
         if (!v) fatal("conv read error");
         saveVecRaw(cacheName, v, (int)n);
-    } else {
-        v = loadVecRawAny(cacheName, &n);
-        if (v == NULL) {
-            char msg[320];
-            snprintf(msg, sizeof(msg), "cache miss for %s and safetensors not available", name);
-            fatal(msg);
-        }
     }
     buffer b = createBufferNamed(s.dev.device, s.dev.physicalDevice, v, sizeof(float) * n, MEMORY_VRAM, cacheName);
     countBuffer("conv", layer, b);
@@ -562,8 +587,12 @@ static int cacheComplete(const model_config* spec) {
     const model_dims* d = &spec->dims;
     char name[80];
     if (!vecCacheExists("vec_gammaFinal_-1", d->K)) return 0;
-    if (!cacheFileExists("embed", QUANT_FP16, d->K, d->vocab)) return 0;
-    if (!d->tied && !cacheFileExists("lmHead", QUANT_FP16, d->K, d->vocab)) return 0;
+    snprintf(name, sizeof(name), "embed_%d", d->vocab);
+    if (!cacheFileExists(name, QUANT_FP16, d->K, d->vocab)) return 0;
+    if (!d->tied) {
+        snprintf(name, sizeof(name), "lmHead_%d", d->vocab);
+        if (!cacheFileExists(name, QUANT_FP16, d->K, d->vocab)) return 0;
+    }
     for (int L = 0; L < d->layerCount; L++) {
         const layer* ly = &spec->layers[L];
         QuantType q = ly->attn.q;
@@ -614,18 +643,14 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     g_wbufsCount = 0;
     cacheClear();
     snprintf(cacheDir, sizeof(cacheDir), "weights/%s", spec->name);
+    snprintf(g_weightDir, sizeof(g_weightDir), "%s", weightDir);
     _mkdir("weights");
     _mkdir(cacheDir);
 
-    char shardPaths[16][512];
-    const char* shardPtrs[16];
-    int shardCount = findShards(weightDir, shardPaths, 16);
-    for (int i = 0; i < shardCount; i++) shardPtrs[i] = shardPaths[i];
-
-    safetensors sf;
-    int hasShards = 0;
-    if (shardCount > 0 && safetensors_open(&sf, shardPtrs, shardCount) == 0) {
-        hasShards = 1;
+    char shardProbe[16][512];
+    int shardCount = findShards(weightDir, shardProbe, 16);
+    if (shardCount == 0 && !cacheComplete(spec)) {
+        fatal("no safetensors found and weight cache is incomplete");
     }
 
     char headPath[512];
@@ -634,11 +659,6 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     int hasEmbed = 0;
     headPath[0] = '\0';
     embedPath[0] = '\0';
-
-    const safetensors* sfMain = hasShards ? &sf : NULL;
-    if (!hasShards && !cacheComplete(spec)) {
-        fatal("no safetensors found and weight cache is incomplete");
-    }
 
     int rotaryHalf = d->rotaryDim / 2;
     float* theta = (float*)malloc(sizeof(float) * rotaryHalf);
@@ -650,7 +670,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     registerWeightBuffer(w.theta);
     free(theta);
 
-    w.gammaFinal = loadVecBuffer(s, sfMain, "model.language_model.norm.weight", d->K, "gammaFinal", -1, 1);
+    w.gammaFinal = loadVecBuffer(s, "model.language_model.norm.weight", d->K, "gammaFinal", -1, 1);
 
     int V = d->vocab;
     w.vocab = V;
@@ -688,11 +708,11 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
     if (hasHead) headCands[headCandCount++] = headPath;
     if (hasEmbed) headCands[headCandCount++] = embedPath;
 
-    loadEmbedLike(s, sfMain, embedCands, embedCandCount, "model.language_model.embed_tokens.weight", "embed", V, d->K, &w.embed);
+    loadEmbedLike(s, embedCands, embedCandCount, "model.language_model.embed_tokens.weight", "embed", V, d->K, &w.embed);
     if (d->tied) {
         w.lmHead = w.embed;
     } else {
-        loadEmbedLike(s, sfMain, headCands, headCandCount, "lm_head.weight", "lmHead", V, d->K, &w.lmHead);
+        loadEmbedLike(s, headCands, headCandCount, "lm_head.weight", "lmHead", V, d->K, &w.lmHead);
     }
 
     char n1[256], n2[256], n3[256], n4[256];
@@ -703,9 +723,9 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
         QuantType f = ly->ffn.q;
 
         lname(n1, sizeof(n1), L, "input_layernorm.weight");
-        w.gammaIn[L] = loadVecBuffer(s, sfMain, n1, d->K, "gammaIn", L, 1);
+        w.gammaIn[L] = loadVecBuffer(s, n1, d->K, "gammaIn", L, 1);
         lname(n1, sizeof(n1), L, "post_attention_layernorm.weight");
-        w.gammaF[L] = loadVecBuffer(s, sfMain, n1, d->K, "gammaF", L, 1);
+        w.gammaF[L] = loadVecBuffer(s, n1, d->K, "gammaF", L, 1);
 
         char projName[64], outName[64];
         snprintf(projName, sizeof(projName), "proj_%d", L);
@@ -713,9 +733,9 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
 
         if (ly->attn.type == ATTENTION_FULL) {
             lname(n1, sizeof(n1), L, "self_attn.q_norm.weight");
-            w.qNorm[L] = loadVecBuffer(s, sfMain, n1, d->headDim, "qNorm", L, 1);
+            w.qNorm[L] = loadVecBuffer(s, n1, d->headDim, "qNorm", L, 1);
             lname(n1, sizeof(n1), L, "self_attn.k_norm.weight");
-            w.kNorm[L] = loadVecBuffer(s, sfMain, n1, d->headDim, "kNorm", L, 1);
+            w.kNorm[L] = loadVecBuffer(s, n1, d->headDim, "kNorm", L, 1);
 
             lname(n1, sizeof(n1), L, "self_attn.q_proj.weight");
             lname(n2, sizeof(n2), L, "self_attn.k_proj.weight");
@@ -723,7 +743,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             int cols = 0;
             float* mat = NULL;
             if (cacheGet(projName, q, d->K, d->qkvN) == NULL) {
-                mat = buildQkvMatrix(sfMain, n1, n2, n3, d->K, d->headDim, d->heads, &cols);
+                mat = buildQkvMatrix(shardSource(), n1, n2, n3, d->K, d->headDim, d->heads, &cols);
                 if (cols != d->qkvN) fatal("qkv projection width mismatch");
             }
             w.proj[L] = createTensor(s, projName, L, d->K, d->qkvN, q, 1.0f, mat);
@@ -733,19 +753,19 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             const char* on[1] = {n1};
             mat = NULL;
             if (cacheGet(outName, q, d->K, d->K) == NULL) {
-                mat = buildEngineMatrix(sfMain, on, 1, d->K, &cols);
+                mat = buildEngineMatrix(shardSource(), on, 1, d->K, &cols);
             }
             w.out[L] = createTensor(s, outName, L, d->K, d->K, q, 1.0f, mat);
             free(mat);
         } else {
             lname(n1, sizeof(n1), L, "linear_attn.conv1d.weight");
-            w.conv[L] = loadConv(s, sfMain, n1, L);
+            w.conv[L] = loadConv(s, n1, L);
             lname(n1, sizeof(n1), L, "linear_attn.A_log");
-            w.aLog[L] = loadVecBuffer(s, sfMain, n1, d->nV, "aLog", L, 0);
+            w.aLog[L] = loadVecBuffer(s, n1, d->nV, "aLog", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.dt_bias");
-            w.dtBias[L] = loadVecBuffer(s, sfMain, n1, d->nV, "dtBias", L, 0);
+            w.dtBias[L] = loadVecBuffer(s, n1, d->nV, "dtBias", L, 0);
             lname(n1, sizeof(n1), L, "linear_attn.norm.weight");
-            w.attnNorm[L] = loadVecBuffer(s, sfMain, n1, d->dim, "attnNorm", L, 0);
+            w.attnNorm[L] = loadVecBuffer(s, n1, d->dim, "attnNorm", L, 0);
 
             lname(n1, sizeof(n1), L, "linear_attn.in_proj_qkv.weight");
             lname(n2, sizeof(n2), L, "linear_attn.in_proj_z.weight");
@@ -755,7 +775,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             int cols = 0;
             float* mat = NULL;
             if (cacheGet(projName, q, d->K, d->projN) == NULL) {
-                mat = buildEngineMatrix(sfMain, pn, 4, d->K, &cols);
+                mat = buildEngineMatrix(shardSource(), pn, 4, d->K, &cols);
                 if (cols != d->projN) fatal("delta projection width mismatch");
             }
             w.proj[L] = createTensor(s, projName, L, d->K, d->projN, q, 1.0f, mat);
@@ -765,7 +785,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             const char* on[1] = {n1};
             mat = NULL;
             if (cacheGet(outName, q, d->K, d->K) == NULL) {
-                mat = buildEngineMatrix(sfMain, on, 1, d->K, &cols);
+                mat = buildEngineMatrix(shardSource(), on, 1, d->K, &cols);
             }
             w.out[L] = createTensor(s, outName, L, d->K, d->K, q, 1.0f, mat);
             free(mat);
@@ -782,7 +802,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n1, sizeof(n1), L, "mlp.gate_proj.weight");
             float* mat = NULL;
             if (cacheGet(gateName, f, d->K, d->ffnN) == NULL) {
-                mat = buildEngineMatrix(sfMain, gn, 1, d->K, &cols);
+                mat = buildEngineMatrix(shardSource(), gn, 1, d->K, &cols);
                 if (cols != d->ffnN) fatal("gate width mismatch");
             }
             w.gate[L] = createTensor(s, gateName, L, d->K, d->ffnN, f, 1.0f, mat);
@@ -791,7 +811,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n1, sizeof(n1), L, "mlp.up_proj.weight");
             mat = NULL;
             if (cacheGet(upName, f, d->K, d->ffnN) == NULL) {
-                mat = buildEngineMatrix(sfMain, gn, 1, d->K, &cols);
+                mat = buildEngineMatrix(shardSource(), gn, 1, d->K, &cols);
             }
             w.up[L] = createTensor(s, upName, L, d->K, d->ffnN, f, 1.0f, mat);
             free(mat);
@@ -799,7 +819,7 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
             lname(n1, sizeof(n1), L, "mlp.down_proj.weight");
             mat = NULL;
             if (cacheGet(downName, f, d->ffnN, d->K) == NULL) {
-                mat = buildEngineMatrix(sfMain, gn, 1, d->ffnN, &cols);
+                mat = buildEngineMatrix(shardSource(), gn, 1, d->ffnN, &cols);
                 if (cols != d->K) fatal("down projection width mismatch");
             }
             w.down[L] = createTensor(s, downName, L, d->ffnN, d->K, f, 1.0f, mat);
@@ -807,7 +827,8 @@ model_weights createWeights(session s, const model_config* spec, const char* wei
         }
     }
 
-    if (hasShards) safetensors_close(&sf);
+    if (g_shardState == 0) fprintf(stderr, "weights: resolved fully from cache\n");
+    shardSourceClose();
     cacheClear();
 
     createTransferAndCopy(s.dev.device, s.dev.queue, g_wbufs, g_wbufsCount);
