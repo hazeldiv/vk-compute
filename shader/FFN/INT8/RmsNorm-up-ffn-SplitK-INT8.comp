@@ -89,7 +89,7 @@ void main() {
 
     barrier();
     if (chunk < numTiles) {
-        ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+        for (uint i = 0; i < gl_NumSubgroups; i++) ztot += sub_sums[i];
     }
 
     uint blockCount = 0;
@@ -117,7 +117,7 @@ void main() {
         }
         barrier();
         if (nextTile < numTiles) {
-            ztot += sub_sums[0] + sub_sums[1] + sub_sums[2] + sub_sums[3];
+            for (uint i = 0; i < gl_NumSubgroups; i++) ztot += sub_sums[i];
         }
         blockCount++;
 

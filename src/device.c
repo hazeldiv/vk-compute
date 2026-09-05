@@ -27,6 +27,31 @@ device createDevice() {
         exit(EXIT_FAILURE);
     }
 
+    VkPhysicalDeviceVulkan11Features v11 = {0};
+    v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    VkPhysicalDeviceVulkan12Features v12 = {0};
+    v12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    v12.pNext = &v11;
+    VkPhysicalDeviceFeatures2 feats2 = {0};
+    feats2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    feats2.pNext = &v12;
+    vkGetPhysicalDeviceFeatures2(dev.physicalDevice, &feats2);
+
+    VkPhysicalDeviceVulkan11Features enable11 = {0};
+    enable11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    VkPhysicalDeviceVulkan12Features enable12 = {0};
+    enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    enable12.pNext = &enable11;
+
+    if (v11.shaderDrawParameters) enable11.shaderDrawParameters = VK_TRUE;
+    if (v11.storageBuffer16BitAccess) enable11.storageBuffer16BitAccess = VK_TRUE;
+    if (v11.uniformAndStorageBuffer16BitAccess) enable11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
+    if (v12.shaderFloat16) enable12.shaderFloat16 = VK_TRUE;
+    if (v12.shaderInt8) enable12.shaderInt8 = VK_TRUE;
+    if (v12.storageBuffer8BitAccess) enable12.storageBuffer8BitAccess = VK_TRUE;
+    if (v12.uniformAndStorageBuffer8BitAccess) enable12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
+    if (v12.shaderSubgroupExtendedTypes) enable12.shaderSubgroupExtendedTypes = VK_TRUE;
+
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {0};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -36,6 +61,7 @@ device createDevice() {
 
     VkDeviceCreateInfo deviceCreateInfo = {0};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCreateInfo.pNext = &enable12;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
 
