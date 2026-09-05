@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parent
 BACKEND = ROOT / "bin" / "main.exe"
 PRUNED_VOCAB = ROOT / "pruned-vocab"
 
-is_sampling = False
-temperature = 0.6
+is_sampling = True
+temperature = 1
 rep_penalty = 1.05
 penalty_len = 64
 top_k = 20

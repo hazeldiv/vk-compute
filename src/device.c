@@ -3,13 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static void requireFeature(VkBool32 supported, const char* name) {
-    if (!supported) {
-        fprintf(stderr, "Error: required device feature not supported: %s\n", name);
-        exit(EXIT_FAILURE);
-    }
-}
-
 device createDevice() {
     device dev = {0};
 
@@ -34,8 +27,6 @@ device createDevice() {
         exit(EXIT_FAILURE);
     }
 
-    float queuePriority = 1.0f;
-
     VkPhysicalDeviceVulkan11Features v11 = {0};
     v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     VkPhysicalDeviceVulkan12Features v12 = {0};
@@ -46,26 +37,22 @@ device createDevice() {
     feats2.pNext = &v12;
     vkGetPhysicalDeviceFeatures2(dev.physicalDevice, &feats2);
 
-    requireFeature(v11.shaderDrawParameters, "shaderDrawParameters");
-    requireFeature(v11.storageBuffer16BitAccess, "storageBuffer16BitAccess");
-    requireFeature(v11.uniformAndStorageBuffer16BitAccess, "uniformAndStorageBuffer16BitAccess");
-    requireFeature(v12.shaderFloat16, "shaderFloat16");
-    requireFeature(v12.shaderInt8, "shaderInt8");
-    requireFeature(v12.storageBuffer8BitAccess, "storageBuffer8BitAccess");
-    requireFeature(v12.uniformAndStorageBuffer8BitAccess, "uniformAndStorageBuffer8BitAccess");
-    requireFeature(v12.shaderSubgroupExtendedTypes, "shaderSubgroupExtendedTypes");
+    VkPhysicalDeviceVulkan11Features enable11 = {0};
+    enable11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    VkPhysicalDeviceVulkan12Features enable12 = {0};
+    enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    enable12.pNext = &enable11;
 
-    v11.shaderDrawParameters = VK_TRUE;
-    v11.storageBuffer16BitAccess = VK_TRUE;
-    v11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
-    v12.shaderFloat16 = VK_TRUE;
-    v12.shaderInt8 = VK_TRUE;
-    v12.storageBuffer8BitAccess = VK_TRUE;
-    v12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
-    v12.shaderSubgroupExtendedTypes = VK_TRUE;
+    if (v11.shaderDrawParameters) enable11.shaderDrawParameters = VK_TRUE;
+    if (v11.storageBuffer16BitAccess) enable11.storageBuffer16BitAccess = VK_TRUE;
+    if (v11.uniformAndStorageBuffer16BitAccess) enable11.uniformAndStorageBuffer16BitAccess = VK_TRUE;
+    if (v12.shaderFloat16) enable12.shaderFloat16 = VK_TRUE;
+    if (v12.shaderInt8) enable12.shaderInt8 = VK_TRUE;
+    if (v12.storageBuffer8BitAccess) enable12.storageBuffer8BitAccess = VK_TRUE;
+    if (v12.uniformAndStorageBuffer8BitAccess) enable12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
+    if (v12.shaderSubgroupExtendedTypes) enable12.shaderSubgroupExtendedTypes = VK_TRUE;
 
-    VkPhysicalDeviceFeatures core = feats2.features;
-
+    float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {0};
     queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
     queueCreateInfo.queueFamilyIndex = 0;
@@ -74,10 +61,9 @@ device createDevice() {
 
     VkDeviceCreateInfo deviceCreateInfo = {0};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceCreateInfo.pNext = &v12;
+    deviceCreateInfo.pNext = &enable12;
     deviceCreateInfo.queueCreateInfoCount = 1;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
-    deviceCreateInfo.pEnabledFeatures = &core;
 
     if (vkCreateDevice(dev.physicalDevice, &deviceCreateInfo, NULL, &dev.device) != VK_SUCCESS) {
         fprintf(stderr, "Error: Failed to create logical device!\n");
